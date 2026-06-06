@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import json
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,29 @@ def _enable_kb_journeys(hermes_home: Path) -> None:
     )
 
 
+def _load_plugin_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo = _hermes_repo()
+    monkeypatch.syspath_prepend(str(repo))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    spec = importlib.util.spec_from_file_location("kb_journeys_external_under_test", ROOT / "__init__.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeContext:
+    def __init__(self, results):
+        self.results = {key: list(value) for key, value in results.items()}
+        self.calls = []
+
+    def dispatch_tool(self, tool_name, args):
+        self.calls.append((tool_name, args))
+        values = self.results.get(tool_name)
+        result = values.pop(0) if values else {"error": f"missing {tool_name}"}
+        return json.dumps(result)
+
+
 def test_user_install_shadows_bundled_kb_journeys(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     user_plugin = hermes_home / "plugins" / "kb_journeys"
@@ -73,3 +98,67 @@ def test_bundled_fallback_loads_when_user_plugin_absent(tmp_path, monkeypatch):
     assert loaded.enabled is True
     assert loaded.manifest.source == "bundled"
     assert "plugins/kb_journeys" in loaded.manifest.path
+
+
+def test_natural_language_intents_route_to_native_kb_commands(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+
+    assert plugin._natural_kb_command_from_text("Review proposals") == ("kbqueue", "")
+    assert plugin._natural_kb_command_from_text("Do a prod KB sync") == ("kbrun", "sync confirm")
+    assert plugin._natural_kb_command_from_text("How is the KB sync going?") is None
+
+
+def test_bare_review_reply_confirms_with_preview_lease(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb-engine-prod")
+    state = {
+        "proposal_ids": ["act_crowdstrike"],
+        "title": "CrowdStrike",
+        "choices": ["approve", "reject", "archive", "detail", "skip"],
+    }
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_queue_decision_preview": [
+                {
+                    "result": {
+                        "status": "preview",
+                        "ok": True,
+                        "preview_lease": {
+                            "preview_lease_id": "lease_crowdstrike",
+                            "review_session_id": "session_crowdstrike",
+                            "cursor_id": "cursor_crowdstrike",
+                            "decision_scope": "explicit_ids",
+                            "proposal_ids": ["act_crowdstrike"],
+                        },
+                        "review_session": {
+                            "review_session_id": "session_crowdstrike",
+                            "cursor": {"cursor_id": "cursor_crowdstrike"},
+                            "decision_scope": "explicit_ids",
+                        },
+                    }
+                }
+            ],
+            "mcp_kb_engine_prod_queue_batch_decide_confirmed": [
+                {"result": {"status": "applied", "ok": True}},
+            ],
+        }
+    )
+
+    card = plugin._render_iterative_queue_reply_decision(
+        ctx,
+        "kb_engine_prod",
+        session_id="telegram-session",
+        state=state,
+        decision="reject",
+    )
+
+    assert "Queue Reject Applied" in card["text"]
+    assert [call[0] for call in ctx.calls] == [
+        "mcp_kb_engine_prod_queue_decision_preview",
+        "mcp_kb_engine_prod_queue_batch_decide_confirmed",
+    ]
+    confirm_args = ctx.calls[-1][1]
+    assert confirm_args["proposal_ids"] == ["act_crowdstrike"]
+    assert confirm_args["decision"] == "reject"
+    assert confirm_args["session_id"] == "session_crowdstrike"
+    assert confirm_args["user_confirmation"]["preview_lease"]["preview_lease_id"] == "lease_crowdstrike"
