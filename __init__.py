@@ -177,6 +177,43 @@ def _command_args_from_text(text: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _natural_kb_command_from_text(text: str) -> tuple[str, str] | None:
+    """Map high-confidence Telegram prose intents onto native KB cards.
+
+    This keeps common mobile requests out of the generic LLM path so Hermes
+    renders the same action cards whether the operator says "/kb queue" or
+    "review proposals".
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith("/"):
+        return None
+    lowered = re.sub(r"\s+", " ", stripped.lower()).strip(" .!?")
+    if not lowered:
+        return None
+
+    questionish = re.search(r"\b(status|progress|done|finished|how(?:'s| is)|what happened|why)\b", lowered)
+    syncish = (
+        re.search(r"\b(?:do|run|start|kick off|launch)\b.*\b(?:kb|knowledge base|prod(?:uction)? kb|full kb)\b.*\bsync\b", lowered)
+        or re.search(r"\b(?:kb|knowledge base|prod(?:uction)? kb|full kb)\b.*\bsync\b", lowered)
+        or re.search(r"\bsync\b.*\b(?:kb|knowledge base)\b", lowered)
+    )
+    if syncish and not questionish:
+        return "kbrun", "sync confirm"
+
+    if lowered in {"dashboard review", "kb dashboard", "kb review dashboard", "kb cockpit"}:
+        return "kb", ""
+
+    proposal_review = (
+        re.search(r"\b(?:review|go through|work through|show|open|start)\b.*\bproposal(?:s| queue)?\b", lowered)
+        or re.search(r"\bproposal queue\b", lowered)
+        or lowered in {"review proposals", "review proposal", "proposals", "queue review"}
+    )
+    if proposal_review:
+        return "kbqueue", ""
+
+    return None
+
+
 def _short(value: Any, default: str = "unknown") -> str:
     if value is None:
         return default
@@ -2225,14 +2262,15 @@ def _queue_descriptor_actions(
         actions.append(
             KbAction(
                 label=f"Preview {label}" if preview_label_prefix else label,
-                action_id=f"{action_id}.preview",
-                handler=lambda callback_ctx, d=descriptor_copy: _render_queue_descriptor_preview(
+                action_id=f"{action_id}.apply",
+                handler=lambda callback_ctx, d=descriptor_copy: _render_queue_descriptor_confirm(
                     ctx,
                     target,
                     item,
                     index=index,
                     descriptor=d,
                     callback_ctx=callback_ctx,
+                    preview_metadata=None,
                 ),
                 metadata={
                     "target_kind": "proposal_queue",
@@ -2240,6 +2278,7 @@ def _queue_descriptor_actions(
                     "decision": decision,
                     "preview_tool": preview_tool,
                     "confirm_tool": confirm_tool,
+                    "preview_internal": True,
                 },
             )
         )
@@ -3454,10 +3493,10 @@ def scoped_mcp_tool_allowlist_for_message(
 ) -> set[str]:
     """Return exact MCP tools allowed by a matched pending queue action.
 
-    This is the stateful bridge between Telegram action cards and the generic
-    MCP posture filter.  A bare reply such as ``Reject`` should stay preview
-    only.  Confirmed queue tools are reserved for explicit confirm commands or
-    action-card confirmation gestures.
+    This is the stateful bridge between Telegram review cards and the generic
+    MCP posture filter.  A bare reply such as ``Reject`` is itself an explicit
+    operator decision when it follows an active one-item KB review card; Hermes
+    may preview internally and then confirm exactly that scoped item.
     """
     decision = _bare_queue_reply_decision(message)
     if decision not in QUEUE_REPLY_TOOL_DECISIONS:
@@ -3474,7 +3513,10 @@ def scoped_mcp_tool_allowlist_for_message(
         if choices and decision not in choices:
             return set()
     mcp_target = target or _mcp_target()
-    return {_mcp_tool_name(mcp_target, "queue.decision_preview")}
+    return {
+        _mcp_tool_name(mcp_target, "queue.decision_preview"),
+        _mcp_tool_name(mcp_target, "queue.batch_decide_confirmed"),
+    }
 
 
 def _session_id_for_queue_reply_state(session_store: Any, source: Any) -> str:
@@ -3656,11 +3698,19 @@ def _render_iterative_queue_reply_decision(
             "Reply: " + ", ".join(state.get("choices") or sorted(QUEUE_REPLY_DECISIONS)) + ".",
         ]
         return {"title": "KB Queue", "text": "\n".join(lines), "actions": []}
+    if decision == "skip":
+        _clear_iterative_queue_reply_state(session_id)
+        return {
+            "title": "KB Queue",
+            "text": f"Skipped locally: {title}\nNext: /kb queue",
+            "actions": [],
+        }
     if decision not in QUEUE_REPLY_TOOL_DECISIONS:
         return {"title": "KB Queue", "text": "That queue reply is not supported. Use /kb queue to refresh.", "actions": []}
     actor = "telegram:operator"
     source = "Hermes Telegram iterative queue"
     preview_tool = _mcp_tool_name(target, "queue.decision_preview")
+    confirmed_tool = _mcp_tool_name(target, "queue.batch_decide_confirmed")
     preview_payload = _result_payload(
         ctx.dispatch_tool(
             preview_tool,
@@ -3673,10 +3723,39 @@ def _render_iterative_queue_reply_decision(
             },
         )
     )
-    text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
-    if _preview_allows_confirmation(preview_payload):
-        text += f"\nTo apply: /kb queue {decision} 1 confirm"
-    return {"title": "KB Queue", "text": text, "actions": []}
+    if not _preview_allows_confirmation(preview_payload):
+        return {"title": "KB Queue", "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection), "actions": []}
+    preview_metadata = _queue_preview_metadata(preview_payload)
+    confirmed_args = {
+        "proposal_ids": proposal_ids,
+        "decision": decision,
+        "decision_scope": "explicit_ids",
+        "candidate_count": len(proposal_ids),
+        "displayed_count": len(proposal_ids),
+        "actor": actor,
+        "source": source,
+        "session_id": _review_session_id(preview_metadata) or f"telegram-kb-reply-{int(time.time())}",
+        "user_confirmation": {
+            "confirmed": True,
+            "surface": "telegram",
+            "action": f"queue.{decision}",
+            "preview_required": True,
+            "confirmation_text": f"Telegram reply: {decision}",
+            "proposal_ids": proposal_ids,
+        },
+        "note": f"Confirmed from Telegram iterative queue reply for {title}",
+    }
+    _apply_queue_preview_metadata(confirmed_args, preview_metadata)
+    _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], preview_metadata)
+    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
+    packet_card = _render_supported_result_packet(confirmed_payload, ctx=ctx, target=target)
+    if packet_card is not None:
+        return packet_card
+    return {
+        "title": "KB Queue",
+        "text": _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids),
+        "actions": [],
+    }
 
 
 def _render_visible_scope_all_decision(
@@ -3704,6 +3783,7 @@ def _render_visible_scope_all_decision(
     actor = "telegram:operator"
     source = "Hermes Telegram visible queue"
     preview_tool = _mcp_tool_name(target, "queue.decision_preview")
+    confirmed_tool = _mcp_tool_name(target, "queue.batch_decide_confirmed")
     candidate_count = _queue_count_value(visible_record.get("candidate_count"), len(selection))
     displayed_count = _queue_count_value(visible_record.get("displayed_count"), len(selection))
     preview_payload = _result_payload(
@@ -3721,19 +3801,42 @@ def _render_visible_scope_all_decision(
             },
         )
     )
-    text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
-    text += "\nScope: visible Telegram queue window only, not the full pending queue."
-    if _preview_allows_confirmation(preview_payload):
-        indices = [index for index, _ in selection]
-        _store_queue_text_preview_scope(
-            session_id,
-            decision=decision,
-            indices=indices,
-            selection=selection,
-            preview_payload=preview_payload,
-        )
-        text += f"\nTo apply: /kb queue {decision} {_format_indices(indices)} confirm"
-    return {"title": "KB Queue", "text": text, "actions": []}
+    if not _preview_allows_confirmation(preview_payload):
+        text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
+        text += "\nScope: visible Telegram queue window only, not the full pending queue."
+        return {"title": "KB Queue", "text": text, "actions": []}
+    preview_metadata = _queue_preview_metadata(preview_payload)
+    confirmed_args = {
+        "proposal_ids": proposal_ids,
+        "decision": decision,
+        "decision_scope": "all_viewed",
+        "candidate_count": candidate_count,
+        "displayed_count": displayed_count,
+        "actor": actor,
+        "source": source,
+        "session_id": _review_session_id(preview_metadata) or f"telegram-kb-visible-{int(time.time())}",
+        "user_confirmation": {
+            "confirmed": True,
+            "surface": "telegram",
+            "action": f"queue.{decision}.visible",
+            "preview_required": True,
+            "confirmation_text": f"Telegram visible-scope reply: {decision} all",
+            "proposal_ids": proposal_ids,
+            "decision_scope": "all_viewed",
+        },
+        "note": f"Confirmed from Telegram visible queue scope for {len(selection)} shown item(s)",
+    }
+    _apply_queue_preview_metadata(confirmed_args, preview_metadata)
+    _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], preview_metadata)
+    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
+    packet_card = _render_supported_result_packet(confirmed_payload, ctx=ctx, target=target)
+    if packet_card is not None:
+        return packet_card
+    return {
+        "title": "KB Queue",
+        "text": _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids),
+        "actions": [],
+    }
 
 
 def _queue_summary_payload(
@@ -5392,6 +5495,11 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
             return None
         text = getattr(event, "text", "")
         command = _command_from_text(text)
+        natural_command: tuple[str, str] | None = None
+        if command is None:
+            natural_command = _natural_kb_command_from_text(text)
+            if natural_command is not None:
+                command = natural_command[0]
         bare_decision = _bare_queue_reply_decision(text)
         visible_all_decision = _visible_scope_all_decision(text)
         if command is None and not bare_decision and not visible_all_decision:
@@ -5423,7 +5531,7 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 decision=bare_decision,
             )
         else:
-            args = _command_args_from_text(text)
+            args = natural_command[1] if natural_command is not None else _command_args_from_text(text)
             card = _card_for_command(
                 ctx,
                 command,
