@@ -100,15 +100,20 @@ def test_bundled_fallback_loads_when_user_plugin_absent(tmp_path, monkeypatch):
     assert "plugins/kb_journeys" in loaded.manifest.path
 
 
-def test_natural_language_intents_route_to_native_kb_commands(tmp_path, monkeypatch):
+def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
 
-    assert plugin._natural_kb_command_from_text("Review proposals") == ("kbqueue", "")
-    assert plugin._natural_kb_command_from_text("Do a prod KB sync") == ("kbrun", "sync confirm")
-    assert plugin._natural_kb_command_from_text("How is the KB sync going?") is None
+    card = plugin._kb_command_help()
+    text = card["text"]
+
+    assert "/kb status" in text
+    assert "/kb sync" in text
+    assert "/kb review" in text
+    assert "/kb queue" not in text
+    assert "/kb publish" not in text
 
 
-def test_bare_review_reply_confirms_with_preview_lease(tmp_path, monkeypatch):
+def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb-engine-prod")
     state = {
@@ -152,13 +157,9 @@ def test_bare_review_reply_confirms_with_preview_lease(tmp_path, monkeypatch):
         decision="reject",
     )
 
-    assert "Queue Reject Applied" in card["text"]
-    assert [call[0] for call in ctx.calls] == [
-        "mcp_kb_engine_prod_queue_decision_preview",
-        "mcp_kb_engine_prod_queue_batch_decide_confirmed",
-    ]
-    confirm_args = ctx.calls[-1][1]
-    assert confirm_args["proposal_ids"] == ["act_crowdstrike"]
-    assert confirm_args["decision"] == "reject"
-    assert confirm_args["session_id"] == "session_crowdstrike"
-    assert confirm_args["user_confirmation"]["preview_lease"]["preview_lease_id"] == "lease_crowdstrike"
+    assert "Queue reject preview" in card["text"]
+    assert "To apply: /kb queue reject 1 confirm" in card["text"]
+    assert [call[0] for call in ctx.calls] == ["mcp_kb_engine_prod_queue_decision_preview"]
+    preview_args = ctx.calls[-1][1]
+    assert preview_args["proposal_ids"] == ["act_crowdstrike"]
+    assert preview_args["decision"] == "reject"

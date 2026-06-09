@@ -1,7 +1,8 @@
 """Telegram KB journey renderer plugin.
 
 Intercepts a small set of Telegram slash commands and renders concise,
-read-only KB status summaries from the configured KB MCP target.
+read-only KB status, sync, and review receipts from the configured KB MCP
+target.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MCP_TARGET = "kb_engine_prod"
 MENU_COMMANDS = {"kb"}
-LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun"}
+LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun", "kbsync"}
 SUPPORTED_COMMANDS = MENU_COMMANDS
 KB_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 QUEUE_REPLY_DECISIONS = {"approve", "reject", "archive", "skip", "complete", "keep", "demote", "detail"}
@@ -30,17 +31,29 @@ QUEUE_REPLY_TOOL_DECISIONS = {"approve", "reject", "archive", "skip", "complete"
 QUEUE_REPLY_STATE_TTL_SECONDS = 15 * 60
 QUEUE_SCOPE_STATE_TTL_SECONDS = 15 * 60
 MEETING_HANDOFF_STATE_TTL_SECONDS = 15 * 60
+SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
+SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
+    "semantic_write_receipt",
+    "semantic_write_through_receipt",
+    "semantic_write_through.receipt",
+    "semantic_write.receipt",
+    "kb_semantic_write_receipt",
+}
 SUPPORTED_RESULT_PACKET_TYPES = {
     "durable_graph_validation",
+    "lifecycle_proposal_draft.packet",
+    "lifecycle_review.packet",
     "publication_observation",
     "request.receipt",
     "report_admission_receipt",
+    *SEMANTIC_WRITE_RECEIPT_PACKET_TYPES,
 }
 DESCRIPTOR_READONLY_TARGET_KINDS = {
     "closeout",
     "component",
     "dashboard_surface",
     "event",
+    "lifecycle_candidate",
     "object_graph",
     "proposal_queue",
     "publication",
@@ -51,7 +64,9 @@ DESCRIPTOR_READONLY_TARGET_KINDS = {
     "sync",
     "todo",
 }
-DESCRIPTOR_WRITE_TARGET_KINDS = DESCRIPTOR_READONLY_TARGET_KINDS.difference({"dashboard_surface", "run"})
+DESCRIPTOR_WRITE_TARGET_KINDS = DESCRIPTOR_READONLY_TARGET_KINDS.difference(
+    {"dashboard_surface", "lifecycle_candidate", "run"}
+)
 
 
 def _sanitize_component(value: str) -> str:
@@ -82,6 +97,12 @@ def _meeting_handoff_state_path():
     from hermes_constants import get_hermes_home
 
     return get_hermes_home() / "state" / "kb_meeting_handoff_state.json"
+
+
+def _sync_preview_state_path():
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "state" / "kb_sync_preview_state.json"
 
 
 def _load_queue_reply_states() -> dict[str, Any]:
@@ -129,6 +150,15 @@ def _load_meeting_handoff_states() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _load_sync_preview_states() -> dict[str, Any]:
+    path = _sync_preview_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _save_meeting_handoff_states(states: dict[str, Any]) -> None:
     path = _meeting_handoff_state_path()
     try:
@@ -138,6 +168,15 @@ def _save_meeting_handoff_states(states: dict[str, Any]) -> None:
         logger.debug("kb_journeys: failed to persist meeting handoff state", exc_info=True)
 
 
+def _save_sync_preview_states(states: dict[str, Any]) -> None:
+    path = _sync_preview_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(states, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        logger.debug("kb_journeys: failed to persist sync preview state", exc_info=True)
+
+
 def _clear_meeting_handoff_state(session_id: str) -> None:
     if not session_id:
         return
@@ -145,6 +184,15 @@ def _clear_meeting_handoff_state(session_id: str) -> None:
     if session_id in states:
         states.pop(session_id, None)
         _save_meeting_handoff_states(states)
+
+
+def _clear_sync_preview_state(session_id: str) -> None:
+    if not session_id:
+        return
+    states = _load_sync_preview_states()
+    if session_id in states:
+        states.pop(session_id, None)
+        _save_sync_preview_states(states)
 
 
 def _clear_iterative_queue_reply_state(session_id: str) -> None:
@@ -175,43 +223,6 @@ def _command_args_from_text(text: str) -> str:
         return ""
     parts = stripped.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
-
-
-def _natural_kb_command_from_text(text: str) -> tuple[str, str] | None:
-    """Map high-confidence Telegram prose intents onto native KB cards.
-
-    This keeps common mobile requests out of the generic LLM path so Hermes
-    renders the same action cards whether the operator says "/kb queue" or
-    "review proposals".
-    """
-    stripped = (text or "").strip()
-    if not stripped or stripped.startswith("/"):
-        return None
-    lowered = re.sub(r"\s+", " ", stripped.lower()).strip(" .!?")
-    if not lowered:
-        return None
-
-    questionish = re.search(r"\b(status|progress|done|finished|how(?:'s| is)|what happened|why)\b", lowered)
-    syncish = (
-        re.search(r"\b(?:do|run|start|kick off|launch)\b.*\b(?:kb|knowledge base|prod(?:uction)? kb|full kb)\b.*\bsync\b", lowered)
-        or re.search(r"\b(?:kb|knowledge base|prod(?:uction)? kb|full kb)\b.*\bsync\b", lowered)
-        or re.search(r"\bsync\b.*\b(?:kb|knowledge base)\b", lowered)
-    )
-    if syncish and not questionish:
-        return "kbrun", "sync confirm"
-
-    if lowered in {"dashboard review", "kb dashboard", "kb review dashboard", "kb cockpit"}:
-        return "kb", ""
-
-    proposal_review = (
-        re.search(r"\b(?:review|go through|work through|show|open|start)\b.*\bproposal(?:s| queue)?\b", lowered)
-        or re.search(r"\bproposal queue\b", lowered)
-        or lowered in {"review proposals", "review proposal", "proposals", "queue review"}
-    )
-    if proposal_review:
-        return "kbqueue", ""
-
-    return None
 
 
 def _short(value: Any, default: str = "unknown") -> str:
@@ -255,6 +266,44 @@ def _request_envelope(payload: Any) -> dict[str, Any]:
     return request if isinstance(request, dict) else {}
 
 
+def _dedupe_list(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _object_reference_lines(*packets: dict[str, Any], include_report_ref: bool = False) -> list[str]:
+    object_family = ""
+    report_refs: list[str] = []
+    related_refs: list[str] = []
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        if not object_family:
+            object_family = _short(packet.get("object_family"), "")
+        if include_report_ref:
+            report_refs.extend(_id_list(packet.get("report_ref")))
+        report_refs.extend(_id_list(packet.get("report_refs")))
+        related_refs.extend(_id_list(packet.get("related_object_refs")))
+        related_refs.extend(_id_list(packet.get("related_objects")))
+    lines: list[str] = []
+    if object_family:
+        lines.append(f"Object family: {object_family}")
+    report_refs = _dedupe_list(report_refs)
+    related_refs = _dedupe_list(related_refs)
+    if report_refs:
+        lines.append(_id_line("Report refs", report_refs))
+    if related_refs:
+        lines.append(_id_line("Related objects", related_refs))
+    return lines
+
+
 def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
     receipt = _request_receipt(payload)
     outcome = _request_outcome(payload)
@@ -281,6 +330,7 @@ def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
         family = _short(outcome.get("family") or outcome.get("status"), "")
         if family:
             lines.append(f"Outcome: {family}")
+    lines.extend(_object_reference_lines(outcome, receipt))
     if include_request and request:
         kind = _short(request.get("kind") or request.get("request_kind"), "")
         route = _short(request.get("route"), "")
@@ -345,6 +395,7 @@ def _render_report_admission_packet(packet: dict[str, Any]) -> dict[str, Any]:
         lines.append(f"Event: {event_ref}" + (f" ({event_role})" if event_role else ""))
     if situation_ref:
         lines.append(f"Situation: {situation_ref}")
+    lines.extend(_object_reference_lines(packet, include_report_ref=True))
     if transfers:
         lines.append(f"Source files: {len(transfers)}")
     if changed_paths:
@@ -377,6 +428,266 @@ def _render_graph_validation_packet(packet: dict[str, Any]) -> dict[str, Any]:
     return {"title": "KB Graph Validation", "text": "\n".join(lines), "actions": []}
 
 
+def _lifecycle_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if not isinstance(value, list):
+        return []
+    values: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            found = ""
+            for key in ("ref", "id", "target_ref", "path", "title", "summary", "message"):
+                found = _short(item.get(key), "")
+                if found:
+                    break
+            if found:
+                values.append(found)
+        else:
+            text = str(item).strip()
+            if text:
+                values.append(text)
+    return _dedupe_list(values)
+
+
+def _lifecycle_signal_lines(signal: Any) -> list[str]:
+    if not isinstance(signal, dict):
+        return []
+    lines: list[str] = []
+    source = _short(signal.get("source"), "")
+    observed = _short(signal.get("observed_at"), "")
+    if source or observed:
+        parts = []
+        if source:
+            parts.append(f"Source: {source}")
+        if observed:
+            parts.append(f"Observed: {observed}")
+        lines.append("   " + " · ".join(parts))
+    kind = _short(signal.get("kind"), "")
+    polarity = _short(signal.get("polarity"), "")
+    confidence = _short(signal.get("confidence"), "")
+    signal_parts = [part for part in (kind, polarity) if part]
+    if signal_parts or confidence:
+        suffix = f" ({confidence})" if confidence else ""
+        lines.append(f"   Signal: {' / '.join(signal_parts) or 'lifecycle'}{suffix}")
+    evidence_refs = _dedupe_list([
+        _short(signal.get("source_ref"), ""),
+        *_lifecycle_values(signal.get("evidence_refs")),
+    ])
+    if evidence_refs:
+        lines.append(f"   Signal evidence refs: {len(evidence_refs)}")
+        lines.append(_id_line("   Signal evidence", evidence_refs, limit=3))
+    summary = _short(signal.get("summary"), "")
+    if summary:
+        lines.append(f"   Signal summary: {_clip(summary, 220)}")
+    return lines
+
+
+def _is_lifecycle_proposal_descriptor(descriptor: dict[str, Any]) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    if descriptor.get("dashboard_owned_write") is True:
+        return False
+    preview_tool = str(descriptor.get("preview_tool") or descriptor.get("method") or "").strip()
+    action_id = str(descriptor.get("action_id") or "").strip()
+    target_kind = str(descriptor.get("target_kind") or "").strip()
+    return (
+        target_kind == "lifecycle_candidate"
+        or action_id.startswith("lifecycle.")
+        or preview_tool.startswith("lifecycle.proposal_")
+    ) and bool(preview_tool)
+
+
+def _lifecycle_candidate_descriptor(candidate: dict[str, Any]) -> dict[str, Any]:
+    descriptor = candidate.get("action_descriptor")
+    if isinstance(descriptor, dict) and _is_lifecycle_proposal_descriptor(descriptor):
+        return dict(descriptor)
+    descriptors = candidate.get("action_descriptors")
+    if isinstance(descriptors, list):
+        for item in descriptors:
+            if isinstance(item, dict) and _is_lifecycle_proposal_descriptor(item):
+                return dict(item)
+    return {}
+
+
+def _render_lifecycle_proposal_draft_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    workflow = _short(packet.get("workflow"), "Lifecycle Review")
+    stewardship = _short(packet.get("stewardship_area"), "")
+    proposals = packet.get("proposals") if isinstance(packet.get("proposals"), list) else []
+    proposal_count = packet.get("proposal_count")
+    if proposal_count is None:
+        proposal_count = len(proposals)
+    lines = [
+        "Lifecycle Proposal Draft",
+        f"Workflow: {workflow}",
+    ]
+    if stewardship:
+        lines.append(f"Stewardship: {stewardship}")
+    if packet.get("mutation_performed") is not None:
+        lines.append("Mutation: " + ("performed" if packet.get("mutation_performed") else "none"))
+    lines.append(f"Proposals: {_short(proposal_count, '0')}")
+    for index, proposal in enumerate(proposals[:5], start=1):
+        if not isinstance(proposal, dict):
+            lines.append(f"{index}. {_clip(proposal, 180)}")
+            continue
+        title = _short(
+            proposal.get("proposal_id")
+            or proposal.get("id")
+            or proposal.get("target_ref")
+            or proposal.get("title"),
+            "proposal",
+        )
+        lines.append(f"{index}. {title}")
+        action = _short(proposal.get("recommended_action") or proposal.get("action"), "")
+        target_ref = _short(proposal.get("target_ref"), "")
+        summary = _short(proposal.get("summary") or proposal.get("preview") or proposal.get("description"), "")
+        if action:
+            lines.append(f"   Action: {action}")
+        if target_ref:
+            lines.append(f"   Target: {target_ref}")
+        if summary:
+            lines.append(f"   Summary: {_clip(summary, 180)}")
+    if len(proposals) > 5:
+        lines.append(f"... {len(proposals) - 5} more proposal(s)")
+    lines.append("No durable write has been made.")
+    return {"title": "Lifecycle Proposal Draft", "text": "\n".join(lines), "actions": []}
+
+
+def _render_lifecycle_descriptor_preview(
+    ctx: Any,
+    target: str,
+    *,
+    descriptor: dict[str, Any],
+    callback_ctx: Any,
+) -> dict[str, Any]:
+    del callback_ctx
+    label = _short(descriptor.get("label") or descriptor.get("action_id") or "Lifecycle proposal", "Lifecycle proposal")
+    preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
+    payload = _result_payload(ctx.dispatch_tool(preview_tool, _descriptor_params(descriptor)))
+    if isinstance(payload, dict) and payload.get("error"):
+        return {"title": label, "text": f"{label}\n{payload['error']}", "actions": []}
+    packet_card = _render_supported_result_packet(payload, ctx=ctx, target=target)
+    if packet_card is not None:
+        packet_card["actions"] = []
+        if "No durable write has been made." not in packet_card["text"]:
+            packet_card["text"] += "\nNo durable write has been made."
+        return packet_card
+    if not isinstance(payload, dict):
+        return {"title": label, "text": f"{label}\n{_short(payload, 'No proposal preview returned.')}", "actions": []}
+    lines = [
+        "Lifecycle Proposal Preview",
+        f"Status: {_short(payload.get('status') or payload.get('state'), 'preview')}",
+    ]
+    summary = _short(payload.get("summary") or payload.get("message"), "")
+    if summary:
+        lines.append("Summary: " + _clip(summary, 260))
+    target_ref = _short(payload.get("target_ref") or descriptor.get("target_ref"), "")
+    if target_ref:
+        lines.append(f"Target: {target_ref}")
+    lines.append("No durable write has been made.")
+    return {"title": label, "text": "\n".join(lines), "actions": []}
+
+
+def _lifecycle_descriptor_action(ctx: Any, target: str, descriptor: dict[str, Any]) -> Any | None:
+    if not _is_lifecycle_proposal_descriptor(descriptor):
+        return None
+    try:
+        from tools.kb_callback_registry import KbAction
+    except Exception:
+        return None
+    label = _short(descriptor.get("label") or descriptor.get("action_id") or "Lifecycle proposal", "Lifecycle proposal")
+    action_id = _short(descriptor.get("action_id") or label, label)
+    preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
+    confirm_tool = _descriptor_tool_name(target, descriptor.get("confirm_tool"))
+    if not preview_tool or not confirm_tool:
+        return None
+    return KbAction(
+        label=label,
+        action_id=f"{action_id}.preview",
+        handler=lambda callback_ctx, d=dict(descriptor): _render_generic_descriptor_preview(
+            ctx,
+            target,
+            descriptor=d,
+            callback_ctx=callback_ctx,
+        ),
+        metadata={
+            "target_kind": descriptor.get("target_kind") or "lifecycle_candidate",
+            "target_ref": descriptor.get("target_ref"),
+            "preview_tool": preview_tool,
+            "confirm_tool": confirm_tool,
+            "preview_required": True,
+            "durable_write": False,
+        },
+    )
+
+
+def _lifecycle_candidate_actions(ctx: Any | None, target: str, candidates: list[Any]) -> list[Any]:
+    if ctx is None or not target:
+        return []
+    actions: list[Any] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        descriptor = _lifecycle_candidate_descriptor(candidate)
+        action = _lifecycle_descriptor_action(ctx, target, descriptor)
+        if action is not None:
+            actions.append(action)
+        if len(actions) >= 4:
+            break
+    return actions
+
+
+def _render_lifecycle_review_packet(
+    packet: dict[str, Any],
+    *,
+    ctx: Any | None = None,
+    target: str = "",
+) -> dict[str, Any]:
+    workflow = _short(packet.get("workflow"), "Lifecycle Review")
+    stewardship = _short(packet.get("stewardship_area"), "")
+    candidates = packet.get("candidates") if isinstance(packet.get("candidates"), list) else []
+    lines = [workflow]
+    if stewardship:
+        lines.append(f"Stewardship: {stewardship}")
+    review_target = _short(packet.get("target") or packet.get("target_ref") or packet.get("scope"), "")
+    if review_target:
+        lines.append(f"Target: {review_target}")
+    if packet.get("mutation_performed") is not None:
+        lines.append("Mutation: " + ("performed" if packet.get("mutation_performed") else "none"))
+    lines.append(f"Candidates: {len(candidates)}")
+    for index, candidate in enumerate(candidates[:5], start=1):
+        if not isinstance(candidate, dict):
+            lines.append(f"{index}. {_clip(candidate, 180)}")
+            continue
+        title = _short(candidate.get("title") or candidate.get("name") or candidate.get("target_ref"), "candidate")
+        lines.append(f"{index}. {title}")
+        action = _short(candidate.get("recommended_action"), "")
+        target_ref = _short(candidate.get("target_ref") or candidate.get("object_ref"), "")
+        if action:
+            lines.append(f"   Action: {action}")
+        if target_ref:
+            lines.append(f"   Target: {target_ref}")
+        signals = candidate.get("signals") if isinstance(candidate.get("signals"), dict) else {}
+        closure_signal = signals.get("closure_signal") if isinstance(signals, dict) else None
+        lines.extend(_lifecycle_signal_lines(closure_signal))
+        evidence_refs = _lifecycle_values(candidate.get("evidence_refs"))
+        evidence_gaps = _lifecycle_values(candidate.get("evidence_gaps"))
+        if evidence_refs:
+            lines.append(_id_line("   Evidence", evidence_refs, limit=3))
+        if evidence_gaps:
+            lines.append(_id_line("   Gaps", evidence_gaps, limit=3))
+    if len(candidates) > 5:
+        lines.append(f"... {len(candidates) - 5} more candidate(s)")
+    if packet.get("mutation_performed") is False:
+        lines.append("No durable write has been made.")
+    return {
+        "title": "Lifecycle Review",
+        "text": "\n".join(lines),
+        "actions": _lifecycle_candidate_actions(ctx, target, candidates),
+    }
+
+
 def _render_publication_observation_packet(packet: dict[str, Any]) -> dict[str, Any]:
     state = _short(packet.get("publication_state") or packet.get("status") or packet.get("state"))
     changed_paths = _changed_paths(packet)
@@ -395,6 +706,147 @@ def _render_publication_observation_packet(packet: dict[str, Any]) -> dict[str, 
         lines.append("Secrets exposed: " + ("yes" if packet.get("secret_values_exposed") else "no"))
     lines.extend(_warning_lines(packet.get("warnings")))
     return {"title": "Publication Observation", "text": "\n".join(lines), "actions": []}
+
+
+_PRIVATE_RECEIPT_PATTERNS = (
+    re.compile(r"https?://", re.I),
+    re.compile(r"\bwww\.", re.I),
+    re.compile(r"(?i)(?:^|/)(?:Users|home|private|tmp)/"),
+    re.compile(r"(?i)(?:^|[_-])(?:token|secret|password|api[_-]?key)(?:[_-]|$)"),
+    re.compile(r"(?i)^(?:acct|account|login|user):"),
+    re.compile(r"(?i)\b(?:bearer|sk-[A-Za-z0-9])"),
+    re.compile(r"\S+@\S+"),
+    re.compile(r"^[A-Za-z]:[\\/]"),
+)
+
+
+def _receipt_public_value(value: Any, *, limit: int = 120) -> str:
+    text = _clip(value, limit)
+    if not text:
+        return ""
+    if text.startswith(("/", "~/", "~\\")):
+        return ""
+    if any(pattern.search(text) for pattern in _PRIVATE_RECEIPT_PATTERNS):
+        return ""
+    return text
+
+
+def _receipt_public_values(values: Iterable[Any], *, limit: int = 120) -> list[str]:
+    return _dedupe_list(
+        value
+        for raw in values
+        if (value := _receipt_public_value(raw, limit=limit))
+    )
+
+
+def _semantic_values_from(packet: dict[str, Any], *keys: str) -> list[Any]:
+    values: list[Any] = []
+    for key in keys:
+        value = packet.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    for nested_key in ("id", "object_id", "object_ref", "path", "ref", "operation_id"):
+                        if item.get(nested_key):
+                            values.append(item.get(nested_key))
+                            break
+                else:
+                    values.append(item)
+        elif isinstance(value, dict):
+            for nested_key in ("id", "object_id", "object_ref", "path", "ref", "operation_id"):
+                if value.get(nested_key):
+                    values.append(value.get(nested_key))
+                    break
+        else:
+            values.append(value)
+    return values
+
+
+def _semantic_status(packet: dict[str, Any]) -> str:
+    status = (
+        packet.get("prod_write_status")
+        or packet.get("prod_write_state")
+        or packet.get("prod_status")
+        or packet.get("write_status")
+        or _get_path(packet, "prod_write", "status")
+        or _get_path(packet, "prod_write", "state")
+        or packet.get("status")
+        or packet.get("state")
+    )
+    return _receipt_public_value(status, limit=80)
+
+
+def _semantic_publication_status(packet: dict[str, Any]) -> str:
+    status = (
+        packet.get("publication_status")
+        or packet.get("publication_state")
+        or _get_path(packet, "publication", "status")
+        or _get_path(packet, "publication", "state")
+        or _get_path(packet, "publication", "publication_status")
+        or _get_path(packet, "sync", "status")
+    )
+    return _receipt_public_value(status, limit=80)
+
+
+def _semantic_reconciliation_status(packet: dict[str, Any]) -> str:
+    status = (
+        packet.get("reconciliation_status")
+        or packet.get("offline_reconciliation_status")
+        or packet.get("local_reconciliation_status")
+        or _get_path(packet, "reconciliation", "status")
+        or _get_path(packet, "reconciliation", "state")
+        or _get_path(packet, "local_reconciliation", "status")
+        or _get_path(packet, "local_reconciliation", "state")
+        or _get_path(packet, "offline_reconciliation", "status")
+        or _get_path(packet, "offline", "reconciliation_status")
+    )
+    return _receipt_public_value(status, limit=80)
+
+
+def _semantic_transaction_id(packet: dict[str, Any]) -> str:
+    transaction = packet.get("transaction")
+    transaction_id = packet.get("transaction_id") or packet.get("txid")
+    if not transaction_id and isinstance(transaction, dict):
+        transaction_id = transaction.get("id") or transaction.get("transaction_id")
+    elif not transaction_id:
+        transaction_id = transaction
+    return _receipt_public_value(transaction_id, limit=120)
+
+
+def _render_semantic_write_receipt_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    lines = ["Semantic Write Receipt"]
+    prod_status = _semantic_status(packet)
+    publication_status = _semantic_publication_status(packet)
+    reconciliation_status = _semantic_reconciliation_status(packet)
+    transaction_id = _semantic_transaction_id(packet)
+    changed_paths = _receipt_public_values(_changed_paths(packet), limit=140)
+    object_ids = _receipt_public_values(
+        _semantic_values_from(packet, "object_ids", "object_id", "object_refs", "object_ref", "objects"),
+        limit=140,
+    )
+    operation_ids = _receipt_public_values(
+        _semantic_values_from(packet, "operation_ids", "operation_id", "operations", "operation_receipts"),
+        limit=120,
+    )
+
+    if prod_status:
+        lines.append(f"Prod write: {prod_status}")
+    if publication_status:
+        lines.append(f"Publication: {publication_status}")
+    if reconciliation_status:
+        lines.append(f"Reconciliation: {reconciliation_status}")
+    if transaction_id:
+        lines.append(f"Transaction: {transaction_id}")
+    if changed_paths:
+        lines.append(f"Changed paths: {len(changed_paths)}")
+        lines.extend(_format_changed_paths(changed_paths, limit=4))
+    if object_ids:
+        lines.append(_id_line("Objects", object_ids, limit=4))
+    if operation_ids:
+        lines.append(_id_line("Operations", operation_ids, limit=4))
+    return {"title": "Semantic Write Receipt", "text": "\n".join(lines), "actions": []}
 
 
 def _id_list(value: Any) -> list[str]:
@@ -617,6 +1069,7 @@ def _render_request_receipt_packet(
         ids = _id_list(packet.get(key))
         if ids:
             lines.append(_id_line(label, ids))
+    lines.extend(_object_reference_lines(packet))
     message = _short(packet.get("safe_message") or packet.get("message"), "")
     if message:
         lines.append(_clip(message, 260))
@@ -726,8 +1179,14 @@ def _render_supported_result_packet(
         return _render_report_admission_packet(packet)
     if packet_type == "durable_graph_validation":
         return _render_graph_validation_packet(packet)
+    if packet_type == "lifecycle_review.packet":
+        return _render_lifecycle_review_packet(packet, ctx=ctx, target=target)
+    if packet_type == "lifecycle_proposal_draft.packet":
+        return _render_lifecycle_proposal_draft_packet(packet)
     if packet_type == "publication_observation":
         return _render_publication_observation_packet(packet)
+    if packet_type in SEMANTIC_WRITE_RECEIPT_PACKET_TYPES:
+        return _render_semantic_write_receipt_packet(packet)
     if packet_type == "request.receipt":
         return _render_request_receipt_packet(packet, ctx=ctx, target=target)
     return None
@@ -967,7 +1426,7 @@ def _render_today(data: Any) -> dict[str, Any]:
 
 def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     if not isinstance(data, dict):
-        return {"title": "KB Cockpit", "text": f"KB Cockpit\n{_short(data, 'No cockpit details returned.')}", "actions": []}
+        return {"title": "KB", "text": f"KB\n{_short(data, 'No KB details returned.')}", "actions": []}
 
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     readiness = _short(
@@ -987,9 +1446,8 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         todo_count = _count_from(data, "todo", "todos")
     active_runs = summary.get("active_run_count")
     lines = [
-        "KB Cockpit",
-        f"Runtime: {readiness}",
-        f"Publication: {publication}",
+        "KB",
+        f"kb status: runtime {readiness} · publication {publication}",
     ]
     if data.get("llm_invoked_by_read_surface") is not None:
         lines.append(
@@ -1002,10 +1460,10 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         counts.append(f"Proposals {queue_count}")
     if todo_count is not None:
         counts.append(f"TODOs {todo_count}")
-    if active_runs is not None:
-        counts.append(f"Runs {active_runs}")
     if counts:
-        lines.append(" · ".join(counts))
+        lines.append("kb review: " + " · ".join(counts))
+    if active_runs is not None:
+        lines.append(f"kb sync: {active_runs} active run(s)")
     for section in sections[:4]:
         if not isinstance(section, dict):
             continue
@@ -1037,8 +1495,8 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     if refresh:
         lines.append(f"Refresh: every {_short(refresh.get('ttl_seconds'), '60')}s target")
     lines.append("")
-    lines.append("Commands: /kb queue · /kb status · /kb runs · /kb today")
-    return {"title": "KB Dashboard", "text": "\n".join(lines), "actions": _dashboard_descriptor_actions(ctx, target, sections)}
+    lines.append("Commands: /kb status · /kb sync · /kb review")
+    return {"title": "KB", "text": "\n".join(lines), "actions": _dashboard_descriptor_actions(ctx, target, sections)}
 
 
 _WORKBENCH_SECTION_IDS = {"closeout", "now", "reports", "situations", "workbench"}
@@ -1060,7 +1518,7 @@ def _dashboard_card_descriptors(card: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _render_workbench(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     if not isinstance(data, dict):
-        return {"title": "KB Workbench", "text": f"KB Workbench\n{_short(data, 'No workbench details returned.')}", "actions": []}
+        return {"title": "KB Review", "text": f"KB Review\n{_short(data, 'No review details returned.')}", "actions": []}
 
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     readiness = _short(summary.get("readiness_status") or _readiness_status(data))
@@ -1069,9 +1527,8 @@ def _render_workbench(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     queue_count = _proposal_count_from_summary(summary)
     todo_count = _todo_count_from_summary(summary)
     lines = [
-        "KB Workbench",
-        f"Runtime: {readiness}",
-        f"Publication: {publication}",
+        "KB Review",
+        f"Status: runtime {readiness} · publication {publication}",
     ]
     counts: list[str] = []
     if queue_count is not None:
@@ -1118,10 +1575,10 @@ def _render_workbench(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         [
             "",
             "Buttons open or preview canonical kb-engine actions; writes still require confirmation.",
-            "Fallback: /kb queue · /kb publish · /kb status",
+            "Fallback: /kb status",
         ]
     )
-    return {"title": "KB Workbench", "text": "\n".join(lines), "actions": _dashboard_descriptor_actions(ctx, target, sections)}
+    return {"title": "KB Review", "text": "\n".join(lines), "actions": _dashboard_descriptor_actions(ctx, target, sections)}
 
 
 def _workbench_review_kind(card: dict[str, Any], descriptors: list[dict[str, Any]]) -> str:
@@ -1167,6 +1624,8 @@ def _workbench_compact_card_lines(
     lines = [f"{index}. {title}"]
     if kind == "situation":
         lines.append("   Surface: Situation Review")
+    elif kind == "lifecycle_candidate":
+        lines.append("   Surface: Lifecycle Review")
     elif section_title:
         lines.append(f"   Surface: {section_title}")
     if detail:
@@ -1178,6 +1637,8 @@ def _workbench_compact_card_lines(
         lines.append("   Rail: " + ", ".join(labels[:6]))
     if kind == "situation":
         lines.append("   Writes: handoff-only until kb-engine returns a confirmed workflow.")
+    if kind == "lifecycle_candidate":
+        lines.append("   Writes: proposal preview only; no Hermes durable write.")
     return lines
 
 
@@ -1204,7 +1665,10 @@ def _dashboard_descriptor_actions(ctx: Any, target: str, sections: list[Any]) ->
                 action_id = _short(descriptor.get("action_id") or label, label)
                 mutation = _short(descriptor.get("mutation"), "read_only")
                 target_kind = str(descriptor.get("target_kind") or "").strip()
-                if mutation == "read_only":
+                lifecycle_action = _lifecycle_descriptor_action(ctx, target, descriptor_copy)
+                if lifecycle_action is not None:
+                    actions.append(lifecycle_action)
+                elif mutation == "read_only":
                     if target_kind not in DESCRIPTOR_READONLY_TARGET_KINDS:
                         continue
                     if not (descriptor.get("preview_tool") or descriptor.get("method")):
@@ -1822,6 +2286,8 @@ def _render_status(
     if hermes_reasoning:
         snap["reasoning"] = hermes_reasoning
     kb = _provider_status_summary(provider_data, snap)
+    if isinstance(data, dict) and data.get("kind") in {"kb_status_proof_packet", "noc_kb_status_receipt"}:
+        return _render_status_proof(data, target, kb, snap)
     readiness = "unknown"
     publication = "unknown"
     if isinstance(data, dict):
@@ -1842,6 +2308,124 @@ def _render_status(
         f"Readiness: {readiness}",
         f"Publication: {publication}",
     ]
+    return {"title": "KB Status", "text": "\n".join(lines), "actions": []}
+
+
+def _status_line_value(packet: dict[str, Any], *paths: tuple[str, ...], default: str = "unknown") -> str:
+    for path in paths:
+        value = _get_path(packet, *path)
+        if value not in (None, "", [], {}):
+            return _short(value, default)
+    return default
+
+
+def _dirty_summary(packet: dict[str, Any]) -> str:
+    dirty_scope = packet.get("dirty_scope") if isinstance(packet.get("dirty_scope"), dict) else {}
+    worktrees = packet.get("worktrees") if isinstance(packet.get("worktrees"), dict) else {}
+    publication = packet.get("publication") if isinstance(packet.get("publication"), dict) else {}
+    dirty_count = None
+    for candidate in (
+        dirty_scope.get("count"),
+        dirty_scope.get("dirty_path_count"),
+        worktrees.get("dirty_path_count"),
+        publication.get("dirty_path_count"),
+        publication.get("changed_count"),
+    ):
+        if candidate is not None:
+            dirty_count = candidate
+            break
+    if dirty_count not in (None, ""):
+        return f"{_short(dirty_count, '0')} dirty"
+    dirty_bits = [
+        name
+        for name, value in dirty_scope.items()
+        if isinstance(value, bool) and value
+    ]
+    if dirty_bits:
+        return ", ".join(dirty_bits[:4])
+    return _status_line_value(packet, ("worktrees", "status"), ("workspace", "status"), default="unknown")
+
+
+def _next_action_summary(packet: dict[str, Any]) -> str:
+    next_action = packet.get("next_action")
+    if isinstance(next_action, dict):
+        return _short(
+            next_action.get("command")
+            or next_action.get("label")
+            or next_action.get("summary")
+            or next_action.get("next_safe_action"),
+            "",
+        )
+    return _short(next_action, "")
+
+
+def _render_status_proof(
+    packet: dict[str, Any],
+    target: str,
+    kb: dict[str, str],
+    snap: dict[str, str],
+) -> dict[str, Any]:
+    status = _short(packet.get("status") or packet.get("state"), "unknown")
+    lane = _status_line_value(
+        packet,
+        ("active_target", "target"),
+        ("active_target", "name"),
+        ("workspace", "lane"),
+        ("workspace", "target"),
+        default=target,
+    )
+    runtime = _status_line_value(
+        packet,
+        ("runtime", "version"),
+        ("runtime", "installed_ref"),
+        ("runtime", "status"),
+    )
+    transport = _status_line_value(
+        packet,
+        ("transport", "status"),
+        ("runtime", "transport_status"),
+        ("runtime", "mcp_transport_status"),
+    )
+    publication = _status_line_value(
+        packet,
+        ("publication", "status"),
+        ("publication", "state"),
+        ("publication", "publication_state"),
+    )
+    review = _status_line_value(
+        packet,
+        ("review", "pending_count"),
+        ("review", "status"),
+        ("review", "state"),
+    )
+    sync = _status_line_value(
+        packet,
+        ("sync", "status"),
+        ("sync", "state"),
+        ("sync", "last_run_status"),
+    )
+    privacy = packet.get("privacy") if isinstance(packet.get("privacy"), dict) else {}
+    privacy_ok = not any(bool(value) for value in privacy.values())
+    next_action = _next_action_summary(packet)
+    lines = [
+        "KB Status",
+        "Request: /kb status",
+        f"Outcome: {status}",
+        f"Lane: {lane}",
+        f"Runtime: {runtime}",
+        f"Transport: {transport}",
+        f"Publication: {publication}",
+        f"Pending review: {review}",
+        f"Sync: {sync}",
+        f"Dirty: {_dirty_summary(packet)}",
+        f"Privacy: {'ok' if privacy_ok else 'check receipt'}",
+        f"KB model: {kb['provider']} / {kb['model']} / {kb['reasoning']}",
+        f"KB reasoning: {kb['reasoning']}",
+        f"Hermes reasoning: {snap['reasoning']}",
+    ]
+    if next_action:
+        lines.append(f"Next: {next_action}")
+    lines.append("Commands: /kb sync · /kb review")
     return {"title": "KB Status", "text": "\n".join(lines), "actions": []}
 
 
@@ -2262,15 +2846,14 @@ def _queue_descriptor_actions(
         actions.append(
             KbAction(
                 label=f"Preview {label}" if preview_label_prefix else label,
-                action_id=f"{action_id}.apply",
-                handler=lambda callback_ctx, d=descriptor_copy: _render_queue_descriptor_confirm(
+                action_id=f"{action_id}.preview",
+                handler=lambda callback_ctx, d=descriptor_copy: _render_queue_descriptor_preview(
                     ctx,
                     target,
                     item,
                     index=index,
                     descriptor=d,
                     callback_ctx=callback_ctx,
-                    preview_metadata=None,
                 ),
                 metadata={
                     "target_kind": "proposal_queue",
@@ -2278,7 +2861,6 @@ def _queue_descriptor_actions(
                     "decision": decision,
                     "preview_tool": preview_tool,
                     "confirm_tool": confirm_tool,
-                    "preview_internal": True,
                 },
             )
         )
@@ -3493,10 +4075,10 @@ def scoped_mcp_tool_allowlist_for_message(
 ) -> set[str]:
     """Return exact MCP tools allowed by a matched pending queue action.
 
-    This is the stateful bridge between Telegram review cards and the generic
-    MCP posture filter.  A bare reply such as ``Reject`` is itself an explicit
-    operator decision when it follows an active one-item KB review card; Hermes
-    may preview internally and then confirm exactly that scoped item.
+    This is the stateful bridge between Telegram action cards and the generic
+    MCP posture filter.  A bare reply such as ``Reject`` should stay preview
+    only.  Confirmed queue tools are reserved for explicit confirm commands or
+    action-card confirmation gestures.
     """
     decision = _bare_queue_reply_decision(message)
     if decision not in QUEUE_REPLY_TOOL_DECISIONS:
@@ -3513,10 +4095,7 @@ def scoped_mcp_tool_allowlist_for_message(
         if choices and decision not in choices:
             return set()
     mcp_target = target or _mcp_target()
-    return {
-        _mcp_tool_name(mcp_target, "queue.decision_preview"),
-        _mcp_tool_name(mcp_target, "queue.batch_decide_confirmed"),
-    }
+    return {_mcp_tool_name(mcp_target, "queue.decision_preview")}
 
 
 def _session_id_for_queue_reply_state(session_store: Any, source: Any) -> str:
@@ -3564,6 +4143,81 @@ def _get_meeting_handoff_state(session_id: str) -> dict[str, Any] | None:
     if not isinstance(plan, dict):
         return None
     return state
+
+
+def _telegram_user_id(source: Any) -> str:
+    return _short(getattr(source, "user_id", ""), "")
+
+
+def _sync_preview_lease(plan: dict[str, Any], *, recorded_at: float | None = None) -> dict[str, Any]:
+    preview_lease = plan.get("preview_lease") if isinstance(plan.get("preview_lease"), dict) else {}
+    if preview_lease:
+        return dict(preview_lease)
+    workflow = plan.get("workflow") if isinstance(plan.get("workflow"), dict) else {}
+    payload = {
+        "workflow_id": str(workflow.get("workflow_id") or ""),
+        "request_id": str(plan.get("request_id") or ""),
+        "idempotency_key": str(plan.get("idempotency_key") or ""),
+        "recorded_at": int(recorded_at or time.time()),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return {
+        "kind": "telegram_workflow_preview",
+        "preview_lease_id": f"sha256:{digest}",
+        **{key: value for key, value in payload.items() if value},
+    }
+
+
+def _get_sync_preview_state(session_id: str, source: Any) -> tuple[dict[str, Any] | None, str]:
+    if not session_id:
+        return None, "missing_session"
+    states = _load_sync_preview_states()
+    state = states.get(session_id)
+    if not isinstance(state, dict):
+        return None, "missing"
+    recorded_at = float(state.get("recorded_at") or 0.0)
+    if not recorded_at or time.time() - recorded_at > SYNC_PREVIEW_STATE_TTL_SECONDS:
+        states.pop(session_id, None)
+        _save_sync_preview_states(states)
+        return None, "stale"
+    actor_id = _short(state.get("actor_id"), "")
+    current_actor = _telegram_user_id(source)
+    if actor_id and current_actor and actor_id != current_actor:
+        return None, "wrong_actor"
+    plan = state.get("plan")
+    if not isinstance(plan, dict):
+        return None, "invalid"
+    return state, ""
+
+
+def _store_sync_preview_state(
+    session_id: str,
+    *,
+    source: Any,
+    target: str,
+    workflow_id: str,
+    intent: str,
+    plan: dict[str, Any],
+) -> None:
+    if not session_id:
+        return
+    recorded_at = time.time()
+    preview_lease = _sync_preview_lease(plan, recorded_at=recorded_at)
+    stored_plan = dict(plan)
+    stored_plan.setdefault("preview_lease", preview_lease)
+    states = _load_sync_preview_states()
+    states[session_id] = {
+        "schema_version": 1,
+        "recorded_at": recorded_at,
+        "actor_id": _telegram_user_id(source),
+        "actor_name": _short(getattr(source, "user_name", ""), ""),
+        "target": target,
+        "workflow_id": workflow_id,
+        "intent": intent,
+        "preview_lease": preview_lease,
+        "plan": stored_plan,
+    }
+    _save_sync_preview_states(states)
 
 
 def _store_meeting_handoff_state(
@@ -3698,19 +4352,11 @@ def _render_iterative_queue_reply_decision(
             "Reply: " + ", ".join(state.get("choices") or sorted(QUEUE_REPLY_DECISIONS)) + ".",
         ]
         return {"title": "KB Queue", "text": "\n".join(lines), "actions": []}
-    if decision == "skip":
-        _clear_iterative_queue_reply_state(session_id)
-        return {
-            "title": "KB Queue",
-            "text": f"Skipped locally: {title}\nNext: /kb queue",
-            "actions": [],
-        }
     if decision not in QUEUE_REPLY_TOOL_DECISIONS:
         return {"title": "KB Queue", "text": "That queue reply is not supported. Use /kb queue to refresh.", "actions": []}
     actor = "telegram:operator"
     source = "Hermes Telegram iterative queue"
     preview_tool = _mcp_tool_name(target, "queue.decision_preview")
-    confirmed_tool = _mcp_tool_name(target, "queue.batch_decide_confirmed")
     preview_payload = _result_payload(
         ctx.dispatch_tool(
             preview_tool,
@@ -3723,39 +4369,10 @@ def _render_iterative_queue_reply_decision(
             },
         )
     )
-    if not _preview_allows_confirmation(preview_payload):
-        return {"title": "KB Queue", "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection), "actions": []}
-    preview_metadata = _queue_preview_metadata(preview_payload)
-    confirmed_args = {
-        "proposal_ids": proposal_ids,
-        "decision": decision,
-        "decision_scope": "explicit_ids",
-        "candidate_count": len(proposal_ids),
-        "displayed_count": len(proposal_ids),
-        "actor": actor,
-        "source": source,
-        "session_id": _review_session_id(preview_metadata) or f"telegram-kb-reply-{int(time.time())}",
-        "user_confirmation": {
-            "confirmed": True,
-            "surface": "telegram",
-            "action": f"queue.{decision}",
-            "preview_required": True,
-            "confirmation_text": f"Telegram reply: {decision}",
-            "proposal_ids": proposal_ids,
-        },
-        "note": f"Confirmed from Telegram iterative queue reply for {title}",
-    }
-    _apply_queue_preview_metadata(confirmed_args, preview_metadata)
-    _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], preview_metadata)
-    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
-    packet_card = _render_supported_result_packet(confirmed_payload, ctx=ctx, target=target)
-    if packet_card is not None:
-        return packet_card
-    return {
-        "title": "KB Queue",
-        "text": _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids),
-        "actions": [],
-    }
+    text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
+    if _preview_allows_confirmation(preview_payload):
+        text += f"\nTo apply: /kb queue {decision} 1 confirm"
+    return {"title": "KB Queue", "text": text, "actions": []}
 
 
 def _render_visible_scope_all_decision(
@@ -3783,7 +4400,6 @@ def _render_visible_scope_all_decision(
     actor = "telegram:operator"
     source = "Hermes Telegram visible queue"
     preview_tool = _mcp_tool_name(target, "queue.decision_preview")
-    confirmed_tool = _mcp_tool_name(target, "queue.batch_decide_confirmed")
     candidate_count = _queue_count_value(visible_record.get("candidate_count"), len(selection))
     displayed_count = _queue_count_value(visible_record.get("displayed_count"), len(selection))
     preview_payload = _result_payload(
@@ -3801,42 +4417,19 @@ def _render_visible_scope_all_decision(
             },
         )
     )
-    if not _preview_allows_confirmation(preview_payload):
-        text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
-        text += "\nScope: visible Telegram queue window only, not the full pending queue."
-        return {"title": "KB Queue", "text": text, "actions": []}
-    preview_metadata = _queue_preview_metadata(preview_payload)
-    confirmed_args = {
-        "proposal_ids": proposal_ids,
-        "decision": decision,
-        "decision_scope": "all_viewed",
-        "candidate_count": candidate_count,
-        "displayed_count": displayed_count,
-        "actor": actor,
-        "source": source,
-        "session_id": _review_session_id(preview_metadata) or f"telegram-kb-visible-{int(time.time())}",
-        "user_confirmation": {
-            "confirmed": True,
-            "surface": "telegram",
-            "action": f"queue.{decision}.visible",
-            "preview_required": True,
-            "confirmation_text": f"Telegram visible-scope reply: {decision} all",
-            "proposal_ids": proposal_ids,
-            "decision_scope": "all_viewed",
-        },
-        "note": f"Confirmed from Telegram visible queue scope for {len(selection)} shown item(s)",
-    }
-    _apply_queue_preview_metadata(confirmed_args, preview_metadata)
-    _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], preview_metadata)
-    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
-    packet_card = _render_supported_result_packet(confirmed_payload, ctx=ctx, target=target)
-    if packet_card is not None:
-        return packet_card
-    return {
-        "title": "KB Queue",
-        "text": _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids),
-        "actions": [],
-    }
+    text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
+    text += "\nScope: visible Telegram queue window only, not the full pending queue."
+    if _preview_allows_confirmation(preview_payload):
+        indices = [index for index, _ in selection]
+        _store_queue_text_preview_scope(
+            session_id,
+            decision=decision,
+            indices=indices,
+            selection=selection,
+            preview_payload=preview_payload,
+        )
+        text += f"\nTo apply: /kb queue {decision} {_format_indices(indices)} confirm"
+    return {"title": "KB Queue", "text": text, "actions": []}
 
 
 def _queue_summary_payload(
@@ -4819,6 +5412,8 @@ def _workflow_envelope(plan: dict[str, Any], callback_ctx: Any) -> dict[str, Any
             "confirmed_by": actor_name or actor_id,
             "confirmed_at": confirmed_at,
             "confirmation_text": "Confirmed by Telegram text command after workflow preview.",
+            "preview_required": True,
+            "preview_lease": _sync_preview_lease(plan),
             "preview_status": _short(plan.get("status")),
             "surface": "telegram",
             "actor_id": actor_id,
@@ -5061,17 +5656,20 @@ def _render_workflow_plan(
     target: str,
     adapter: Any,
     start_hint: str = "/kb run sync confirm",
+    title: str = "Workflow",
+    heading: str = "Workflow Preview",
 ) -> dict[str, Any]:
     if isinstance(data, dict) and data.get("error"):
-        return {"title": "Workflow", "text": f"Workflow plan failed\n{data['error']}", "actions": []}
+        return {"title": title, "text": f"{heading} failed\n{data['error']}", "actions": []}
     if not isinstance(data, dict):
-        return {"title": "Workflow", "text": f"Workflow\n{_short(data, 'No plan returned.')}", "actions": []}
+        return {"title": title, "text": f"{title}\n{_short(data, 'No plan returned.')}", "actions": []}
     workflow = data.get("workflow") if isinstance(data.get("workflow"), dict) else {}
     request = data.get("request") if isinstance(data.get("request"), dict) else {}
     effect_plan = data.get("effect_plan") if isinstance(data.get("effect_plan"), dict) else {}
     effects = effect_plan.get("effects") if isinstance(effect_plan.get("effects"), list) else []
     lines = [
-        "Workflow Preview",
+        heading,
+        f"Request: {start_hint.removesuffix(' confirm') if start_hint.endswith(' confirm') else start_hint}",
         f"Workflow: {_short(workflow.get('workflow_id'))}",
         f"Status: {_short(data.get('status'))}",
         f"Risk: {_short(workflow.get('risk') or effect_plan.get('risk'))}",
@@ -5089,7 +5687,23 @@ def _render_workflow_plan(
         lines.append("Follow-through: " + _short(follow.get("watch_tool")) + " -> " + _short(follow.get("terminal_summary_tool")))
     if data.get("status") == "confirmation_required":
         lines.append(f"To start: {start_hint}")
-    return {"title": "Workflow", "text": "\n".join(lines), "actions": []}
+    return {"title": title, "text": "\n".join(lines), "actions": []}
+
+
+def _sync_confirm_blocked_text(reason: str) -> str:
+    messages = {
+        "stale": "The pending /kb sync preview is stale. Run /kb sync again, then confirm from that fresh preview.",
+        "wrong_actor": "The pending /kb sync preview belongs to another Telegram user. Run /kb sync yourself, then confirm.",
+        "invalid": "The pending /kb sync preview is invalid. Run /kb sync again before confirming.",
+        "missing_session": "Hermes could not identify this chat session. Run /kb sync again before confirming.",
+    }
+    return "\n".join(
+        [
+            "KB Sync",
+            messages.get(reason, "No fresh /kb sync preview is pending for this chat. Run /kb sync first."),
+            "No KB state changed.",
+        ]
+    )
 
 
 def _render_queue(
@@ -5127,6 +5741,42 @@ def _render_queue(
     }
 
 
+def _lifecycle_review_args(args: str) -> dict[str, Any]:
+    text = str(args or "").strip()
+    if text.lower().startswith("lifecycle "):
+        text = text.split(maxsplit=1)[1].strip()
+    if text.lower().startswith("for "):
+        text = text.split(maxsplit=1)[1].strip()
+    return {
+        "target": text or "situations",
+        "dry_run": True,
+    }
+
+
+def _render_lifecycle_review_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
+    _, data, errors = _dispatch_first(
+        ctx,
+        target,
+        [("lifecycle.review", _lifecycle_review_args(args))],
+    )
+    if data is None:
+        return _render_error("Lifecycle Review", target, errors)
+    packet_card = _render_supported_result_packet(data, ctx=ctx, target=target)
+    if packet_card is not None:
+        return packet_card
+    return _render_lifecycle_review_packet(
+        {
+            "packet_type": "lifecycle_review.packet",
+            "workflow": "Lifecycle Review",
+            "mutation_performed": False,
+            "candidates": [],
+            "summary": data,
+        },
+        ctx=ctx,
+        target=target,
+    )
+
+
 def _kb_root_command(args: str) -> tuple[str, str]:
     text = (args or "").strip()
     if not text:
@@ -5151,7 +5801,14 @@ def _kb_root_command(args: str) -> tuple[str, str]:
     if key in {"queue", "q"}:
         return "kbqueue", rest
     if key == "review":
-        return "kbqueue", f"review {rest}".strip() if rest else ""
+        review_head, _, review_tail = rest.partition(" ")
+        if review_head.strip().lower() in {"lifecycle", "stewardship"}:
+            return "kblifecycle", review_tail.strip()
+        if review_head.strip().lower() in {"proposal", "proposals", "queue", "inbox"}:
+            return "kbqueue", review_tail.strip()
+        return "kbqueue", rest
+    if key in {"lifecycle", "stewardship"}:
+        return "kblifecycle", rest
     if key in {"publish", "publication"}:
         return "kbpublish", rest
     if key in {"run", "workflow"}:
@@ -5159,7 +5816,7 @@ def _kb_root_command(args: str) -> tuple[str, str]:
     if key in {"meeting", "meetings", "notes"}:
         return "kbmeeting", rest
     if key == "sync":
-        return "kbrun", f"sync {rest}".strip()
+        return "kbsync", rest
     return "kbhelp", text
 
 
@@ -5169,20 +5826,10 @@ def _kb_command_help() -> dict[str, Any]:
         "text": "\n".join(
             [
                 "KB Commands",
-                "/kb - compact cockpit/status",
-                "/kb workbench - guided Decision Cards and next safe actions",
-                "/kb queue - proposal review list",
-                "/kb queue review 1 - inspect one queue item",
-                "/kb queue reject 1 - preview a decision",
-                "Confirm queue decisions from the preview button when available",
-                "/kb queue reject 1 confirm - text fallback for a previewed decision",
-                "/kb publish - preview KB Git publication",
-                "/kb publish confirm - commit and push after preview",
-                "/kb status - lane, Hermes/KB reasoning, readiness, publication",
-                "/kb reasoning xhigh - set KB engine reasoning and reload MCP",
-                "/kb runs - active and recent workflow runs",
-                "/kb run sync - preview a KB sync",
-                "/kb meeting <meeting-file> -- <notes> - preview Telegram notes handoff",
+                "/kb status - prove lane, runtime, transport, publication, review, sync, dirtiness, and next action",
+                "/kb sync - preview evidence gathering and factual KB update workflow",
+                "/kb review - proposal-backed decision inbox",
+                "Advanced/debug aliases are still accepted for operators, but these three verbs are the normal KB surface.",
             ]
         ),
         "actions": [],
@@ -5303,7 +5950,14 @@ def _card_for_command(
         _, data, errors = _dispatch_first(ctx, target, [("attention.cockpit", cockpit_args)])
         return _render_error("KB Today", target, errors) if data is None else _render_today(data)
     if command == "kbstatus":
-        _, data, _errors = _dispatch_first(ctx, target, [("attention.cockpit", cockpit_args)])
+        _, data, _errors = _dispatch_first(
+            ctx,
+            target,
+            [
+                ("status.proof", {}),
+                ("attention.cockpit", cockpit_args),
+            ],
+        )
         _, provider_data, _provider_errors = _dispatch_first(ctx, target, [("provider.status", {})])
         hermes_reasoning = _live_hermes_reasoning(gateway, source)
         return _render_status(data, target, provider_data, hermes_reasoning=hermes_reasoning)
@@ -5342,6 +5996,8 @@ def _card_for_command(
                 session_id=queue_session_id,
             )
         return _render_queue(data, ctx=ctx, target=target, session_id=queue_session_id)
+    if command == "kblifecycle":
+        return _render_lifecycle_review_command(ctx, target, args)
     if command == "kbpublish":
         return _render_publish_command(ctx, target, args)
     if command == "kbmeeting":
@@ -5352,6 +6008,55 @@ def _card_for_command(
             source=source,
             session_store=session_store,
             adapter=adapter,
+        )
+    if command == "kbsync":
+        sync_args = f"sync {args}".strip()
+        workflow_id, intent, confirm = _workflow_args_from_text(sync_args)
+        if confirm:
+            state, reason = _get_sync_preview_state(queue_session_id, source)
+            if state is None:
+                return {"title": "KB Sync", "text": _sync_confirm_blocked_text(reason), "actions": []}
+            plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+            text = _workflow_start_text(ctx, target, plan)
+            _clear_sync_preview_state(queue_session_id)
+            return {"title": "KB Sync", "text": text, "actions": []}
+        _, data, errors = _dispatch_first(
+            ctx,
+            target,
+            [
+                (
+                    "workflow.plan_request",
+                    {
+                        "workflow_id": workflow_id or "sync",
+                        "intent": intent,
+                        "actor": "telegram:operator",
+                        "source": "Hermes Telegram",
+                        "session_id": f"telegram-kb-sync-{int(time.time())}",
+                    },
+                )
+            ],
+        )
+        if data is None:
+            return _render_error("KB Sync", target, errors)
+        if isinstance(data, dict) and data.get("status") == "confirmation_required":
+            _store_sync_preview_state(
+                queue_session_id,
+                source=source,
+                target=target,
+                workflow_id=workflow_id or "sync",
+                intent=intent,
+                plan=data,
+            )
+        else:
+            _clear_sync_preview_state(queue_session_id)
+        return _render_workflow_plan(
+            data,
+            ctx=ctx,
+            target=target,
+            adapter=adapter,
+            start_hint="/kb sync confirm",
+            title="KB Sync",
+            heading="KB Sync Preview",
         )
     if command == "kbrun":
         workflow_id, intent, confirm = _workflow_args_from_text(args)
@@ -5495,11 +6200,6 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
             return None
         text = getattr(event, "text", "")
         command = _command_from_text(text)
-        natural_command: tuple[str, str] | None = None
-        if command is None:
-            natural_command = _natural_kb_command_from_text(text)
-            if natural_command is not None:
-                command = natural_command[0]
         bare_decision = _bare_queue_reply_decision(text)
         visible_all_decision = _visible_scope_all_decision(text)
         if command is None and not bare_decision and not visible_all_decision:
@@ -5531,7 +6231,7 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 decision=bare_decision,
             )
         else:
-            args = natural_command[1] if natural_command is not None else _command_args_from_text(text)
+            args = _command_args_from_text(text)
             card = _card_for_command(
                 ctx,
                 command,
@@ -5564,14 +6264,14 @@ def _on_post_llm_call(
 
 def register(ctx: Any) -> None:
     def _command_help(_: str = "") -> str:
-        return "Use /kb in Telegram. Try: /kb queue, /kb status, /kb reasoning xhigh, /kb run sync."
+        return "Use /kb in Telegram. Try: /kb status, /kb sync, or /kb review."
 
     for command in sorted(MENU_COMMANDS):
         try:
             ctx.register_command(
                 command,
                 _command_help,
-                description="KB dashboard, queue, status, reasoning, runs, and sync.",
+                description="KB status, sync, and review.",
             )
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
