@@ -157,8 +157,8 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
         decision="reject",
     )
 
-    assert "Queue reject preview" in card["text"]
-    assert "To apply: /kb queue reject 1 confirm" in card["text"]
+    assert "Review reject preview" in card["text"]
+    assert "To apply: /kb review reject 1 confirm" in card["text"]
     assert [call[0] for call in ctx.calls] == ["mcp_kb_engine_prod_queue_decision_preview"]
     preview_args = ctx.calls[-1][1]
     assert preview_args["proposal_ids"] == ["act_crowdstrike"]
