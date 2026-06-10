@@ -39,14 +39,19 @@ SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
     "semantic_write.receipt",
     "kb_semantic_write_receipt",
 }
+SEMANTIC_WRITE_SHADOW_PACKET_TYPES = {
+    "semantic_write_through.shadow_preview",
+}
 SUPPORTED_RESULT_PACKET_TYPES = {
     "durable_graph_validation",
     "lifecycle_proposal_draft.packet",
     "lifecycle_review.packet",
+    "lifecycle_update.packet",
     "publication_observation",
     "request.receipt",
     "report_admission_receipt",
     *SEMANTIC_WRITE_RECEIPT_PACKET_TYPES,
+    *SEMANTIC_WRITE_SHADOW_PACKET_TYPES,
 }
 DESCRIPTOR_READONLY_TARGET_KINDS = {
     "closeout",
@@ -225,6 +230,25 @@ def _command_args_from_text(text: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _prose_kb_command_from_text(text: str) -> tuple[str, str] | None:
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith("/"):
+        return None
+    normalized = re.sub(r"[?!.,;:]+", "", stripped.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    match = re.match(r"^kb\s+(status|sync|review)\b(?:\s+(.*))?$", normalized)
+    if match:
+        verb = match.group(1)
+        rest = (match.group(2) or "").strip()
+        return {"status": "kbstatus", "sync": "kbsync", "review": "kblifecycle"}[verb], rest
+    if re.search(r"\breview queue\b", normalized) and re.search(
+        r"\b(?:what(?: is|'s)?|show|list|open|view|display|check|pending|in)\b",
+        normalized,
+    ):
+        return "kblifecycle", ""
+    return None
+
+
 def _short(value: Any, default: str = "unknown") -> str:
     if value is None:
         return default
@@ -339,21 +363,38 @@ def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
     return lines
 
 
+def _packet_kind(packet: Any) -> str:
+    if not isinstance(packet, dict):
+        return ""
+    return _short(
+        packet.get("packet_type")
+        or packet.get("kind")
+        or packet.get("packet_kind")
+        or packet.get("type"),
+        "",
+    )
+
+
 def _first_result_packet(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
-    if payload.get("packet_type") in SUPPORTED_RESULT_PACKET_TYPES:
+    if _packet_kind(payload) in SUPPORTED_RESULT_PACKET_TYPES:
         return payload
     for key in (
         "output",
         "result",
         "receipt",
+        "packet",
+        "preview",
+        "shadow_preview",
+        "lifecycle_update",
+        "semantic_preview",
         "publication_observation",
         "graph_validation",
         "report_admission_receipt",
     ):
         nested = payload.get(key)
-        if isinstance(nested, dict) and nested.get("packet_type") in SUPPORTED_RESULT_PACKET_TYPES:
+        if isinstance(nested, dict) and _packet_kind(nested) in SUPPORTED_RESULT_PACKET_TYPES:
             return nested
     return {}
 
@@ -688,6 +729,228 @@ def _render_lifecycle_review_packet(
     }
 
 
+def _manifest_items(manifest: Any) -> list[Any]:
+    if isinstance(manifest, list):
+        return manifest
+    if not isinstance(manifest, dict):
+        return []
+    for key in ("sources", "items", "entries", "source_refs", "source_manifest"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _manifest_count(manifest: Any, items: list[Any]) -> int | None:
+    if isinstance(manifest, dict):
+        for key in ("source_count", "sources_count", "count", "total"):
+            try:
+                return int(manifest.get(key))
+            except (TypeError, ValueError):
+                continue
+    if items:
+        return len(items)
+    return None
+
+
+def _source_manifest_lines(manifest: Any, *, limit: int = 4) -> list[str]:
+    if not manifest:
+        return []
+    items = _manifest_items(manifest)
+    count = _manifest_count(manifest, items)
+    lines = [f"Sources: {_short(count, 'manifest')}"]
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            kind = _receipt_public_value(item.get("kind") or item.get("source_kind") or item.get("type"), limit=60)
+            ref = _receipt_public_value(
+                item.get("source_ref")
+                or item.get("ref")
+                or item.get("id")
+                or item.get("source_id")
+                or item.get("uri"),
+                limit=120,
+            )
+            title = _receipt_public_value(item.get("title") or item.get("label") or item.get("summary"), limit=120)
+            status = _receipt_public_value(item.get("status") or item.get("state"), limit=60)
+            parts = [part for part in (kind, ref, title) if part]
+            suffix = f" ({status})" if status else ""
+            lines.append(f"- {' - '.join(parts) or 'source'}{suffix}")
+        else:
+            value = _receipt_public_value(item, limit=140)
+            if value:
+                lines.append(f"- {value}")
+    if len(items) > limit:
+        lines.append(f"- +{len(items) - limit} more source(s)")
+    return lines
+
+
+def _authority_entry(surface: Any, value: Any = None) -> str:
+    label = _receipt_public_value(surface, limit=80)
+    if isinstance(value, dict):
+        authority = _receipt_public_value(
+            value.get("authority")
+            or value.get("role")
+            or value.get("status")
+            or value.get("state")
+            or value.get("owner"),
+            limit=80,
+        )
+    else:
+        authority = _receipt_public_value(value, limit=80)
+    if label and authority:
+        return f"{label}={authority}"
+    return label or authority
+
+
+def _authority_map_lines(authority_map: Any, *, limit: int = 6) -> list[str]:
+    if not authority_map:
+        return []
+    entries: list[str] = []
+    if isinstance(authority_map, list):
+        for item in authority_map:
+            if isinstance(item, dict):
+                entries.append(
+                    _authority_entry(
+                        item.get("surface") or item.get("name") or item.get("id") or item.get("target"),
+                        item,
+                    )
+                )
+            else:
+                entries.append(_authority_entry(item))
+    elif isinstance(authority_map, dict):
+        list_entries = []
+        for key in ("surfaces", "entries", "authorities", "surface_authorities"):
+            value = authority_map.get(key)
+            if isinstance(value, list):
+                list_entries = value
+                break
+        if list_entries:
+            return _authority_map_lines(list_entries, limit=limit)
+        for key, value in authority_map.items():
+            if key in {"raw", "raw_text", "private_source_text", "source_body"}:
+                continue
+            entries.append(_authority_entry(key, value))
+    entries = [entry for entry in _dedupe_list(entries) if entry]
+    if not entries:
+        return []
+    shown = entries[:limit]
+    suffix = f"; +{len(entries) - limit} more" if len(entries) > limit else ""
+    return ["Authority map: " + "; ".join(shown) + suffix]
+
+
+def _candidate_action_values(candidate: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("candidate_actions", "safe_actions", "actions", "action_descriptors"):
+        actions = candidate.get(key)
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if isinstance(action, dict):
+                values.append(
+                    _short(
+                        action.get("label")
+                        or action.get("action_id")
+                        or action.get("recommended_action")
+                        or action.get("method")
+                        or action.get("preview_tool"),
+                        "",
+                    )
+                )
+            else:
+                values.append(_short(action, ""))
+    descriptor = candidate.get("action_descriptor")
+    if isinstance(descriptor, dict):
+        values.append(
+            _short(
+                descriptor.get("label")
+                or descriptor.get("action_id")
+                or descriptor.get("method")
+                or descriptor.get("preview_tool"),
+                "",
+            )
+        )
+    recommended = _short(candidate.get("recommended_action") or candidate.get("action"), "")
+    if recommended:
+        values.append(recommended)
+    return _receipt_public_values(values, limit=120)
+
+
+def _candidate_action_line(candidate: dict[str, Any], *, indent: str = "   ") -> str:
+    actions = _candidate_action_values(candidate)
+    return _id_line(f"{indent}Candidate actions", actions, limit=4) if actions else ""
+
+
+def _render_lifecycle_update_packet(
+    packet: dict[str, Any],
+    *,
+    ctx: Any | None = None,
+    target: str = "",
+) -> dict[str, Any]:
+    workflow = _short(packet.get("workflow") or packet.get("title"), "Lifecycle Update")
+    stewardship = _short(packet.get("stewardship_area") or packet.get("domain"), "")
+    candidates = packet.get("candidates") if isinstance(packet.get("candidates"), list) else []
+    lines = ["Lifecycle Update"]
+    if workflow and workflow != "Lifecycle Update":
+        lines.append(f"Workflow: {workflow}")
+    if stewardship:
+        lines.append(f"Stewardship: {stewardship}")
+    status = _short(packet.get("status") or packet.get("state"), "")
+    if status:
+        lines.append(f"Status: {status}")
+    review_target = _receipt_public_value(packet.get("target") or packet.get("target_ref") or packet.get("scope"), limit=140)
+    if review_target:
+        lines.append(f"Target: {review_target}")
+    if packet.get("mutation_performed") is not None:
+        lines.append("Mutation: " + ("performed" if packet.get("mutation_performed") else "none"))
+    if packet.get("raw_private_source_text_copied") is not None:
+        lines.append(
+            "Raw private source text copied: "
+            + ("yes" if packet.get("raw_private_source_text_copied") else "no")
+        )
+    lines.extend(_source_manifest_lines(packet.get("source_manifest")))
+    lines.extend(_authority_map_lines(packet.get("surface_authority_map")))
+    lines.append(f"Candidates: {len(candidates)}")
+    for index, candidate in enumerate(candidates[:5], start=1):
+        if not isinstance(candidate, dict):
+            lines.append(f"{index}. {_clip(candidate, 180)}")
+            continue
+        title = _receipt_public_value(
+            candidate.get("title")
+            or candidate.get("name")
+            or candidate.get("candidate_id")
+            or candidate.get("target_ref"),
+            limit=140,
+        ) or "candidate"
+        lines.append(f"{index}. {title}")
+        action = _receipt_public_value(candidate.get("recommended_action") or candidate.get("action"), limit=80)
+        target_ref = _receipt_public_value(candidate.get("target_ref") or candidate.get("object_ref"), limit=140)
+        summary = _receipt_public_value(candidate.get("summary") or candidate.get("preview") or candidate.get("reason"), limit=180)
+        if action:
+            lines.append(f"   Action: {action}")
+        if target_ref:
+            lines.append(f"   Target: {target_ref}")
+        if summary:
+            lines.append(f"   Summary: {_clip(summary, 180)}")
+        action_line = _candidate_action_line(candidate)
+        if action_line:
+            lines.append(action_line)
+        evidence_refs = _receipt_public_values(_lifecycle_values(candidate.get("evidence_refs")), limit=120)
+        evidence_gaps = _receipt_public_values(_lifecycle_values(candidate.get("evidence_gaps")), limit=120)
+        if evidence_refs:
+            lines.append(_id_line("   Evidence", evidence_refs, limit=3))
+        if evidence_gaps:
+            lines.append(_id_line("   Gaps", evidence_gaps, limit=3))
+    if len(candidates) > 5:
+        lines.append(f"... {len(candidates) - 5} more candidate(s)")
+    if packet.get("mutation_performed") is False:
+        lines.append("No durable write has been made.")
+    return {
+        "title": "Lifecycle Update",
+        "text": "\n".join(lines),
+        "actions": _lifecycle_candidate_actions(ctx, target, candidates),
+    }
+
+
 def _render_publication_observation_packet(packet: dict[str, Any]) -> dict[str, Any]:
     state = _short(packet.get("publication_state") or packet.get("status") or packet.get("state"))
     changed_paths = _changed_paths(packet)
@@ -813,6 +1076,201 @@ def _semantic_transaction_id(packet: dict[str, Any]) -> str:
     elif not transaction_id:
         transaction_id = transaction
     return _receipt_public_value(transaction_id, limit=120)
+
+
+def _public_id_values(value: Any, *, limit: int = 120) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        values: list[Any] = []
+        for key in (
+            "id",
+            "object_id",
+            "object_ref",
+            "target_ref",
+            "ref",
+            "path",
+            "family",
+            "name",
+            "label",
+            "action_id",
+            "method",
+            "preview_tool",
+            "status",
+            "state",
+        ):
+            if value.get(key):
+                values.append(value.get(key))
+        return _receipt_public_values(values, limit=limit)
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            if isinstance(item, dict):
+                nested = _public_id_values(item, limit=limit)
+                values.extend(nested)
+            else:
+                values.append(item)
+        return _receipt_public_values(values, limit=limit)
+    return _receipt_public_values([value], limit=limit)
+
+
+def _classification_line(classification: Any) -> str:
+    if not classification:
+        return ""
+    if isinstance(classification, dict):
+        values = [
+            _receipt_public_value(
+                classification.get(key),
+                limit=80,
+            )
+            for key in ("family", "intent", "classification", "status", "state", "confidence")
+        ]
+        values = [value for value in values if value]
+        if values:
+            return "Classification: " + " / ".join(values)
+        summary = _receipt_public_value(classification.get("summary") or classification.get("reason"), limit=180)
+        return f"Classification: {summary}" if summary else ""
+    value = _receipt_public_value(classification, limit=120)
+    return f"Classification: {value}" if value else ""
+
+
+def _semantic_preview_lines(preview: Any) -> list[str]:
+    if not isinstance(preview, dict):
+        value = _receipt_public_value(preview, limit=180)
+        return [f"Preview: {value}"] if value else []
+    lines: list[str] = []
+    status = _receipt_public_value(preview.get("status") or preview.get("state"), limit=80)
+    summary = _receipt_public_value(preview.get("summary") or preview.get("safe_summary"), limit=220)
+    if status:
+        lines.append(f"Preview status: {status}")
+    if summary:
+        lines.append("Preview: " + _clip(summary, 220))
+    object_refs = _receipt_public_values(
+        _semantic_values_from(preview, "object_ids", "object_id", "object_refs", "object_ref", "objects"),
+        limit=140,
+    )
+    operations = _receipt_public_values(
+        _semantic_values_from(preview, "operation_ids", "operation_id", "operations", "operation_receipts"),
+        limit=120,
+    )
+    families = _public_id_values(preview.get("durable_write_families") or preview.get("families"), limit=100)
+    if families:
+        lines.append(_id_line("Preview families", families, limit=4))
+    if object_refs:
+        lines.append(_id_line("Preview objects", object_refs, limit=4))
+    if operations:
+        lines.append(_id_line("Preview operations", operations, limit=4))
+    return lines
+
+
+def _comparison_lines(comparison: Any) -> list[str]:
+    if not comparison:
+        return []
+    if not isinstance(comparison, dict):
+        value = _receipt_public_value(comparison, limit=180)
+        return [f"Comparison: {value}"] if value else []
+    status = _receipt_public_value(
+        comparison.get("status")
+        or comparison.get("state")
+        or comparison.get("result")
+        or comparison.get("outcome"),
+        limit=80,
+    )
+    lines = [f"Comparison: {status}"] if status else []
+    for label, key in (
+        ("Matches", "matches"),
+        ("Differences", "differences"),
+        ("Missing", "missing"),
+        ("Extra", "extra"),
+    ):
+        value = comparison.get(key)
+        if isinstance(value, list) and value:
+            lines.append(f"{label}: {len(value)}")
+        elif isinstance(value, int):
+            lines.append(f"{label}: {value}")
+    summary = _receipt_public_value(comparison.get("summary") or comparison.get("safe_summary"), limit=180)
+    if summary:
+        lines.append("Comparison summary: " + _clip(summary, 180))
+    return lines
+
+
+def _status_value(statuses: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = statuses.get(key)
+        if isinstance(value, dict):
+            found = _receipt_public_value(
+                value.get("status")
+                or value.get("state")
+                or value.get("result")
+                or value.get("reason"),
+                limit=80,
+            )
+        else:
+            found = _receipt_public_value(value, limit=80)
+        if found:
+            return found
+    return ""
+
+
+def _receipt_status_lines(statuses: Any) -> list[str]:
+    if not statuses:
+        return []
+    if not isinstance(statuses, dict):
+        value = _receipt_public_value(statuses, limit=120)
+        return [f"Receipt status: {value}"] if value else []
+    lines: list[str] = []
+    for label, keys in (
+        ("Prod write", ("prod_write_status", "prod_write", "prod", "durable_write", "write_status")),
+        ("Publication", ("publication_status", "publication", "sync_status", "sync")),
+        (
+            "Reconciliation",
+            (
+                "reconciliation_status",
+                "reconciliation",
+                "local_reconciliation",
+                "offline_reconciliation",
+            ),
+        ),
+        ("Shadow receipt", ("shadow_receipt_status", "shadow_receipt", "receipt_status", "status", "state")),
+    ):
+        value = _status_value(statuses, *keys)
+        if value:
+            lines.append(f"{label}: {value}")
+    return _dedupe_list(lines)
+
+
+def _render_semantic_write_shadow_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    lines = ["Semantic Write Shadow Preview"]
+    if packet.get("shadow_mode") is not None:
+        lines.append("Shadow mode: " + ("yes" if packet.get("shadow_mode") else "no"))
+    if packet.get("mutation_performed") is not None:
+        lines.append("Mutation: " + ("performed" if packet.get("mutation_performed") else "none"))
+    if packet.get("raw_private_source_text_copied") is not None:
+        lines.append(
+            "Raw private source text copied: "
+            + ("yes" if packet.get("raw_private_source_text_copied") else "no")
+        )
+    families = _public_id_values(packet.get("durable_write_families"), limit=100)
+    if families:
+        lines.append(_id_line("Durable write families", families, limit=5))
+    classification = _classification_line(packet.get("classification"))
+    if classification:
+        lines.append(classification)
+    lines.extend(_source_manifest_lines(packet.get("source_manifest")))
+    lines.extend(_authority_map_lines(packet.get("surface_authority_map")))
+    lines.extend(_semantic_preview_lines(packet.get("semantic_preview")))
+    lines.extend(_comparison_lines(packet.get("comparison")))
+    lines.extend(_receipt_status_lines(packet.get("receipt_status")))
+    candidate_actions = _receipt_public_values(
+        _public_id_values(packet.get("candidate_actions"), limit=120)
+        or _public_id_values(packet.get("actions"), limit=120),
+        limit=120,
+    )
+    if candidate_actions:
+        lines.append(_id_line("Candidate actions", candidate_actions, limit=5))
+    if packet.get("mutation_performed") is False:
+        lines.append("No durable write has been made.")
+    return {"title": "Semantic Write Shadow Preview", "text": "\n".join(lines), "actions": []}
 
 
 def _render_semantic_write_receipt_packet(packet: dict[str, Any]) -> dict[str, Any]:
@@ -1174,17 +1632,21 @@ def _render_supported_result_packet(
     packet = _first_result_packet(payload)
     if not packet:
         return None
-    packet_type = packet.get("packet_type")
+    packet_type = _packet_kind(packet)
     if packet_type == "report_admission_receipt":
         return _render_report_admission_packet(packet)
     if packet_type == "durable_graph_validation":
         return _render_graph_validation_packet(packet)
     if packet_type == "lifecycle_review.packet":
         return _render_lifecycle_review_packet(packet, ctx=ctx, target=target)
+    if packet_type == "lifecycle_update.packet":
+        return _render_lifecycle_update_packet(packet, ctx=ctx, target=target)
     if packet_type == "lifecycle_proposal_draft.packet":
         return _render_lifecycle_proposal_draft_packet(packet)
     if packet_type == "publication_observation":
         return _render_publication_observation_packet(packet)
+    if packet_type in SEMANTIC_WRITE_SHADOW_PACKET_TYPES:
+        return _render_semantic_write_shadow_packet(packet)
     if packet_type in SEMANTIC_WRITE_RECEIPT_PACKET_TYPES:
         return _render_semantic_write_receipt_packet(packet)
     if packet_type == "request.receipt":
@@ -2553,12 +3015,26 @@ def _queue_preview_metadata(payload: Any) -> dict[str, Any]:
     if review_session:
         metadata["review_session"] = review_session
         metadata["preview_session"] = review_session
+    if isinstance(payload, dict):
+        expected_before_hash = _short(
+            payload.get("expected_before_hash")
+            or payload.get("expectedBeforeHash")
+            or payload.get("before_hash")
+            or _get_path(payload, "preview", "expected_before_hash")
+            or _get_path(payload, "preview", "before_hash"),
+            "",
+        )
+        if expected_before_hash:
+            metadata["expected_before_hash"] = expected_before_hash
     return metadata
 
 
 def _apply_queue_preview_metadata(args: dict[str, Any], metadata: dict[str, Any]) -> None:
     if not metadata:
         return
+    expected_before_hash = _short(metadata.get("expected_before_hash"), "")
+    if expected_before_hash:
+        args.setdefault("expected_before_hash", expected_before_hash)
     review_session_id = _review_session_id(metadata)
     if review_session_id:
         args.setdefault("review_session_id", review_session_id)
@@ -4453,6 +4929,7 @@ def _queue_summary_payload(
         ctx,
         target,
         [
+            ("review.inbox", dict(args)),
             ("queue.summary", dict(args)),
             ("workbench.queue", dict(args)),
             ("queue.preview", {"limit": limit}),
@@ -5805,10 +6282,17 @@ def _kb_root_command(args: str) -> tuple[str, str]:
         return "kbqueue", rest
     if key == "review":
         review_head, _, review_tail = rest.partition(" ")
-        if review_head.strip().lower() in {"lifecycle", "stewardship"}:
+        review_mode = review_head.strip().lower()
+        if not review_mode:
+            return "kblifecycle", ""
+        if review_mode in {"lifecycle", "stewardship"}:
             return "kblifecycle", review_tail.strip()
-        if review_head.strip().lower() in {"proposal", "proposals", "queue", "inbox"}:
+        if review_mode in {"proposal", "proposals", "queue", "inbox"}:
             return "kbqueue", review_tail.strip()
+        if review_mode.isdigit() or review_mode in QUEUE_REPLY_DECISIONS:
+            return "kbqueue", rest
+        if "," in review_mode and all(part.strip().isdigit() for part in review_mode.split(",")):
+            return "kbqueue", rest
         return "kbqueue", rest
     if key in {"lifecycle", "stewardship"}:
         return "kblifecycle", rest
@@ -5831,7 +6315,7 @@ def _kb_command_help() -> dict[str, Any]:
                 "KB Commands",
                 "/kb status - prove lane, runtime, transport, publication, review, sync, dirtiness, and next action",
                 "/kb sync - preview evidence gathering and factual KB update workflow",
-                "/kb review - proposal-backed decision inbox",
+                "/kb review - lifecycle and proposal judgment inbox",
                 "Advanced/debug aliases are still accepted for operators, but these three verbs are the normal KB surface.",
             ]
         ),
@@ -5978,6 +6462,8 @@ def _card_for_command(
             ],
         )
         return _render_error("KB Runs", target, errors) if data is None else _render_runs(data)
+    if command == "kbreview" and not (args or "").strip():
+        return _render_lifecycle_review_command(ctx, target, "")
     if command in {"kbqueue", "kbreview"}:
         queue_scope, queue_args = _queue_scope_and_args(args)
         mode, indices, decision, confirm = _parse_queue_command_args(queue_args, command=command)
@@ -5986,6 +6472,9 @@ def _card_for_command(
         data, errors = _queue_summary_payload(ctx, target, scope=queue_scope, limit=5)
         if data is None:
             return _render_error("KB Review", target, errors)
+        packet_card = _render_supported_result_packet(data, ctx=ctx, target=target)
+        if packet_card is not None:
+            return packet_card
         if mode == "review" and indices:
             return _render_queue_item(data, index=indices[0], ctx=ctx, target=target)
         if mode == "decision" and indices and decision:
@@ -6203,9 +6692,10 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
             return None
         text = getattr(event, "text", "")
         command = _command_from_text(text)
+        prose_command = _prose_kb_command_from_text(text) if command is None else None
         bare_decision = _bare_queue_reply_decision(text)
         visible_all_decision = _visible_scope_all_decision(text)
-        if command is None and not bare_decision and not visible_all_decision:
+        if command is None and prose_command is None and not bare_decision and not visible_all_decision:
             return None
         if not _authorized_for_gateway(gateway, source):
             return None
@@ -6234,7 +6724,10 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 decision=bare_decision,
             )
         else:
-            args = _command_args_from_text(text)
+            if prose_command is not None:
+                command, args = prose_command
+            else:
+                args = _command_args_from_text(text)
             card = _card_for_command(
                 ctx,
                 command,

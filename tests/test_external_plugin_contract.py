@@ -163,3 +163,68 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     preview_args = ctx.calls[-1][1]
     assert preview_args["proposal_ids"] == ["act_crowdstrike"]
     assert preview_args["decision"] == "reject"
+
+
+def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+
+    lifecycle_ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_lifecycle_review": [
+                {
+                    "result": {
+                        "packet_type": "lifecycle_review.packet",
+                        "workflow": "Lifecycle Review",
+                        "stewardship_area": "KB Stewardship",
+                        "target": "situations",
+                        "mutation_performed": False,
+                        "candidates": [
+                            {
+                                "candidate_id": "cand_1",
+                                "title": "Review launch lifecycle",
+                                "target_ref": "situations/launch-lifecycle",
+                                "recommended_action": "review",
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    lifecycle_card = plugin._card_for_command(lifecycle_ctx, "kb", args="review")
+
+    assert lifecycle_ctx.calls == [
+        ("mcp_kb_engine_prod_lifecycle_review", {"target": "situations", "dry_run": True})
+    ]
+    assert "Lifecycle Review" in lifecycle_card["text"]
+    assert "Review launch lifecycle" in lifecycle_card["text"]
+    assert plugin._prose_kb_command_from_text("what is in the review queue") == ("kblifecycle", "")
+
+    queue_ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_review_inbox": [
+                {
+                    "result": {
+                        "total": 1,
+                        "items": [
+                            {
+                                "title": "Keio University",
+                                "kind": "proposal_entity",
+                                "entity_path": "accounts/keio-university",
+                                "preview": "Admission proposal for a healthcare AI PoC.",
+                                "proposal_ids": ["act_keio"],
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    queue_card = plugin._card_for_command(queue_ctx, "kb", args="review queue")
+
+    assert queue_ctx.calls[0][0] == "mcp_kb_engine_prod_review_inbox"
+    assert "KB Review" in queue_card["text"]
+    assert "Keio University" in queue_card["text"]
