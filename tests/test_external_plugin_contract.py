@@ -228,3 +228,29 @@ def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path,
     assert queue_ctx.calls[0][0] == "mcp_kb_engine_prod_review_inbox"
     assert "KB Review" in queue_card["text"]
     assert "Keio University" in queue_card["text"]
+
+
+def test_review_queue_refuses_legacy_queue_fallback_without_review_inbox(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+
+    queue_ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_queue_summary": [
+                {
+                    "result": {
+                        "total": 1,
+                        "items": [{"title": "Legacy Queue Item"}],
+                    }
+                }
+            ]
+        }
+    )
+
+    queue_card = plugin._card_for_command(queue_ctx, "kb", args="review queue")
+
+    assert queue_ctx.calls == [
+        ("mcp_kb_engine_prod_review_inbox", {"scope": "proposals", "limit": 5})
+    ]
+    assert "KB data is not available yet." in queue_card["text"]
+    assert "mcp_kb_engine_prod_review_inbox" in queue_card["text"]
+    assert "Legacy Queue Item" not in queue_card["text"]
