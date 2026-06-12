@@ -328,7 +328,7 @@ def _object_reference_lines(*packets: dict[str, Any], include_report_ref: bool =
     return lines
 
 
-def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
+def _receipt_lines(payload: Any, *, include_request: bool = False, public_sync: bool = False) -> list[str]:
     receipt = _request_receipt(payload)
     outcome = _request_outcome(payload)
     request = _request_envelope(payload)
@@ -338,9 +338,13 @@ def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
     if receipt:
         state = _short(receipt.get("state") or receipt.get("status"), "")
         if state:
+            if public_sync and state == "workflow_running":
+                state = "sync_running"
             lines.append(f"Receipt: {state}")
         effect = _short(receipt.get("durable_effect"), "")
         if effect:
+            if public_sync and effect == "workflow_run":
+                effect = "sync_started"
             lines.append(f"Effect: {effect}")
         if receipt.get("llm_invoked_by_read_surface") is not None:
             lines.append(
@@ -5897,7 +5901,13 @@ def _workflow_envelope(plan: dict[str, Any], callback_ctx: Any) -> dict[str, Any
     }
 
 
-def _workflow_start_text(ctx: Any, target: str, plan: dict[str, Any]) -> str:
+def _workflow_start_text(
+    ctx: Any,
+    target: str,
+    plan: dict[str, Any],
+    *,
+    prefix: str = "Workflow start result",
+) -> str:
     callback_ctx = SimpleNamespace(
         callback_id=f"text-{int(time.time())}",
         actor_id="operator",
@@ -5910,7 +5920,7 @@ def _workflow_start_text(ctx: Any, target: str, plan: dict[str, Any]) -> str:
             {"envelope": envelope},
         )
     )
-    text = _workflow_status_text("Workflow start result", payload, include_run_details=False)
+    text = _workflow_status_text(prefix, payload, include_run_details=False)
     run_id = _workflow_run_id(payload)
     if run_id:
         progress_text = _workflow_initial_progress_text(ctx, target, run_id, include_run_details=False)
@@ -6110,7 +6120,7 @@ def _workflow_status_text(prefix: str, payload: Any, *, include_run_details: boo
         prefix,
         f"Status: {_short(payload.get('status'))}",
     ]
-    lines.extend(_receipt_lines(payload))
+    lines.extend(_receipt_lines(payload, public_sync=prefix.startswith("KB sync")))
     run_id = _workflow_run_id(payload)
     if run_id and include_run_details:
         lines.append(f"Run: {run_id}")
@@ -6124,6 +6134,21 @@ def _workflow_status_text(prefix: str, payload: Any, *, include_run_details: boo
     return "\n".join(lines)
 
 
+def _sync_public_receipt_lines(payload: Any) -> list[str]:
+    receipt = _request_receipt(payload)
+    lines: list[str] = []
+    if isinstance(receipt, dict):
+        state = _short(receipt.get("state") or receipt.get("status"), "")
+        if state:
+            lines.append(f"Receipt: {state}")
+        if receipt.get("llm_invoked_by_read_surface") is not None:
+            lines.append(
+                "Read-surface LLM: "
+                + ("yes" if receipt.get("llm_invoked_by_read_surface") else "no")
+            )
+    return lines
+
+
 def _render_workflow_plan(
     data: Any,
     *,
@@ -6133,6 +6158,7 @@ def _render_workflow_plan(
     start_hint: str = "/kb run sync confirm",
     title: str = "Workflow",
     heading: str = "Workflow Preview",
+    public_sync: bool = False,
 ) -> dict[str, Any]:
     if isinstance(data, dict) and data.get("error"):
         return {"title": title, "text": f"{heading} failed\n{data['error']}", "actions": []}
@@ -6142,6 +6168,24 @@ def _render_workflow_plan(
     request = data.get("request") if isinstance(data.get("request"), dict) else {}
     effect_plan = data.get("effect_plan") if isinstance(data.get("effect_plan"), dict) else {}
     effects = effect_plan.get("effects") if isinstance(effect_plan.get("effects"), list) else []
+    if public_sync:
+        request_hint = start_hint.removesuffix(" confirm") if start_hint.endswith(" confirm") else start_hint
+        lines = [
+            heading,
+            f"Request: {request_hint}",
+            "Journey: kb_sync",
+            f"Status: {_short(data.get('status'))}",
+            "Preview sync: source evidence refresh, factual KB updates, and reviewable work.",
+            "Judgment authority: kb review",
+        ]
+        lines.extend(_sync_public_receipt_lines(data))
+        if isinstance(data.get("readiness"), dict):
+            lines.append("Readiness: " + _short(data["readiness"].get("status")))
+        if effects:
+            lines.append("Planned work: source evidence, factual updates, lifecycle signals, and proposals")
+        if data.get("status") == "confirmation_required":
+            lines.append(f"Confirm sync: {start_hint}")
+        return {"title": title, "text": "\n".join(lines), "actions": []}
     lines = [
         heading,
         f"Request: {start_hint.removesuffix(' confirm') if start_hint.endswith(' confirm') else start_hint}",
@@ -6504,7 +6548,7 @@ def _card_for_command(
             if state is None:
                 return {"title": "KB Sync", "text": _sync_confirm_blocked_text(reason), "actions": []}
             plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-            text = _workflow_start_text(ctx, target, plan)
+            text = _workflow_start_text(ctx, target, plan, prefix="KB sync journey result")
             _clear_sync_preview_state(queue_session_id)
             return {"title": "KB Sync", "text": text, "actions": []}
         _, data, errors = _dispatch_first(
@@ -6543,7 +6587,8 @@ def _card_for_command(
             adapter=adapter,
             start_hint="/kb sync confirm",
             title="KB Sync",
-            heading="KB Sync Preview",
+            heading="KB Sync Journey Preview",
+            public_sync=True,
         )
     if command == "kbrun":
         workflow_id, intent, confirm = _workflow_args_from_text(args)
@@ -6571,8 +6616,18 @@ def _card_for_command(
         )
         if data is None:
             return _render_error("Workflow", target, errors)
+        public_sync = workflow_id == "update_kb"
         if confirm and isinstance(data, dict) and data.get("status") == "confirmation_required":
-            return {"title": "Workflow", "text": _workflow_start_text(ctx, target, data), "actions": []}
+            return {
+                "title": "KB Sync" if public_sync else "Workflow",
+                "text": _workflow_start_text(
+                    ctx,
+                    target,
+                    data,
+                    prefix="KB sync journey result" if public_sync else "Workflow start result",
+                ),
+                "actions": [],
+            }
         hint_args = (args or "sync").strip()
         hint_parts = hint_args.split()
         if hint_parts and hint_parts[-1].lower() in {"confirm", "confirmed", "start", "apply"}:
@@ -6583,6 +6638,9 @@ def _card_for_command(
             target=target,
             adapter=adapter,
             start_hint=f"/kb run {hint_args or 'sync'} confirm",
+            title="KB Sync" if public_sync else "Workflow",
+            heading="KB Sync Journey Preview" if public_sync else "Workflow Preview",
+            public_sync=public_sync,
         )
     return {"title": "KB", "text": "Unsupported KB command.", "actions": []}
 

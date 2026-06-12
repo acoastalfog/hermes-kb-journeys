@@ -113,6 +113,63 @@ def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
     assert "/kb publish" not in text
 
 
+def test_public_sync_preview_hides_executor_vocabulary(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    plan = {
+        "status": "confirmation_required",
+        "workflow": {"workflow_id": "update_kb", "risk": "write_broad"},
+        "request": {"force": False},
+        "effect_plan": {"effects": [{"id": "source_sync"}, {"id": "proposal"}]},
+        "receipt": {"state": "ready_to_confirm", "llm_invoked_by_read_surface": False},
+    }
+
+    card = plugin._render_workflow_plan(
+        plan,
+        ctx=FakeContext({}),
+        target="kb_engine_prod",
+        adapter=None,
+        start_hint="/kb sync confirm",
+        title="KB Sync",
+        heading="KB Sync Journey Preview",
+        public_sync=True,
+    )
+    text = card["text"]
+
+    assert "KB Sync Journey Preview" in text
+    assert "Journey: kb_sync" in text
+    assert "Preview sync:" in text
+    assert "Confirm sync: /kb sync confirm" in text
+    assert "update_kb" not in text
+    assert "Workflow:" not in text
+    assert "workflow." not in text
+
+
+def test_public_sync_start_result_hides_executor_vocabulary(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload = {
+        "status": "started",
+        "started": True,
+        "receipt": {
+            "state": "workflow_running",
+            "durable_effect": "workflow_run",
+            "llm_invoked_by_read_surface": False,
+        },
+    }
+
+    text = plugin._workflow_status_text(
+        "KB sync journey result",
+        payload,
+        include_run_details=False,
+    )
+
+    assert "KB sync journey result" in text
+    assert "Receipt: sync_running" in text
+    assert "Effect: sync_started" in text
+    assert "update_kb" not in text
+    assert "Workflow" not in text
+    assert "workflow_" not in text
+
+
 def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb-engine-prod")
