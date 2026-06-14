@@ -6343,6 +6343,8 @@ def _kb_root_command(args: str) -> tuple[str, str]:
         return "kbmeeting", rest
     if key == "sync":
         return "kbsync", rest
+    if key in {"capture", "save", "keep"}:
+        return "kbcapture", rest
     return "kbhelp", text
 
 
@@ -6412,6 +6414,7 @@ def _card_for_command(
     gateway: Any = None,
     source: Any = None,
     session_store: Any = None,
+    event: Any = None,
 ) -> dict[str, Any]:
     target = _mcp_target()
     queue_session_id = _conversation_state_id(session_store, source)
@@ -6434,6 +6437,7 @@ def _card_for_command(
                 gateway=gateway,
                 source=source,
                 session_store=session_store,
+                event=event,
             )
         _, data, errors = _dispatch_first(
             ctx,
@@ -6539,6 +6543,10 @@ def _card_for_command(
             source=source,
             session_store=session_store,
             adapter=adapter,
+        )
+    if command == "kbcapture":
+        return _render_capture_command(
+            ctx, target, args, event=event, source=source, session_store=session_store
         )
     if command == "kbsync":
         sync_args = f"sync {args}".strip()
@@ -6738,6 +6746,163 @@ def _run_delivery(coro: Any) -> None:
     loop.create_task(coro)
 
 
+# --- Telegram capture (Phase 2 #7): save a message as kb.source_evidence ---
+CAPTURE_CONNECTOR_ID = "hermes.plugin.telegram_capture"
+CAPTURE_SOURCE_ID = "telegram.capture"
+
+
+def _capture_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _capture_preview_state_path():
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "state" / "kb_capture_preview_state.json"
+
+
+def _load_capture_states() -> dict[str, Any]:
+    path = _capture_preview_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_capture_states(states: dict[str, Any]) -> None:
+    path = _capture_preview_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(states, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        logger.debug("kb_journeys: failed to persist capture preview state", exc_info=True)
+
+
+def _store_capture_preview_state(session_id: str, *, source: Any, target: str, packet: dict[str, Any]) -> None:
+    if not session_id:
+        return
+    states = _load_capture_states()
+    states[session_id] = {
+        "schema_version": 1,
+        "recorded_at": time.time(),
+        "actor_id": _telegram_user_id(source),
+        "target": target,
+        "packet": packet,
+    }
+    _save_capture_states(states)
+
+
+def _get_capture_preview_state(session_id: str, source: Any) -> tuple[dict[str, Any] | None, str]:
+    if not session_id:
+        return None, "missing_session"
+    state = _load_capture_states().get(session_id)
+    if not isinstance(state, dict):
+        return None, "missing"
+    recorded_at = float(state.get("recorded_at") or 0.0)
+    if not recorded_at or time.time() - recorded_at > SYNC_PREVIEW_STATE_TTL_SECONDS:
+        _clear_capture_preview_state(session_id)
+        return None, "stale"
+    actor_id = _short(state.get("actor_id"), "")
+    current_actor = _telegram_user_id(source)
+    if actor_id and current_actor and actor_id != current_actor:
+        return None, "wrong_actor"
+    if not isinstance(state.get("packet"), dict):
+        return None, "invalid"
+    return state, ""
+
+
+def _clear_capture_preview_state(session_id: str) -> None:
+    if not session_id:
+        return
+    states = _load_capture_states()
+    if states.pop(session_id, None) is not None:
+        _save_capture_states(states)
+
+
+def _capture_target_from_event(event: Any, inline: str) -> tuple[str, str, str, dict[str, Any]]:
+    """(chat_id, message_id, text, meta). Reply -> the replied-to message; else inline text."""
+    source = getattr(event, "source", None)
+    chat_id = _short(getattr(source, "chat_id", ""), "")
+    meta: dict[str, Any] = {}
+    raw = getattr(event, "raw_message", None)
+    fwd = getattr(raw, "forward_origin", None)
+    if fwd is not None:
+        meta["forwarded"] = True
+        meta["forward_origin_type"] = _short(getattr(fwd, "type", ""), "")
+    reply_id = getattr(event, "reply_to_message_id", None)
+    reply_text = getattr(event, "reply_to_text", None)
+    if reply_id and reply_text:
+        return chat_id, _short(reply_id, ""), str(reply_text), meta
+    if (inline or "").strip():
+        return chat_id, _short(getattr(event, "message_id", ""), ""), inline.strip(), meta
+    return chat_id, _short(getattr(event, "message_id", ""), ""), "", meta
+
+
+def _build_telegram_capture_packet(
+    chat_id: str, message_id: str, text: str, meta: dict[str, Any], *, harness_id: str = "hermes"
+) -> dict[str, Any]:
+    external_id = f"{chat_id}:{message_id}" if chat_id and message_id else (message_id or "")
+    item: dict[str, Any] = {
+        "external_id": external_id,
+        "text": str(text or ""),
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "captured_at": _capture_now(),
+    }
+    item.update(meta or {})
+    return {
+        "schema_version": 1,
+        "kind": "kb.source_evidence",
+        "source_id": CAPTURE_SOURCE_ID,
+        "connector_id": CAPTURE_CONNECTOR_ID,
+        "harness_id": harness_id,
+        "collected_at": _capture_now(),
+        "requested_journey": "kb_sync",
+        "items": [item],
+        "provenance": {
+            "source_refs": [f"telegram://chat/{chat_id}/message/{message_id}"],
+            "external_ids": [external_id] if external_id else [],
+            "retrieval_method": "telegram_capture",
+        },
+        "privacy": {"classification": "internal", "redactions_applied": []},
+        "limits": {"max_items": 1, "truncated": False},
+    }
+
+
+def _render_capture_command(
+    ctx: Any, target: str, args: str, *, event: Any = None, source: Any = None, session_store: Any = None
+) -> dict[str, Any]:
+    session_id = _conversation_state_id(session_store, source)
+    text = (args or "").strip()
+    if text.lower() == "confirm":
+        state, reason = _get_capture_preview_state(session_id, source)
+        if state is None:
+            return {"title": "KB Capture", "text": f"KB Capture\nNothing to confirm ({reason}). Reply /kb capture to a message first.", "actions": []}
+        _, data, errors = _dispatch_first(
+            ctx, target,
+            [("kb_sync.confirmed", {"evidence_packet": state.get("packet"), "user_confirmation": {"confirmed": True}})],
+        )
+        _clear_capture_preview_state(session_id)
+        if data is None:
+            return _render_error("KB Capture", target, errors)
+        return {"title": "KB Capture", "text": "KB Capture\nCaptured to the KB.", "actions": []}
+    chat_id, message_id, captured_text, meta = _capture_target_from_event(event, text)
+    if not captured_text:
+        return {"title": "KB Capture", "text": "KB Capture\nReply /kb capture to a message, or send /kb capture <text>.", "actions": []}
+    packet = _build_telegram_capture_packet(chat_id, message_id, captured_text, meta)
+    _, data, errors = _dispatch_first(ctx, target, [("kb_sync.preview", {"evidence_packet": packet})])
+    if data is None:
+        return _render_error("KB Capture", target, errors)
+    _store_capture_preview_state(session_id, source=source, target=target, packet=packet)
+    preview = _short(captured_text, "")[:160]
+    lines = ["KB Capture - preview", f"Will capture as {CAPTURE_SOURCE_ID} (id {chat_id}:{message_id})."]
+    if preview:
+        lines.append(f"“{preview}”")
+    lines.append("Confirm: /kb capture confirm")
+    return {"title": "KB Capture", "text": "\n".join(lines), "actions": []}
+
+
 def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | None]:
     def _hook(event: Any = None, gateway: Any = None, session_store: Any = None, **_: Any) -> dict[str, str] | None:
         source = getattr(event, "source", None)
@@ -6789,6 +6954,7 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 gateway=gateway,
                 source=source,
                 session_store=session_store,
+                event=event,
             )
         reload_mcp = bool(card.pop("_reload_mcp", False))
         _run_delivery(_send_card(adapter, event, card))

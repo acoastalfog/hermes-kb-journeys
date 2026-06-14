@@ -311,3 +311,60 @@ def test_review_queue_refuses_legacy_queue_fallback_without_review_inbox(tmp_pat
     assert "KB data is not available yet." in queue_card["text"]
     assert "mcp_kb_engine_prod_review_inbox" in queue_card["text"]
     assert "Legacy Queue Item" not in queue_card["text"]
+
+
+# --- Phase 2 #7: Telegram capture command ---
+
+def test_kb_capture_preview_builds_telegram_capture_packet(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [
+            {"status": "preview_ready", "ok": True, "source": {"source_id": "telegram.capture", "new_count": 1}}
+        ],
+    })
+    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
+    event = SimpleNamespace(
+        source=source, message_id="100", reply_to_message_id="99",
+        reply_to_text="This tweet about a new model is important", raw_message=None, text="/kb capture",
+    )
+    card = plugin._render_capture_command(ctx, "kb_engine_prod", "", event=event, source=source, session_store=None)
+    assert "Confirm: /kb capture confirm" in card["text"]
+    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
+    packet = ctx.calls[0][1]["evidence_packet"]
+    assert packet["source_id"] == "telegram.capture"
+    assert packet["connector_id"] == "hermes.plugin.telegram_capture"
+    assert packet["harness_id"] == "hermes"
+    # captures the replied-to message (99), not the command message (100)
+    assert packet["items"][0]["external_id"] == "12345678:99"
+    assert packet["provenance"]["external_ids"] == ["12345678:99"]
+    assert "tweet about a new model" in packet["items"][0]["text"]
+
+
+def test_kb_capture_confirm_writes_via_kb_sync_confirmed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "applied", "ok": True, "receipt": {"new_count": 1}}],
+    })
+    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
+    ev = SimpleNamespace(source=source, message_id="100", reply_to_message_id="99",
+                         reply_to_text="important note", raw_message=None, text="/kb capture")
+    plugin._render_capture_command(ctx, "kb_engine_prod", "", event=ev, source=source, session_store=None)  # preview stores state
+    confirm_ev = SimpleNamespace(source=source, message_id="101", reply_to_message_id=None,
+                                 reply_to_text=None, raw_message=None, text="/kb capture confirm")
+    card = plugin._render_capture_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
+    assert "Captured to the KB" in card["text"]
+    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
+    assert confirmed, ctx.calls
+    args = confirmed[0][1]
+    assert args["user_confirmation"] == {"confirmed": True}
+    assert args["evidence_packet"]["items"][0]["external_id"] == "12345678:99"
+
+
+def test_kb_capture_routes_via_root_command(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._kb_root_command("capture") == ("kbcapture", "")
+    assert plugin._kb_root_command("capture confirm") == ("kbcapture", "confirm")
+    assert plugin._kb_root_command("save") == ("kbcapture", "")
