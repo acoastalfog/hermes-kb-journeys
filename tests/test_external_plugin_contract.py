@@ -399,3 +399,33 @@ def test_expandable_block_passthrough_for_short_body(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     assert plugin._expandable_block("ok") == "ok"
     assert plugin._expandable_block("one\ntwo") == "one\ntwo"  # 2 lines < min
+
+
+# --- Phase A Task 2: inline MarkdownV2 emphasis (bold headlines) ---
+
+def test_emphasis_headline_bolds_and_preserves_text(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._emphasis_headline("KB Dashboard") == "*KB Dashboard*"  # MarkdownV2 bold
+
+
+def test_emphasis_headline_does_not_escape(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._emphasis_headline("A_B") == "*A_B*"  # only adds *, no escapes
+
+
+def test_render_error_headline_is_bold(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_error("KB Status", "kb_engine_prod", ["boom"])
+    assert card["text"].startswith("*KB Status*")  # bold headline
+    assert "KB data is not available yet." in card["text"]
+
+
+def test_render_dashboard_headline_is_bold(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_dashboard(
+        {"summary": {"readiness_status": "ready", "publication_status": "clean"}},
+        ctx=FakeContext({}),
+        target="kb_engine_prod",
+    )
+    assert card["text"].startswith("*KB*")  # bold headline
+    assert "kb status:" in card["text"]

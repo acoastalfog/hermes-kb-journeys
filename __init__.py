@@ -289,6 +289,18 @@ def _expandable_block(text: str) -> str:
     return "\n".join([head, *tail])
 
 
+def _emphasis_headline(label: str) -> str:
+    """Bold a card headline in MarkdownV2. PLUGIN-DATA-SHAPE-ONLY.
+
+    Assumes ``label`` is plain headline text that the caller's text assembly
+    will escape via format_message; we only add the '*' emphasis markers and
+    add NO escapes (caller owns escaping). Only bold short, control-char-free
+    headline labels (no interpolated user/MCP free-text).
+    """
+    label = (label or "").strip()
+    return f"*{label}*" if label else label
+
+
 def _request_receipt(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1864,7 +1876,7 @@ def _public_error(errors: list[str]) -> str:
 
 def _render_error(title: str, target: str, errors: list[str]) -> dict[str, Any]:
     detail = _public_error(errors)
-    text = f"{title}\nMCP target: {target}\nKB data is not available yet.\n{detail}"
+    text = f"{_emphasis_headline(title)}\nMCP target: {target}\nKB data is not available yet.\n{detail}"
     return {"title": title, "text": text, "actions": []}
 
 
@@ -1919,7 +1931,11 @@ def _render_today(data: Any) -> dict[str, Any]:
 
 def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     if not isinstance(data, dict):
-        return {"title": "KB", "text": f"KB\n{_short(data, 'No KB details returned.')}", "actions": []}
+        return {
+            "title": "KB",
+            "text": f"{_emphasis_headline('KB')}\n{_short(data, 'No KB details returned.')}",
+            "actions": [],
+        }
 
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     readiness = _short(
@@ -1939,7 +1955,7 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         todo_count = _count_from(data, "todo", "todos")
     active_runs = summary.get("active_run_count")
     lines = [
-        "KB",
+        _emphasis_headline("KB"),
         f"kb status: runtime {readiness} · publication {publication}",
     ]
     if data.get("llm_invoked_by_read_surface") is not None:
