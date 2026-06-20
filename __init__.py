@@ -265,6 +265,30 @@ def _clip(value: Any, limit: int = 220) -> str:
     return text[: max(0, limit - 1)].rstrip() + "..."
 
 
+_EXPANDABLE_MIN_LINES = 3  # only collapse genuinely long bodies
+
+
+def _expandable_block(text: str) -> str:
+    """Wrap a multi-line body in a Telegram EXPANDABLE blockquote.
+
+    telegram.py _convert_blockquote regex is r'^((?:\\*\\*)?>{1,3}) (.+)$'
+    (a SPACE is required after the '>'/'**>' prefix). The expandable variant
+    fires when a matched line has a '**>' prefix AND content ending in '||'.
+    We therefore emit:  '**> <first>||'  then  '> <line>' continuations.
+    Short bodies pass through unchanged. PLUGIN-DATA-SHAPE-ONLY: no fork-core
+    edit; format_message already understands this marker.
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    if len(lines) < _EXPANDABLE_MIN_LINES:
+        return text
+    first, *rest = lines
+    head = f"**> {first}||"           # space after **> ; || marks expandable on this matched line
+    tail = [f"> {ln}" for ln in rest]  # space after > on every continuation line
+    return "\n".join([head, *tail])
+
+
 def _request_receipt(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}

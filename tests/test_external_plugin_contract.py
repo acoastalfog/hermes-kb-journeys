@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import json
@@ -368,3 +369,33 @@ def test_kb_capture_routes_via_root_command(tmp_path, monkeypatch):
     assert plugin._kb_root_command("capture") == ("kbcapture", "")
     assert plugin._kb_root_command("capture confirm") == ("kbcapture", "confirm")
     assert plugin._kb_root_command("save") == ("kbcapture", "")
+
+
+# --- Phase A Task 1: expandable blockquote for long bodies ---
+
+# Verified-live telegram.py _convert_blockquote regex (re.MULTILINE): a SPACE is
+# required after the '>'/'**>' prefix; expandable fires when the first matched
+# line has a '**>' prefix AND content ending in '||'.
+_TELEGRAM_BLOCKQUOTE_RE = re.compile(r'^((?:\*\*)?>{1,3}) (.+)$')
+
+
+def test_expandable_block_matches_telegram_blockquote_regex(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    body = "line one\nline two\nline three"
+    out = plugin._expandable_block(body)
+    out_lines = out.splitlines()
+    first = _TELEGRAM_BLOCKQUOTE_RE.match(out_lines[0])
+    assert first is not None, f"first line does not match blockquote regex: {out_lines[0]!r}"
+    assert first.group(1).startswith("**"), "first line must be expandable (**> prefix)"
+    assert first.group(2).endswith("||"), "first matched line content must end with || to be expandable"
+    # Every interior line must ALSO match the regex (space after '>') so it renders
+    # as a quote, not literal text.
+    for ln in out_lines:
+        assert _TELEGRAM_BLOCKQUOTE_RE.match(ln) is not None, f"line does not match: {ln!r}"
+    assert "line one" in out and "line three" in out
+
+
+def test_expandable_block_passthrough_for_short_body(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._expandable_block("ok") == "ok"
+    assert plugin._expandable_block("one\ntwo") == "one\ntwo"  # 2 lines < min
