@@ -2803,7 +2803,7 @@ def _render_status(
         readiness = _short(_readiness_status(data))
         publication = _short(_publication_status(data))
     lines = [
-        "KB Status",
+        _emphasis_headline("KB Status"),
         f"Lane: {snap['lane']}",
         f"Environment: {snap['environment']}",
         f"MCP target: {target}",
@@ -2916,8 +2916,7 @@ def _render_status_proof(
     privacy = packet.get("privacy") if isinstance(packet.get("privacy"), dict) else {}
     privacy_ok = not any(bool(value) for value in privacy.values())
     next_action = _next_action_summary(packet)
-    lines = [
-        "KB Status",
+    detail_lines = [
         "Request: /kb status",
         f"Outcome: {status}",
         f"Lane: {lane}",
@@ -2933,9 +2932,18 @@ def _render_status_proof(
         f"Hermes reasoning: {snap['reasoning']}",
     ]
     if next_action:
-        lines.append(f"Next: {next_action}")
-    lines.append("Commands: /kb sync · /kb review")
-    return {"title": "KB Status", "text": "\n".join(lines), "actions": []}
+        detail_lines.append(f"Next: {next_action}")
+    # Phase B pilot: bold headline (Task 2) + collapse the long status detail body
+    # into an expandable blockquote (Task 1). The Commands hint stays outside the
+    # block so the primary action remains immediately visible. PLUGIN-DATA-SHAPE-ONLY.
+    text = "\n".join(
+        [
+            _emphasis_headline("KB Status"),
+            _expandable_block("\n".join(detail_lines)),
+            "Commands: /kb sync · /kb review",
+        ]
+    )
+    return {"title": "KB Status", "text": text, "actions": []}
 
 
 def _render_runs(data: Any) -> dict[str, Any]:

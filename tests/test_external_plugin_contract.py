@@ -429,3 +429,45 @@ def test_render_dashboard_headline_is_bold(tmp_path, monkeypatch):
     )
     assert card["text"].startswith("*KB*")  # bold headline
     assert "kb status:" in card["text"]
+
+
+# --- Phase B Task 5: enriched _render_status cockpit pilot ---
+
+def _status_proof_packet():
+    # Shape verified against _render_status -> _render_status_proof dispatch:
+    # kind triggers the proof renderer; these fields populate the long status body.
+    return {
+        "kind": "kb_status_proof_packet",
+        "status": "ready",
+        "active_target": {"target": "kb_engine_prod"},
+        "runtime": {"version": "v0.36.1"},
+        "transport": {"status": "open"},
+        "publication": {"status": "clean"},
+        "review": {"pending_count": 3},
+        "sync": {"status": "idle"},
+        "next_action": {"command": "/kb sync"},
+    }
+
+
+def test_render_status_enriched_card_composition(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_status(_status_proof_packet(), "kb_engine_prod")
+    text = card["text"]
+    assert text.startswith("*")                       # bold headline (Task 2)
+    assert "**> " in text and "||" in text            # long body collapsed (Task 1)
+    # The detail content survives inside the expandable block.
+    assert "Outcome: ready" in text
+    assert "v0.36.1" in text
+    assert "/kb sync" in text
+    # Every expandable/quote line must match the verified telegram blockquote regex
+    # (space after the prefix) so the body renders as a quote, not literal text.
+    for ln in text.splitlines():
+        if ln.startswith(">") or ln.startswith("**>"):
+            assert _TELEGRAM_BLOCKQUOTE_RE.match(ln) is not None, f"bad quote line: {ln!r}"
+
+
+def test_render_status_simple_card_headline_is_bold(tmp_path, monkeypatch):
+    # Non-proof status packet still gets the bold headline; short body stays inline.
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_status({"readiness": "ready"}, "kb_engine_prod")
+    assert card["text"].startswith("*KB Status*")
