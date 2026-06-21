@@ -301,6 +301,56 @@ def _emphasis_headline(label: str) -> str:
     return f"*{label}*" if label else label
 
 
+# ----------------------------------------------------------------------------
+# RAW-markdown rich-card builders (Bot API 10.1 sendRichMessage).
+#
+# These emit RAW markdown (NOT format_message/MarkdownV2-escaped) for the
+# separate ``rich_markdown`` card field. The adapter passes this verbatim into
+# rich_message.markdown, so Telegram parses '#' headings and '|' tables
+# server-side. The legacy ``text`` field stays MarkdownV2-escaped for fallback.
+# PLUGIN-DATA-SHAPE-ONLY: no fork-core edit.
+# ----------------------------------------------------------------------------
+_RICH_CELL_RE = re.compile(r"[|\n]")
+
+
+def _rich_cell(value: Any) -> str:
+    """Sanitize a value for a single rich-markdown table cell.
+
+    Pipes and newlines would break the table grammar; collapse them so a stray
+    MCP value can never split or escape its cell.
+    """
+    return _RICH_CELL_RE.sub(" ", _short(value, "")).strip()
+
+
+def _rich_heading(label: str) -> str:
+    """A level-2 rich-markdown heading (Telegram renders it as a SectionHeading).
+
+    The label is run through the same newline/pipe collapse used for table
+    cells (``_RICH_CELL_RE``) so a dashboard section title carrying a stray
+    newline or pipe can never break the heading line or bleed into the
+    following table grammar.
+    """
+    collapsed = _RICH_CELL_RE.sub(" ", (label or "")).strip()
+    return f"## {collapsed}".rstrip()
+
+
+def _rich_kv_table(title: str, pairs: list[tuple[str, Any]]) -> str:
+    """Render ``(key, value)`` pairs as a 2-column rich-markdown table.
+
+    Empty values are kept so the row count is stable and the card reads as a
+    complete status sheet. Returns a heading + table block.
+    """
+    lines = [_rich_heading(title), "", "| Field | Value |", "| --- | --- |"]
+    for key, value in pairs:
+        lines.append(f"| {_rich_cell(key)} | {_rich_cell(value)} |")
+    return "\n".join(lines)
+
+
+def _rich_bullets(items: Iterable[Any]) -> list[str]:
+    """Render values as a rich-markdown bullet list."""
+    return [f"- {_rich_cell(item)}" for item in items if _rich_cell(item)]
+
+
 def _request_receipt(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1926,7 +1976,33 @@ def _render_today(data: Any) -> dict[str, Any]:
         lines.append("Runs: " + " · ".join(run_bits[:3]))
     if next_actions:
         lines.append("Next: " + "; ".join(_item_title(a) for a in next_actions[:3]))
-    return {"title": "KB Today", "text": "\n".join(lines), "actions": []}
+
+    # Rich path: a status KV table + native bullet lists for runs / next actions.
+    today_pairs: list[tuple[str, Any]] = [
+        ("Readiness", readiness),
+        ("Publication", publication),
+    ]
+    if queue_count is not None:
+        today_pairs.append(("Proposals", _short(queue_count, "unknown")))
+    if todo_count is not None:
+        today_pairs.append(("TODOs", _short(todo_count, "unknown")))
+    rich_parts = [_rich_kv_table("KB Today", today_pairs)]
+    if run_bits:
+        rich_parts.append("")
+        rich_parts.append(_rich_heading("Runs"))
+        rich_parts.append("")
+        rich_parts.extend(_rich_bullets(run_bits[:3]))
+    if next_actions:
+        rich_parts.append("")
+        rich_parts.append(_rich_heading("Next"))
+        rich_parts.append("")
+        rich_parts.extend(_rich_bullets(_item_title(a) for a in next_actions[:3]))
+    return {
+        "title": "KB Today",
+        "text": "\n".join(lines),
+        "actions": [],
+        "rich_markdown": "\n".join(rich_parts),
+    }
 
 
 def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
@@ -1958,6 +2034,13 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         _emphasis_headline("KB"),
         f"kb status: runtime {readiness} · publication {publication}",
     ]
+    # Rich path: native heading + status table + section bullet lists. RAW
+    # markdown kept SEPARATE from the MarkdownV2 `text` body. The dashboard's
+    # descriptor buttons ride along in the SAME rich message via send_kb_actions.
+    rich_parts = [_rich_kv_table(
+        "KB",
+        [("Runtime", readiness), ("Publication", publication)],
+    )]
     if data.get("llm_invoked_by_read_surface") is not None:
         lines.append(
             "Read-surface LLM: "
@@ -1973,6 +2056,14 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         lines.append("kb review: " + " · ".join(counts))
     if active_runs is not None:
         lines.append(f"kb sync: {active_runs} active run(s)")
+    review_sync_bits: list[str] = []
+    if counts:
+        review_sync_bits.append("kb review: " + " · ".join(counts))
+    if active_runs is not None:
+        review_sync_bits.append(f"kb sync: {active_runs} active run(s)")
+    if review_sync_bits:
+        rich_parts.append("")
+        rich_parts.extend(_rich_bullets(review_sync_bits))
     for section in sections[:4]:
         if not isinstance(section, dict):
             continue
@@ -1981,12 +2072,17 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
             continue
         lines.append("")
         lines.append(_dashboard_section_title(section, summary))
+        rich_parts.append("")
+        rich_parts.append(_rich_heading(_dashboard_section_title(section, summary)))
+        rich_parts.append("")
         for card in cards[:3]:
             if not isinstance(card, dict):
                 continue
             detail = _display_text(card.get("detail"))
             suffix = f" — {detail}" if detail else ""
-            lines.append(f"- {_display_text(card.get('title') or 'item')}{suffix}")
+            title_text = _display_text(card.get("title") or "item")
+            lines.append(f"- {title_text}{suffix}")
+            rich_parts.append(f"- {_rich_cell(f'{title_text}{suffix}')}")
     next_actions = data.get("next_actions") if isinstance(data.get("next_actions"), list) else []
     if next_actions and not any(
         isinstance(section, dict) and str(section.get("id") or "").strip().lower() == "next"
@@ -1994,18 +2090,32 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     ):
         lines.append("")
         lines.append("Next Actions")
+        rich_parts.append("")
+        rich_parts.append(_rich_heading("Next Actions"))
+        rich_parts.append("")
         for action in next_actions[:3]:
             lines.append(f"- {_display_text(action)}")
+            rich_parts.append(f"- {_rich_cell(_display_text(action))}")
     warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
     if warnings:
         lines.append("")
         lines.append(f"Warnings: {len(warnings)}")
+        rich_parts.append("")
+        rich_parts.append(f"Warnings: {len(warnings)}")
     refresh = data.get("refresh") if isinstance(data.get("refresh"), dict) else {}
     if refresh:
         lines.append(f"Refresh: every {_short(refresh.get('ttl_seconds'), '60')}s target")
+        rich_parts.append(f"Refresh: every {_rich_cell(_short(refresh.get('ttl_seconds'), '60'))}s target")
     lines.append("")
     lines.append("Commands: /kb status · /kb sync · /kb review")
-    return {"title": "KB", "text": "\n".join(lines), "actions": _dashboard_descriptor_actions(ctx, target, sections)}
+    rich_parts.append("")
+    rich_parts.append("Commands: /kb status · /kb sync · /kb review")
+    return {
+        "title": "KB",
+        "text": "\n".join(lines),
+        "actions": _dashboard_descriptor_actions(ctx, target, sections),
+        "rich_markdown": "\n".join(rich_parts),
+    }
 
 
 _WORKBENCH_SECTION_IDS = {"closeout", "now", "reports", "situations", "workbench"}
@@ -2802,22 +2912,28 @@ def _render_status(
     if isinstance(data, dict):
         readiness = _short(_readiness_status(data))
         publication = _short(_publication_status(data))
-    lines = [
-        _emphasis_headline("KB Status"),
-        f"Lane: {snap['lane']}",
-        f"Environment: {snap['environment']}",
-        f"MCP target: {target}",
-        f"Workspace: {snap['workspace']}",
-        f"Hermes model: {snap['model']}",
-        f"Hermes provider/API: {snap['provider']} / {snap['api_mode']} / {snap['api']}",
-        f"Hermes reasoning: {snap['reasoning']}",
-        f"KB provider: {kb['provider']}",
-        f"KB model: {kb['model']}",
-        f"KB reasoning: {kb['reasoning']}",
-        f"Readiness: {readiness}",
-        f"Publication: {publication}",
+    status_pairs: list[tuple[str, Any]] = [
+        ("Lane", snap["lane"]),
+        ("Environment", snap["environment"]),
+        ("MCP target", target),
+        ("Workspace", snap["workspace"]),
+        ("Hermes model", snap["model"]),
+        ("Hermes provider/API", f"{snap['provider']} / {snap['api_mode']} / {snap['api']}"),
+        ("Hermes reasoning", snap["reasoning"]),
+        ("KB provider", kb["provider"]),
+        ("KB model", kb["model"]),
+        ("KB reasoning", kb["reasoning"]),
+        ("Readiness", readiness),
+        ("Publication", publication),
     ]
-    return {"title": "KB Status", "text": "\n".join(lines), "actions": []}
+    lines = [_emphasis_headline("KB Status")]
+    lines.extend(f"{key}: {value}" for key, value in status_pairs)
+    return {
+        "title": "KB Status",
+        "text": "\n".join(lines),
+        "actions": [],
+        "rich_markdown": _rich_kv_table("KB Status", status_pairs),
+    }
 
 
 def _status_line_value(packet: dict[str, Any], *paths: tuple[str, ...], default: str = "unknown") -> str:
@@ -2916,23 +3032,24 @@ def _render_status_proof(
     privacy = packet.get("privacy") if isinstance(packet.get("privacy"), dict) else {}
     privacy_ok = not any(bool(value) for value in privacy.values())
     next_action = _next_action_summary(packet)
-    detail_lines = [
-        "Request: /kb status",
-        f"Outcome: {status}",
-        f"Lane: {lane}",
-        f"Runtime: {runtime}",
-        f"Transport: {transport}",
-        f"Publication: {publication}",
-        f"Pending review: {review}",
-        f"Sync: {sync}",
-        f"Dirty: {_dirty_summary(packet)}",
-        f"Privacy: {'ok' if privacy_ok else 'check receipt'}",
-        f"KB model: {kb['provider']} / {kb['model']} / {kb['reasoning']}",
-        f"KB reasoning: {kb['reasoning']}",
-        f"Hermes reasoning: {snap['reasoning']}",
+    proof_pairs: list[tuple[str, Any]] = [
+        ("Request", "/kb status"),
+        ("Outcome", status),
+        ("Lane", lane),
+        ("Runtime", runtime),
+        ("Transport", transport),
+        ("Publication", publication),
+        ("Pending review", review),
+        ("Sync", sync),
+        ("Dirty", _dirty_summary(packet)),
+        ("Privacy", "ok" if privacy_ok else "check receipt"),
+        ("KB model", f"{kb['provider']} / {kb['model']} / {kb['reasoning']}"),
+        ("KB reasoning", kb["reasoning"]),
+        ("Hermes reasoning", snap["reasoning"]),
     ]
     if next_action:
-        detail_lines.append(f"Next: {next_action}")
+        proof_pairs.append(("Next", next_action))
+    detail_lines = [f"{key}: {value}" for key, value in proof_pairs]
     # Phase B pilot: bold headline (Task 2) + collapse the long status detail body
     # into an expandable blockquote (Task 1). The Commands hint stays outside the
     # block so the primary action remains immediately visible. PLUGIN-DATA-SHAPE-ONLY.
@@ -2943,7 +3060,21 @@ def _render_status_proof(
             "Commands: /kb sync · /kb review",
         ]
     )
-    return {"title": "KB Status", "text": text, "actions": []}
+    # Rich path: a native 2-col status table + plain Commands hint. RAW markdown,
+    # NOT MarkdownV2 — kept separate from `text` (opposite escaping rules).
+    rich_markdown = "\n".join(
+        [
+            _rich_kv_table("KB Status", proof_pairs),
+            "",
+            "Commands: /kb sync · /kb review",
+        ]
+    )
+    return {
+        "title": "KB Status",
+        "text": text,
+        "actions": [],
+        "rich_markdown": rich_markdown,
+    }
 
 
 def _render_runs(data: Any) -> dict[str, Any]:
@@ -6735,6 +6866,42 @@ def _reply_anchor_and_metadata(event: Any) -> tuple[str | None, dict[str, Any] |
         return getattr(event, "message_id", None), metadata
 
 
+def _send_kb_actions_accepts_rich(adapter: Any) -> bool:
+    """True when ``adapter.send_kb_actions`` accepts a ``rich_markdown`` kwarg.
+
+    Defends the dual-source skew: this plugin ships from its own repo AND as a
+    fork-bundled fallback copy, while the adapter ships in the fork core. If a
+    card emits ``rich_markdown`` but the bound adapter predates the rich-card
+    param, forwarding it would raise ``TypeError``; this guard keeps the legacy
+    text/actions path intact in that case.
+    """
+    return _callable_accepts_rich(getattr(adapter, "send_kb_actions", None))
+
+def _send_accepts_rich(adapter: Any) -> bool:
+    """True when ``adapter.send`` accepts a ``rich_markdown`` kwarg.
+
+    Mirrors :func:`_send_kb_actions_accepts_rich` for the action-LESS path. The
+    status/today/proof cards carry a ``rich_markdown`` payload but NO actions,
+    so they go through plain ``adapter.send``; only telegram's ``send`` was
+    extended with the rich param. Other transports (and any pre-rich telegram
+    build, given the dual-source skew) keep the legacy two-arg ``send``, so we
+    must NOT forward ``rich_markdown`` to them (it would raise ``TypeError``).
+    """
+    return _callable_accepts_rich(getattr(adapter, "send", None))
+
+def _callable_accepts_rich(fn: Any) -> bool:
+    """Shared signature probe: does ``fn`` accept a ``rich_markdown`` kwarg?"""
+    if fn is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    if "rich_markdown" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
 async def _send_card(adapter: Any, event: Any, card: dict[str, Any]) -> None:
     source = getattr(event, "source", None)
     chat_id = getattr(source, "chat_id", None)
@@ -6742,16 +6909,30 @@ async def _send_card(adapter: Any, event: Any, card: dict[str, Any]) -> None:
         return
     reply_to, metadata = _reply_anchor_and_metadata(event)
     actions = card.get("actions", []) or []
+    rich_markdown = card.get("rich_markdown")
     if actions and hasattr(adapter, "send_kb_actions"):
+        kb_kwargs: dict[str, Any] = {"reply_to": reply_to, "metadata": metadata}
+        # Only forward rich_markdown when the bound adapter's send_kb_actions
+        # actually accepts it — guards the fork-bundled-fallback-vs-installed
+        # skew where an older adapter signature lacks the param (would TypeError).
+        if rich_markdown and _send_kb_actions_accepts_rich(adapter):
+            kb_kwargs["rich_markdown"] = rich_markdown
         result = adapter.send_kb_actions(
             chat_id,
             card["text"],
             actions,
-            reply_to=reply_to,
-            metadata=metadata,
+            **kb_kwargs,
         )
     else:
-        result = adapter.send(chat_id, card["text"], reply_to=reply_to, metadata=metadata)
+        # Action-LESS cards (status / today / status-proof) carry their rich
+        # payload here. Forward rich_markdown to adapter.send so the
+        # status/today cards actually render rich — but only when the bound
+        # send signature accepts it (same dual-source-skew guard as the
+        # actions path; legacy / non-telegram adapters keep the plain send).
+        send_kwargs: dict[str, Any] = {"reply_to": reply_to, "metadata": metadata}
+        if rich_markdown and _send_accepts_rich(adapter):
+            send_kwargs["rich_markdown"] = rich_markdown
+        result = adapter.send(chat_id, card["text"], **send_kwargs)
     if inspect.isawaitable(result):
         result = await result
     if actions and not getattr(result, "success", True):
