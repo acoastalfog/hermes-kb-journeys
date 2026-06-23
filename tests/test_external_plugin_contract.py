@@ -537,3 +537,154 @@ def test_render_status_simple_card_headline_is_bold(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     card = plugin._render_status({"readiness": "ready"}, "kb_engine_prod")
     assert card["text"].startswith("*KB Status*")
+
+
+# ---------------------------------------------------------------------------
+# Upstream-environment simulation: fork-only modules absent
+# ---------------------------------------------------------------------------
+
+def _load_plugin_module_upstream(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Load the plugin with fork-only modules blocked in sys.modules.
+
+    Setting sys.modules[name] = None makes Python raise ImportError for that
+    module, simulating plain upstream hermes-agent where those packages do not
+    exist.  monkeypatch restores sys.modules on teardown.
+    """
+    repo = _hermes_repo()
+    monkeypatch.syspath_prepend(str(repo))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+    # Block the two fork-only modules.
+    monkeypatch.setitem(sys.modules, "tools.kb_callback_registry", None)  # type: ignore[arg-type]
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", None)  # type: ignore[arg-type]
+    # Also block the parent 'tools' and 'gateway.platforms' packages so that
+    # a from-package import cannot succeed via the parent path.
+    for parent in ("tools", "gateway", "gateway.platforms"):
+        if parent not in sys.modules:
+            monkeypatch.setitem(sys.modules, parent, None)  # type: ignore[arg-type]
+
+    # Use a distinct module name so exec_module runs the file afresh.
+    spec = importlib.util.spec_from_file_location("kb_journeys_upstream_under_test", ROOT / "__init__.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    assert spec and spec.loader
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+class _FakeSource:
+    def __init__(self):
+        self.chat_id = "12345678"
+        self.platform = "telegram"
+        self.user_id = "42"
+        self.user_name = "Anthony"
+        self.thread_id = None
+
+
+class _FakeEvent:
+    def __init__(self, source, *, message_id="100", reply_to_message_id=None, reply_to_text=None, text=""):
+        self.source = source
+        self.message_id = message_id
+        self.reply_to_message_id = reply_to_message_id
+        self.reply_to_text = reply_to_text
+        self.raw_message = None
+        self.text = text
+
+
+def test_upstream_env_module_loads_cleanly(tmp_path, monkeypatch):
+    """The plugin must import without raising when fork modules are absent."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    # _KB_ACTION_AVAILABLE must be False — the stub is in effect.
+    assert plugin._KB_ACTION_AVAILABLE is False
+    # KbAction is a stub class, not the real one.
+    instance = plugin.KbAction(label="x", action_id="x", handler=None, metadata={})
+    assert instance.label == "x"
+
+
+def test_upstream_env_status_renders_plain_text(tmp_path, monkeypatch):
+    """_render_status must return a non-empty plain text card and no inline keyboard."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    card = plugin._render_status({"readiness": "ready"}, "kb_engine_prod")
+    assert isinstance(card, dict)
+    assert card.get("text"), "text field must be non-empty"
+    assert "KB Status" in card["text"]
+    # Stub KbAction instances may appear in actions, but no real callback buttons.
+    for action in card.get("actions", []):
+        assert not hasattr(action, "callback_data"), "stub actions must not carry callback_data"
+
+
+def test_upstream_env_today_renders_plain_text(tmp_path, monkeypatch):
+    """_render_today must return a non-empty plain text card."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    card = plugin._render_today({
+        "readiness": "ready",
+        "publication_status": "clean",
+        "proposals": {"total": 2},
+    })
+    assert isinstance(card, dict)
+    assert card.get("text"), "text field must be non-empty"
+    assert "KB Today" in card["text"]
+    for action in card.get("actions", []):
+        assert not hasattr(action, "callback_data")
+
+
+def test_upstream_env_write_preview_and_confirm(tmp_path, monkeypatch):
+    """/kb write verb must build its preview packet and gate on READBACK — unaffected by stub."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+        "mcp_kb_engine_prod_kb_sync_confirmed": [
+            {"status": "applied", "ok": True, "receipt": {"new_count": 1}}
+        ],
+    })
+    source = _FakeSource()
+    ev = _FakeEvent(source, message_id="200", text="/kb write a note")
+    preview_card = plugin._render_write_command(
+        ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None
+    )
+    assert "Confirm: /kb write confirm" in preview_card["text"]
+    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
+
+    confirm_ev = _FakeEvent(source, message_id="201", text="/kb write confirm")
+    confirm_card = plugin._render_write_command(
+        ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None
+    )
+    assert "Saved to the KB" in confirm_card["text"]
+    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
+    assert confirmed, f"kb_sync.confirmed was not called; calls={ctx.calls}"
+
+
+def test_upstream_env_write_readback_gate_refuses_noop(tmp_path, monkeypatch):
+    """/kb write READBACK gate must still refuse success on noop even with stub."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+        "mcp_kb_engine_prod_kb_sync_confirmed": [
+            {"status": "noop", "ok": True, "receipt": {"new_count": 0}}
+        ],
+    })
+    source = _FakeSource()
+    ev = _FakeEvent(source, message_id="200", text="/kb write a note")
+    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
+    confirm_ev = _FakeEvent(source, message_id="201", text="/kb write confirm")
+    card = plugin._render_write_command(
+        ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None
+    )
+    assert "Saved to the KB" not in card["text"]
+    assert "not" in card["text"].lower()
+
+
+def test_upstream_env_no_inline_keyboard_in_write_cards(tmp_path, monkeypatch):
+    """/kb write cards must carry no inline_keyboard structure when stub is active."""
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+    })
+    source = _FakeSource()
+    ev = _FakeEvent(source, message_id="200", text="/kb write a note")
+    card = plugin._render_write_command(
+        ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None
+    )
+    # No real inline keyboard in any field.
+    card_json = json.dumps(card)
+    assert "inline_keyboard" not in card_json
+    assert "callback_data" not in card_json

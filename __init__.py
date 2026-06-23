@@ -21,6 +21,50 @@ from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Fork-optional imports — degrade gracefully on plain upstream hermes-agent.
+#
+# tools.kb_callback_registry (KbAction) ships only in the fork.  On upstream
+# we replace it with a no-op stub so every card-builder that calls KbAction(…)
+# produces an object, but its presence in an ``actions`` list contributes NO
+# inline-keyboard buttons (the gateway simply ignores stub instances it can't
+# serialise into Telegram button rows).  All function-level guards that used to
+# do `try: from tools.kb_callback_registry import KbAction` now reference this
+# module-level symbol instead.
+# ---------------------------------------------------------------------------
+
+try:
+    from tools.kb_callback_registry import KbAction as KbAction  # noqa: F401
+    _KB_ACTION_AVAILABLE = True
+except Exception:
+    _KB_ACTION_AVAILABLE = False
+
+    class KbAction:  # type: ignore[no-redef]
+        """No-op stub used when the fork-only tools.kb_callback_registry is absent.
+
+        Instantiation succeeds (accepting the same kwargs as the real class) but
+        the stub carries NO callback data, so gateway adapters that inspect the
+        type or look for a ``callback_data`` attribute will silently skip it —
+        producing plain text-only cards with an empty inline keyboard.
+        """
+
+        def __init__(
+            self,
+            *,
+            label: str = "",
+            action_id: str = "",
+            handler: Any = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            self.label = label
+            self.action_id = action_id
+            self.handler = handler
+            self.metadata = metadata or {}
+
+        def __repr__(self) -> str:  # pragma: no cover
+            return f"KbAction(stub, label={self.label!r})"
+
+
 DEFAULT_MCP_TARGET = "kb_engine_prod"
 MENU_COMMANDS = {"kb"}
 LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun", "kbsync"}
@@ -722,10 +766,6 @@ def _render_lifecycle_descriptor_preview(
 
 def _lifecycle_descriptor_action(ctx: Any, target: str, descriptor: dict[str, Any]) -> Any | None:
     if not _is_lifecycle_proposal_descriptor(descriptor):
-        return None
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
         return None
     label = _short(descriptor.get("label") or descriptor.get("action_id") or "Lifecycle proposal", "Lifecycle proposal")
     action_id = _short(descriptor.get("action_id") or label, label)
@@ -1474,10 +1514,6 @@ def _restore_action_from_receipt(ctx: Any | None, target: str, receipt: dict[str
     args = _restore_args_from_receipt(receipt)
     if not preview_tool or not confirm_tool or not args:
         return None
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return None
     return KbAction(
         label="Preview Restore",
         action_id="queue.restore.preview",
@@ -1505,10 +1541,6 @@ def _render_restore_preview(
     callback_ctx: Any,
 ) -> dict[str, Any]:
     del callback_ctx
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return {"title": "KB Review Restore", "text": "KB Review Restore\nAction buttons are unavailable. Use /kb review to refresh.", "actions": []}
     preview_tool, _confirm_tool = _restore_tools(target, receipt)
     preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _restore_args_from_receipt(receipt)))
     text = _restore_preview_text(preview_payload)
@@ -2262,11 +2294,6 @@ def _workbench_compact_card_lines(
 
 
 def _dashboard_descriptor_actions(ctx: Any, target: str, sections: list[Any]) -> list[Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
-
     actions: list[Any] = []
     guidance_actions: list[Any] = []
     for section in sections:
@@ -2402,10 +2429,6 @@ def _guidance_facet_text(guidance: dict[str, Any], facet: str) -> tuple[str, str
 
 
 def _descriptor_guidance_actions(descriptor: dict[str, Any], *, title: str) -> list[Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
     actions: list[Any] = []
     for facet, label in (
         ("why", "Why"),
@@ -2562,10 +2585,6 @@ def _descriptor_params(descriptor: dict[str, Any]) -> dict[str, Any]:
 
 
 def _generic_descriptor_action(ctx: Any, target: str, descriptor: dict[str, Any]) -> Any | None:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return None
     if descriptor.get("requires_canonical_tool") is not True:
         return None
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
@@ -2626,10 +2645,6 @@ def _render_generic_descriptor_preview(
     descriptor: dict[str, Any],
     callback_ctx: Any,
 ) -> dict[str, Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return {"title": "KB Action", "text": "KB Action\nAction buttons are unavailable.", "actions": []}
     del callback_ctx
     label = _short(descriptor.get("label") or descriptor.get("action_id") or "KB Action", "KB Action")
     action_id = _short(descriptor.get("action_id") or label, label)
@@ -3479,11 +3494,6 @@ def _queue_descriptor_actions(
     preview_label_prefix: bool = True,
     limit: int | None = 4,
 ) -> list[Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
-
     actions: list[Any] = []
     guidance_descriptor = next(
         (
@@ -3853,11 +3863,6 @@ def _render_control_action_preview(
     *,
     callback_ctx: Any,
 ) -> dict[str, Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return {"title": "KB Control", "text": "KB Control\nAction buttons are unavailable. Refresh from /kb review.", "actions": []}
-
     label = _short(action.get("label") or "Apply", "Apply")
     missing_inputs = _action_required_inputs(action)
     if missing_inputs:
@@ -3929,10 +3934,6 @@ def _queue_control_actions(
     *,
     limit: int | None = 3,
 ) -> list[Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
     actions: list[Any] = []
     for action in _control_actions_for_item(item):
         label = _short(action.get("label") or _get_path(action, "confirmed_write_route", "operation_id"), "")
@@ -3976,11 +3977,6 @@ def _render_queue_descriptor_preview(
     descriptor: dict[str, Any],
     callback_ctx: Any,
 ) -> dict[str, Any]:
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return {"title": "KB Review", "text": "KB Review\nAction buttons are unavailable. Use /kb review to refresh.", "actions": []}
-
     params = descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {}
     decision = str(params.get("decision") or "").strip().lower()
     if not decision:
@@ -5317,10 +5313,6 @@ def _render_publication_preflight_descriptor(
 def _publication_preflight_action(ctx: Any, target: str, descriptor: dict[str, Any] | None) -> list[Any]:
     if not descriptor:
         return []
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
     return [
         KbAction(
             label="Run Preflight",
@@ -5416,10 +5408,6 @@ def _publish_confirm_action(
     message: str,
 ) -> list[Any]:
     if not confirm_descriptor:
-        return []
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
         return []
     return [
         KbAction(
@@ -5815,11 +5803,6 @@ def _queue_guided_actions(
     item = _queue_item_at(data, 1)
     if item is None:
         return []
-    try:
-        from tools.kb_callback_registry import KbAction
-    except Exception:
-        return []
-
     descriptor_actions = _queue_descriptor_actions(
         ctx,
         target,
@@ -5960,35 +5943,30 @@ def _render_queue_text_decision(
             )
             text += "\nConfirm with the button below when it matches your intent."
             text += f"\nText fallback: /kb review {decision} {index_text} confirm"
-            try:
-                from tools.kb_callback_registry import KbAction
-
-                metadata = _queue_preview_metadata(preview_payload)
-                actions = [
-                    KbAction(
-                        label=f"Confirm {decision.title()}",
-                        action_id=f"queue.{decision}.confirm",
-                        handler=lambda confirm_ctx: _render_queue_text_decision(
-                            ctx,
-                            target,
-                            data,
-                            indices=[index for index, _ in selection],
-                            decision=decision,
-                            confirm=True,
-                            session_id=session_id,
-                            callback_ctx=confirm_ctx,
-                        ),
-                        metadata={
-                            "target_kind": "proposal_queue",
-                            "decision": decision,
-                            "preview_required": True,
-                            "preview_lease": bool(metadata.get("preview_lease")),
-                            "review_session_id": _review_session_id(metadata),
-                        },
-                    )
-                ]
-            except Exception:
-                actions = []
+            metadata = _queue_preview_metadata(preview_payload)
+            actions = [
+                KbAction(
+                    label=f"Confirm {decision.title()}",
+                    action_id=f"queue.{decision}.confirm",
+                    handler=lambda confirm_ctx: _render_queue_text_decision(
+                        ctx,
+                        target,
+                        data,
+                        indices=[index for index, _ in selection],
+                        decision=decision,
+                        confirm=True,
+                        session_id=session_id,
+                        callback_ctx=confirm_ctx,
+                    ),
+                    metadata={
+                        "target_kind": "proposal_queue",
+                        "decision": decision,
+                        "preview_required": True,
+                        "preview_lease": bool(metadata.get("preview_lease")),
+                        "review_session_id": _review_session_id(metadata),
+                    },
+                )
+            ]
         return {"title": "KB Review", "text": text, "actions": actions}
     if not preview_metadata.get("preview_lease") and not _preview_allows_confirmation(preview_payload):
         return {
