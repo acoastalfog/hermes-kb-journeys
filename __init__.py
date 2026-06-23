@@ -6524,6 +6524,8 @@ def _kb_root_command(args: str) -> tuple[str, str]:
         return "kbsync", rest
     if key in {"capture", "save", "keep"}:
         return "kbcapture", rest
+    if key in {"write", "note", "jot"}:
+        return "kbwrite", rest
     return "kbhelp", text
 
 
@@ -6725,6 +6727,10 @@ def _card_for_command(
         )
     if command == "kbcapture":
         return _render_capture_command(
+            ctx, target, args, event=event, source=source, session_store=session_store
+        )
+    if command == "kbwrite":
+        return _render_write_command(
             ctx, target, args, event=event, source=source, session_store=session_store
         )
     if command == "kbsync":
@@ -7130,6 +7136,79 @@ def _render_capture_command(
         lines.append(f"“{preview}”")
     lines.append("Confirm: /kb capture confirm")
     return {"title": "KB Capture", "text": "\n".join(lines), "actions": []}
+
+
+def _write_landed(data: Any) -> bool:
+    """READBACK gate: only treat a confirmed write as durable if the engine
+    receipt attests it actually applied. Refuses to claim success on a no-op,
+    an error, or a missing/zero landed count — this is the deterministic check
+    that makes 'saved' non-confabulable on the closure path."""
+    if not isinstance(data, dict) or not data.get("ok"):
+        return False
+    status = str(data.get("status") or "").strip().lower()
+    if status not in {"applied", "confirmed", "committed"}:
+        return False
+    receipt = data.get("receipt") if isinstance(data.get("receipt"), dict) else {}
+    new_count = receipt.get("new_count")
+    if new_count is None:
+        return True  # applied with no count signal — trust the applied status
+    try:
+        return int(new_count) >= 1
+    except (TypeError, ValueError):
+        return True
+
+
+def _render_write_command(
+    ctx: Any, target: str, args: str, *, event: Any = None, source: Any = None, session_store: Any = None
+) -> dict[str, Any]:
+    """/kb write [<anchor> | ] <note> — save a freeform durable note into the
+    append-only capture/evidence lane (no synthesis ceremony), with a readback
+    gate on confirm. Mirrors /kb capture's closure pattern; the LLM holds no
+    lease/envelope state."""
+    session_id = _conversation_state_id(session_store, source)
+    write_session = f"{session_id}:write" if session_id else ""
+    text = (args or "").strip()
+    if text.lower() == "confirm":
+        state, reason = _get_capture_preview_state(write_session, source)
+        if state is None:
+            return {"title": "KB Write", "text": f"KB Write\nNothing to confirm ({reason}). Send /kb write <note> first.", "actions": []}
+        _, data, errors = _dispatch_first(
+            ctx, target,
+            [("kb_sync.confirmed", {"evidence_packet": state.get("packet"), "user_confirmation": {"confirmed": True}})],
+        )
+        _clear_capture_preview_state(write_session)
+        if data is None:
+            return _render_error("KB Write", target, errors)
+        if not _write_landed(data):
+            status = _short(data.get("status"), "unknown")
+            return {"title": "KB Write", "text": f"KB Write\nNOT saved — the engine did not confirm the write landed (status: {status}). Nothing was recorded as saved.", "actions": []}
+        return {"title": "KB Write", "text": "KB Write\nSaved to the KB.", "actions": []}
+    anchor = ""
+    body = text
+    if " | " in text:
+        anchor_part, _, body_part = text.partition(" | ")
+        anchor = anchor_part.strip()
+        body = body_part.strip()
+    if not body:
+        return {"title": "KB Write", "text": "KB Write\nSend /kb write <note>, or /kb write <object> | <note> to anchor it.", "actions": []}
+    chat_id = _short(getattr(source, "chat_id", ""), "")
+    message_id = _short(getattr(event, "message_id", ""), "")
+    meta: dict[str, Any] = {"note": True}
+    if anchor:
+        meta["anchor"] = anchor
+    packet = _build_telegram_capture_packet(chat_id, message_id, body, meta)
+    _, data, errors = _dispatch_first(ctx, target, [("kb_sync.preview", {"evidence_packet": packet})])
+    if data is None:
+        return _render_error("KB Write", target, errors)
+    _store_capture_preview_state(write_session, source=source, target=target, packet=packet)
+    preview = _short(body, "")[:160]
+    lines = ["KB Write - preview", f"Will save as a durable note ({CAPTURE_SOURCE_ID})."]
+    if anchor:
+        lines.append(f"Anchor: {anchor}")
+    if preview:
+        lines.append(f"“{preview}”")
+    lines.append("Confirm: /kb write confirm")
+    return {"title": "KB Write", "text": "\n".join(lines), "actions": []}
 
 
 def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | None]:

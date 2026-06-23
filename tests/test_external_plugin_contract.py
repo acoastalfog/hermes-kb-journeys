@@ -371,6 +371,72 @@ def test_kb_capture_routes_via_root_command(tmp_path, monkeypatch):
     assert plugin._kb_root_command("save") == ("kbcapture", "")
 
 
+# --- P0: /kb write durable-note verb + readback gate (hermes-kb-journeys#6) ---
+
+def test_kb_write_routes_via_root_command(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._kb_root_command("write events/bio | a note") == ("kbwrite", "events/bio | a note")
+    assert plugin._kb_root_command("note just text") == ("kbwrite", "just text")
+    assert plugin._kb_root_command("write confirm") == ("kbwrite", "confirm")
+
+
+def test_kb_write_preview_builds_note_packet_with_anchor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+    })
+    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
+    event = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
+                            reply_to_text=None, raw_message=None, text="/kb write events/bio | remember the panel time")
+    card = plugin._render_write_command(ctx, "kb_engine_prod", "events/bio | remember the panel time",
+                                        event=event, source=source, session_store=None)
+    assert "Confirm: /kb write confirm" in card["text"]
+    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
+    item = ctx.calls[0][1]["evidence_packet"]["items"][0]
+    assert "remember the panel time" in item["text"]
+    assert item.get("anchor") == "events/bio"
+
+
+def test_kb_write_confirm_refuses_success_when_not_applied(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+        # confirmed dispatch reports NO landed write -> readback gate must refuse success
+        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "noop", "ok": True, "receipt": {"new_count": 0}}],
+    })
+    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
+    ev = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
+                         reply_to_text=None, raw_message=None, text="/kb write a note")
+    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
+    confirm_ev = SimpleNamespace(source=source, message_id="201", reply_to_message_id=None,
+                                 reply_to_text=None, raw_message=None, text="/kb write confirm")
+    card = plugin._render_write_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
+    assert "Saved to the KB" not in card["text"]
+    assert "not" in card["text"].lower()  # surfaces that nothing landed
+
+
+def test_kb_write_confirm_reports_success_when_receipt_landed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({
+        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
+        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "applied", "ok": True, "receipt": {"new_count": 1}}],
+    })
+    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
+    ev = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
+                         reply_to_text=None, raw_message=None, text="/kb write a note")
+    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
+    confirm_ev = SimpleNamespace(source=source, message_id="201", reply_to_message_id=None,
+                                 reply_to_text=None, raw_message=None, text="/kb write confirm")
+    card = plugin._render_write_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
+    assert "Saved to the KB" in card["text"]
+    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
+    assert confirmed, ctx.calls
+    assert confirmed[0][1]["user_confirmation"] == {"confirmed": True}
+
+
 # --- Phase A Task 1: expandable blockquote for long bodies ---
 
 # Verified-live telegram.py _convert_blockquote regex (re.MULTILINE): a SPACE is
