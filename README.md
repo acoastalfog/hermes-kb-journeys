@@ -59,17 +59,17 @@ GitHub workflow.
 ## Gate S migration note
 
 Version 0.5.0 deliberately makes `/kb sync` return
-`status: temporarily_unavailable` without dispatching an MCP tool. It will be
-restored only when kb-engine publishes canonical `kb.sync.prepare` and
-`kb.sync.commit` contracts. The old `/kbsync` and `update_kb` entrypoints are
+`status: temporarily_unavailable` plus the explicit
+`generated_kb_sync_contract_missing` integration blocker, without dispatching
+an MCP tool. The target remains one canonical `/kb sync` journey, but the
+generated primary profile does not yet expose `kb.sync.prepare` and
+`kb.sync.commit`; Hermes will not fabricate those semantics. The old `/kbsync`
+and `update_kb` entrypoints are
 removed and return migration guidance only. Evidence capture/write likewise remains unavailable
 until `evidence.remember.preview/confirmed` is exported. A confirmed evidence
 receipt is rendered as “Evidence remembered”; it never implies a semantic
 object update or publication. Durable wording requires confirmed identity and
 digest readback and a generated completion binding to the selected request.
-Until kb-engine exports that binding contract, Hermes does not render review
-confirmation as applied. `/kb reasoning` is guidance-only: host runtime
-configuration remains a trusted-operator NOC concern.
 
 ## Local Test
 

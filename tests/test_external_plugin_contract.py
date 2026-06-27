@@ -258,12 +258,23 @@ def test_kb_sync_is_typed_unavailable_and_dispatches_nothing(tmp_path, monkeypat
     card = plugin._card_for_command(ctx, "kb", args="sync confirm")
 
     assert card["status"] == "temporarily_unavailable"
+    assert card["integration_blocker"] == "generated_kb_sync_contract_missing"
     assert card["actions"] == []
     assert "kb.sync.prepare/commit" in card["text"]
     assert "No KB state changed." in card["text"]
-    assert "kb_sync" not in json.dumps(card)
+    assert "kb_sync." not in json.dumps(card)
     assert "update_kb" not in json.dumps(card)
     assert ctx.calls == []
+
+
+def test_generated_profile_exposes_canonical_kb_sync_contract(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    if not plugin._canonical_sync_contract_ready():
+        pytest.xfail(
+            "integration blocker: generated primary_chat does not yet expose "
+            "kb.sync.prepare and kb.sync.commit"
+        )
+    assert plugin._canonical_sync_contract_ready() is True
 
 
 def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
@@ -282,8 +293,15 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
                     "result": {
                         "status": "preview",
                         "ok": True,
+                        "decision": "reject",
+                        "proposal_ids": ["act_crowdstrike"],
+                        "preview_hash": "a" * 64,
+                        "plan": {"operations": [{"operation_id": "proposal.reject"}]},
                         "preview_lease": {
                             "preview_lease_id": "lease_crowdstrike",
+                            "preview_hash": "a" * 64,
+                            "confirm_tool": "review.batch_decide_confirmed",
+                            "decision": "reject",
                             "review_session_id": "session_crowdstrike",
                             "cursor_id": "cursor_crowdstrike",
                             "decision_scope": "explicit_ids",
@@ -312,7 +330,7 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     )
 
     assert "Review reject preview" in card["text"]
-    assert "To apply: /kb review reject 1 confirm" in card["text"]
+    assert "To apply:" not in card["text"]
     assert [call[0] for call in ctx.calls] == ["mcp_kb_engine_prod_review_decision_preview"]
     preview_args = ctx.calls[-1][1]
     assert preview_args["proposal_ids"] == ["act_crowdstrike"]
@@ -534,8 +552,7 @@ def test_unrelated_matching_receipt_never_proves_selected_proposal_completion(tm
     assert "unverified" in text
 
 
-def test_generated_completion_binding_proves_only_the_exact_selected_request(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
+def _request_bound_review_fixture(plugin):
     route = "review.batch_decide_confirmed"
     preview_hash = "a" * 64
     args = {
@@ -609,9 +626,16 @@ def test_generated_completion_binding_proves_only_the_exact_selected_request(tmp
             "transaction_id": transaction_id,
             "affected_ids": ["p-selected"],
             "content_digest": "sha256:" + "b" * 64,
-            "observed_at": "2026-06-27T00:00:00Z",
+            "observed_at": plugin._capture_now(),
         },
     }
+    return payload, expected
+
+
+def test_generated_completion_binding_proves_only_the_exact_selected_request(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    route = "review.batch_decide_confirmed"
+    payload, expected = _request_bound_review_fixture(plugin)
     assert plugin._validate_runtime_output(route, payload) is None
     assert plugin._request_bound_review_completion(payload, expected)["complete"] is True
     assert "Applied" in plugin._confirmed_text(
@@ -707,6 +731,73 @@ def test_completion_truth_rejects_nested_failure_signals(nested_failure, tmp_pat
     proof = plugin._durable_completion(payload)
     assert proof["complete"] is False
     assert proof["reason"].startswith("contradictory_")
+
+
+@pytest.mark.parametrize(
+    "nested_failure",
+    [
+        {"preview": {"isError": True}},
+        {"preview": {"status": "failed"}},
+        {"publication": {"isError": True}},
+        {"publication": {"status": "failed"}},
+        {"result": {"isError": True}},
+        {"status": "partial"},
+    ],
+)
+def test_completion_truth_scans_preview_publication_result_and_partial(
+    nested_failure, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    proof = plugin._completion_truth(
+        {"status": "applied", "ok": True, **nested_failure},
+        mutation_required=True,
+    )
+    assert proof["accepted"] is False
+    assert proof["reason"].startswith("contradictory_")
+
+
+def test_separate_disabled_publication_is_observed_but_not_a_completion_contradiction(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    proof = plugin._completion_truth(
+        {
+            "status": "applied",
+            "ok": True,
+            "publication": {"status": "disabled", "ok": False},
+            "preview": {"status": "noop", "ok": True},
+        },
+        mutation_required=True,
+    )
+    assert proof == {"accepted": True, "reason": "consistent"}
+
+
+@pytest.mark.parametrize("observed_at", ["2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"])
+def test_request_bound_completion_rejects_stale_or_future_readback(
+    observed_at, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload, expected = _request_bound_review_fixture(plugin)
+    payload["readback"]["observed_at"] = observed_at
+    proof = plugin._request_bound_review_completion(payload, expected)
+    assert proof["complete"] is False
+    assert proof["reason"] in {"readback_stale", "readback_future"}
+
+
+def test_request_bound_completion_rejects_readback_before_confirmation(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload, expected = _request_bound_review_fixture(plugin)
+    future_confirmation = (
+        plugin._parse_aware_timestamp(plugin._capture_now())
+        + plugin._dt.timedelta(minutes=2)
+    ).isoformat().replace("+00:00", "Z")
+    expected["confirmation"]["confirmed_at"] = future_confirmation
+    payload["completion"]["confirmation"]["confirmation_digest"] = plugin._descriptor_digest(
+        expected["confirmation"]
+    )
+    proof = plugin._request_bound_review_completion(payload, expected)
+    assert proof["complete"] is False
+    assert proof["reason"] == "readback_precedes_request_or_receipt"
 
 
 def test_evidence_completion_requires_digest_bound_readback(tmp_path, monkeypatch):
@@ -1164,6 +1255,18 @@ def test_descriptor_validation_rejects_empty_composition(tmp_path, monkeypatch):
         {"oneOf": [{"type": "string"}, {"type": "string"}]},
         {"allOf": [{"enum": ["a"]}, {"enum": ["b"]}]},
         {"type": "string", "not": {"anyOf": [{"type": "integer"}, {"type": "string"}]}},
+        {"type": "string", "minLength": 5, "maxLength": 4},
+        {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 1},
+        {"type": "number", "minimum": 10, "maximum": 9},
+        {"type": "number", "minimum": 10, "exclusiveMaximum": 10},
+        {"allOf": [{"type": "string", "minLength": 5}, {"maxLength": 4}]},
+        {
+            "allOf": [
+                {"type": "array", "items": {"type": "string"}, "minItems": 2},
+                {"maxItems": 1},
+            ]
+        },
+        {"allOf": [{"type": "number", "minimum": 10}, {"exclusiveMaximum": 10}]},
     ],
 )
 def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp_path, monkeypatch):
@@ -1272,6 +1375,42 @@ def test_unwrap_rejects_top_level_iserror_even_with_structured_content(tmp_path,
     assert "isError" in error
 
 
+@pytest.mark.parametrize(
+    "nested",
+    [
+        {"isError": True, "status": "ready"},
+        {"status": "failed", "schema_version": 1},
+        {"result": {"isError": True}},
+        {"result": {"status": "failed"}},
+    ],
+)
+def test_unwrap_preserves_nested_upstream_failure_envelopes(nested, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload, error = plugin._unwrap_tool_result({"result": nested})
+    assert payload is None
+    assert error
+
+
+def test_read_dispatcher_rejects_nested_failed_result_before_rendering(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_attention_cockpit": [
+                {"result": {"status": "failed", "schema_version": 1}}
+            ]
+        }
+    )
+    selected, payload, errors = plugin._dispatch_first(
+        ctx,
+        "kb_engine_prod",
+        [("attention.cockpit", {})],
+    )
+    assert selected is None
+    assert payload is None
+    assert any("upstream tool failure" in error for error in errors)
+
+
 def test_dispatch_rejects_runtime_output_that_violates_generated_schema(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     _install_conforming_descriptor_fixture(plugin, monkeypatch)
@@ -1289,17 +1428,180 @@ def test_dispatch_rejects_runtime_output_that_violates_generated_schema(tmp_path
 def test_empty_preview_never_enables_confirmation(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     assert plugin._preview_allows_confirmation({}) is False
-    assert plugin._preview_allows_confirmation({"status": "preview", "ok": True}) is True
-    assert plugin._preview_allows_confirmation({"status": "noop", "ok": True}) is False
+    assert plugin._preview_allows_confirmation(
+        {"status": "preview", "ok": True},
+        capability="review.decision_preview",
+    ) is False
+    assert plugin._preview_allows_confirmation(
+        {"status": "noop", "ok": True},
+        capability="review.decision_preview",
+    ) is False
     assert plugin._preview_allows_confirmation(
         {
             "status": "noop",
             "ok": True,
+            "decision": "approve",
+            "proposal_ids": ["p1"],
             "preview_hash": "a" * 64,
-            "preview_lease": {"preview_lease_id": "lease-1"},
-            "plan": {},
+            "preview_lease": {
+                "preview_lease_id": "lease-1",
+                "preview_hash": "a" * 64,
+                "confirm_tool": "review.batch_decide_confirmed",
+                "proposal_ids": ["p1"],
+                "decision": "approve",
+            },
+            "plan": {"operations": [{"operation_id": "proposal.approve"}]},
+        },
+        capability="review.decision_preview",
+    ) is False
+
+
+def test_generated_preview_contracts_are_concrete_enough_for_confirmation(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    missing = [
+        capability
+        for capability in ("review.decision_preview", "review.restore_preview")
+        if not plugin._generated_preview_contract_ready(capability)
+    ]
+    if missing:
+        pytest.xfail(
+            "integration blocker: generated preview schemas are not concrete: "
+            + ", ".join(missing)
+        )
+    assert missing == []
+
+
+def test_generic_concrete_generated_preview_contract_can_enable_confirmation(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    preview_name = "example.preview"
+    confirm_name = "example.confirmed"
+    lease_schema = {
+        "type": "object",
+        "properties": {
+            "preview_lease_id": {"type": "string"},
+            "preview_hash": {"type": "string"},
+            "confirm_tool": {"type": "string", "const": confirm_name},
+            "affected_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+            },
+        },
+        "required": ["preview_lease_id", "preview_hash", "confirm_tool", "affected_ids"],
+        "additionalProperties": False,
+    }
+    plan_schema = {
+        "type": "object",
+        "properties": {
+            "operations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"operation_id": {"type": "string"}},
+                    "required": ["operation_id"],
+                    "additionalProperties": True,
+                },
+                "minItems": 1,
+            }
+        },
+        "required": ["operations"],
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "ok": {"type": "boolean"},
+            "preview_hash": {"type": "string"},
+            "preview_lease": lease_schema,
+            "plan": plan_schema,
+        },
+        "required": ["status", "ok", "preview_hash", "preview_lease", "plan"],
+        "additionalProperties": False,
+    }
+    monkeypatch.setattr(
+        plugin,
+        "_DESCRIPTOR_TOOLS",
+        {
+            preview_name: {"name": preview_name, "output_schema": output_schema},
+            confirm_name: {
+                "name": confirm_name,
+                "annotations": {"readOnlyHint": False},
+            },
+        },
+    )
+    payload = {
+        "status": "preview_ready",
+        "ok": True,
+        "preview_hash": "a" * 64,
+        "preview_lease": {
+            "preview_lease_id": "lease-1",
+            "preview_hash": "a" * 64,
+            "confirm_tool": confirm_name,
+            "affected_ids": ["object-1"],
+        },
+        "plan": {"operations": [{"operation_id": "object.update"}]},
+    }
+    assert plugin._generated_preview_contract_ready(preview_name) is True
+    assert plugin._preview_allows_confirmation(payload, capability=preview_name) is True
+
+
+def test_restore_preview_requires_route_bound_lease_ids_and_actionable_plan(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    bare = {"schema_version": 1, "status": "noop", "ok": True}
+    assert plugin._preview_allows_confirmation(
+        bare,
+        capability="review.restore_preview",
+    ) is False
+    empty_plan = {
+        **bare,
+        "restorable_ids": ["p1"],
+        "preview_hash": "a" * 64,
+        "preview_lease": {
+            "preview_lease_id": "lease-1",
+            "preview_hash": "a" * 64,
+            "confirm_tool": "review.restore_confirmed",
+            "proposal_ids": ["p1"],
+            "decision": "restore",
+        },
+        "plan": {},
+    }
+    assert plugin._preview_allows_confirmation(
+        empty_plan,
+        capability="review.restore_preview",
+    ) is False
+    actionable = deepcopy(empty_plan)
+    actionable["plan"] = {"operations": [{"operation_id": "proposal.restore"}]}
+    assert plugin._preview_allows_confirmation(
+        actionable,
+        capability="review.restore_preview",
+    ) is False
+
+
+def test_bare_successful_restore_preview_never_renders_confirm_action(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_review_restore_preview": [
+                {"result": {"schema_version": 1, "status": "noop", "ok": True}}
+            ]
         }
-    ) is True
+    )
+    card = plugin._render_restore_preview(
+        ctx,
+        "kb_engine_prod",
+        receipt={
+            "restore_hint": {
+                "preview_tool": "review.restore_preview",
+                "confirm_tool": "review.restore_confirmed",
+                "transaction_id": "tx-1",
+                "proposal_ids": ["p1"],
+            }
+        },
+        callback_ctx=object(),
+    )
+    assert card["actions"] == []
+    assert "Confirm restore" not in card["text"]
 
 
 def test_runtime_rejects_more_than_twelve_effective_tools(tmp_path, monkeypatch):
@@ -1454,16 +1756,6 @@ def test_install_evidence_rejects_unowned_caller_shape(tmp_path, monkeypatch):
         "descriptor_digest": receipt["descriptor_digest"],
     }
     assert plugin._render_install_receipt(receipt, installed_evidence=caller_shape)["status"] == "unverified"
-
-
-def test_kb_reasoning_is_transport_only_and_never_mutates_host_runtime(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({})
-    card = plugin._card_for_command(ctx, "kb", args="reasoning high")
-    assert card["status"] == "operator_configuration_required"
-    assert "NOC" in card["text"]
-    assert "_reload_mcp" not in card
-    assert ctx.calls == []
 
 
 def test_readme_and_manifest_define_real_rollback_contract():

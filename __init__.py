@@ -78,6 +78,8 @@ QUEUE_REPLY_STATE_TTL_SECONDS = 15 * 60
 QUEUE_SCOPE_STATE_TTL_SECONDS = 15 * 60
 MEETING_HANDOFF_STATE_TTL_SECONDS = 15 * 60
 SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
+COMPLETION_READBACK_TTL_SECONDS = 5 * 60
+COMPLETION_CLOCK_SKEW_SECONDS = 30
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
     "semantic_write_receipt",
     "semantic_write_through_receipt",
@@ -166,6 +168,10 @@ def _descriptor_digest(value: Any) -> str:
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
+def _utc_now_text() -> str:
+    return _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
+
+
 def _parse_aware_timestamp(value: Any) -> _dt.datetime:
     text = str(value or "").strip()
     if not text:
@@ -247,6 +253,62 @@ def _schema_finite_values(schema: Any) -> set[str] | None:
         if branch_values is not None:
             finite = branch_values if finite is None else finite.intersection(branch_values)
     return finite
+
+
+def _schema_constraint_values(schema: Any, key: str) -> list[Any]:
+    if not isinstance(schema, dict):
+        return []
+    values = [schema[key]] if key in schema else []
+    for branch in schema.get("allOf") or []:
+        values.extend(_schema_constraint_values(branch, key))
+    return values
+
+
+def _validate_schema_ranges(schema: dict[str, Any], *, path: str) -> None:
+    for key in ("minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"):
+        for value in _schema_constraint_values(schema, key):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{path}.{key} must be a non-negative integer")
+    for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+        for value in _schema_constraint_values(schema, key):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{path}.{key} must be a number")
+
+    declared_types = _schema_declared_types(schema)
+    for schema_type, minimum_key, maximum_key in (
+        ("string", "minLength", "maxLength"),
+        ("array", "minItems", "maxItems"),
+        ("object", "minProperties", "maxProperties"),
+    ):
+        if schema_type not in declared_types:
+            continue
+        minimums = _schema_constraint_values(schema, minimum_key)
+        maximums = _schema_constraint_values(schema, maximum_key)
+        if minimums and maximums and max(minimums) > min(maximums):
+            raise ValueError(f"{path} contains impossible {minimum_key}/{maximum_key} constraints")
+
+    if not declared_types.intersection({"integer", "number"}):
+        return
+    lowers = [
+        (value, False) for value in _schema_constraint_values(schema, "minimum")
+    ] + [
+        (value, True) for value in _schema_constraint_values(schema, "exclusiveMinimum")
+    ]
+    uppers = [
+        (value, False) for value in _schema_constraint_values(schema, "maximum")
+    ] + [
+        (value, True) for value in _schema_constraint_values(schema, "exclusiveMaximum")
+    ]
+    if not lowers or not uppers:
+        return
+    lower_value = max(value for value, _exclusive in lowers)
+    upper_value = min(value for value, _exclusive in uppers)
+    lower_exclusive = any(exclusive for value, exclusive in lowers if value == lower_value)
+    upper_exclusive = any(exclusive for value, exclusive in uppers if value == upper_value)
+    if lower_value > upper_value or (
+        lower_value == upper_value and (lower_exclusive or upper_exclusive)
+    ):
+        raise ValueError(f"{path} contains impossible numeric range constraints")
 
 
 def _schema_required_fields(schema: Any) -> set[str]:
@@ -412,6 +474,7 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         raise ValueError(f"{path} contains impossible required/not constraints")
     if _schema_declared_types(schema).intersection(_schema_forbidden_types(schema)):
         raise ValueError(f"{path} contains impossible type/not constraints")
+    _validate_schema_ranges(schema, path=path)
     if not has_shape:
         raise ValueError(f"{path} has no type, reference, composition, enum, or const")
 
@@ -636,11 +699,20 @@ def _capability_unavailable(title: str, required: Iterable[str], *, message: str
 
 
 def _sync_temporarily_unavailable() -> dict[str, Any]:
-    return _capability_unavailable(
+    card = _capability_unavailable(
         "KB Sync",
         ("kb.sync.prepare", "kb.sync.commit"),
-        message="KB sync is temporarily unavailable on Hermes until kb.sync.prepare/commit is released.",
+        message=(
+            "KB sync is an explicit integration blocker on Hermes until the generated "
+            "primary_chat profile exposes canonical kb.sync.prepare/commit."
+        ),
     )
+    card["integration_blocker"] = "generated_kb_sync_contract_missing"
+    return card
+
+
+def _canonical_sync_contract_ready() -> bool:
+    return all(_descriptor(name) is not None for name in ("kb.sync.prepare", "kb.sync.commit"))
 
 
 def _parse_install_receipt(value: Any) -> dict[str, str]:
@@ -2164,7 +2236,10 @@ def _render_restore_preview(
     preview_tool, _confirm_tool = _restore_tools(target, receipt)
     preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _restore_args_from_receipt(receipt))
     text = _restore_preview_text(preview_payload)
-    if not _preview_allows_confirmation(preview_payload):
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         return {"title": "KB Review Restore", "text": text, "actions": []}
     preview_metadata = _queue_preview_metadata(preview_payload)
     confirm_action = KbAction(
@@ -2201,11 +2276,13 @@ def _render_restore_confirm(
 ) -> dict[str, Any]:
     preview_tool, confirm_tool = _restore_tools(target, receipt)
     effective_metadata = dict(preview_metadata or {})
-    if not effective_metadata.get("preview_lease"):
-        preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _restore_args_from_receipt(receipt))
-        if not _preview_allows_confirmation(preview_payload):
-            return {"title": "KB Review Restore", "text": _restore_preview_text(preview_payload), "actions": []}
-        effective_metadata.update(_queue_preview_metadata(preview_payload))
+    preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _restore_args_from_receipt(receipt))
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
+        return {"title": "KB Review Restore", "text": _restore_preview_text(preview_payload), "actions": []}
+    effective_metadata = _queue_preview_metadata(preview_payload)
     args = _restore_args_from_receipt(receipt)
     review_session_id = _review_session_id(effective_metadata)
     cursor_id = _queue_cursor_id(effective_metadata)
@@ -2218,6 +2295,7 @@ def _render_restore_confirm(
     args.setdefault("session_id", review_session_id or f"telegram-kb-restore-{int(time.time())}")
     args["user_confirmation"] = {
         "confirmed": True,
+        "confirmed_at": _utc_now_text(),
         "surface": "telegram",
         "action": "queue.restore",
         "preview_required": True,
@@ -2424,14 +2502,36 @@ def _maybe_json(value: Any) -> Any:
         return value
 
 
+def _upstream_envelope_failure(value: Any, *, path: str = "$") -> str | None:
+    value = _maybe_json(value)
+    if not isinstance(value, dict):
+        return None
+    if value.get("isError") is True:
+        return f"{path}.isError=true"
+    for key in ("error", "errors"):
+        error_value = value.get(key)
+        if error_value not in (None, "", [], {}):
+            detail = _clip(error_value, 180) if isinstance(error_value, str) else "non-empty"
+            return f"{path}.{key}: {detail}"
+    for key in ("status", "state"):
+        status = str(value.get(key) or "").strip().lower()
+        if status in {"cancelled", "canceled", "error", "failed", "partial", "partially_applied"}:
+            return f"{path}.{key}={status}"
+    for key in ("result", "structuredContent"):
+        if key in value:
+            failure = _upstream_envelope_failure(value[key], path=f"{path}.{key}")
+            if failure:
+                return failure
+    return None
+
+
 def _unwrap_tool_result(raw: Any) -> tuple[Any | None, str | None]:
     parsed = _maybe_json(raw)
     if not isinstance(parsed, dict):
         return parsed, None
-    if parsed.get("isError") is True:
-        return None, "tool response declared isError=true"
-    if parsed.get("error"):
-        return None, _short(parsed.get("error"))
+    failure = _upstream_envelope_failure(parsed)
+    if failure:
+        return None, f"upstream tool failure: {failure}"
     payload = parsed.get("structuredContent")
     if payload is None:
         payload = parsed.get("result", parsed)
@@ -3337,7 +3437,10 @@ def _render_generic_descriptor_preview(
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
     preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
     text = _generic_preview_text(label, preview_payload)
-    if not _preview_allows_confirmation(preview_payload):
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         return {"title": label, "text": text, "actions": []}
     preview_metadata = _queue_preview_metadata(preview_payload)
     confirm_action = KbAction(
@@ -3377,15 +3480,18 @@ def _render_generic_descriptor_confirm(
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
     confirm_tool = _descriptor_tool_name(target, descriptor.get("confirm_tool"))
     effective_metadata = dict(preview_metadata or {})
-    if not effective_metadata.get("preview_lease"):
-        preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
-        if not _preview_allows_confirmation(preview_payload):
-            return {"title": label, "text": _generic_preview_text(label, preview_payload), "actions": []}
-        effective_metadata.update(_queue_preview_metadata(preview_payload))
+    preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
+        return {"title": label, "text": _generic_preview_text(label, preview_payload), "actions": []}
+    effective_metadata = _queue_preview_metadata(preview_payload)
     confirm_args = _descriptor_params(descriptor)
     _apply_queue_preview_metadata(confirm_args, effective_metadata)
     confirm_args["user_confirmation"] = {
         "confirmed": True,
+        "confirmed_at": _utc_now_text(),
         "surface": "telegram",
         "action": _short(descriptor.get("action_id") or label, label),
         "preview_required": True,
@@ -4532,6 +4638,7 @@ def _render_control_action_confirm(
                 "session_id": session_id,
                 "user_confirmation": {
                     "confirmed": True,
+                    "confirmed_at": _utc_now_text(),
                     "confirmed_by": actor,
                     "confirmation_text": f"Confirmed {label} from Telegram KB Review.",
                     "preview_status": _short(preview_payload.get("status"), ""),
@@ -4599,7 +4706,10 @@ def _render_control_action_preview(
         },
     )
     actions: list[Any] = []
-    if isinstance(preview_payload, dict) and _preview_allows_confirmation(preview_payload):
+    if isinstance(preview_payload, dict) and _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, apply_preview_tool),
+    ):
         preview_plan = preview_payload.get("plan") if isinstance(preview_payload.get("plan"), dict) else plan
         actions.append(
             KbAction(
@@ -4709,7 +4819,10 @@ def _render_queue_descriptor_preview(
     )
     selection = [(index, item)]
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
-    if not _preview_allows_confirmation(preview_payload):
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         return {"title": "KB Review", "text": text, "actions": []}
     preview_metadata = _queue_preview_metadata(preview_payload)
     label = _short(descriptor.get("label") or decision.replace("_", " ").title(), decision.title())
@@ -4771,23 +4884,25 @@ def _render_queue_descriptor_confirm(
         )
     selection = [(index, item)]
     effective_metadata = dict(preview_metadata or {})
-    if not effective_metadata.get("preview_lease"):
-        preview_payload = _dispatch_registry_tool(
-            ctx,
-            target,
-            preview_tool,
-            _queue_descriptor_call_args(
-                    descriptor,
-                    item,
-                    decision=decision,
-                    actor=actor,
-                    source=source,
-                    note=f"Re-previewed before Telegram action-card confirmation for {_item_title(item)}",
-            ),
-        )
-        if not _preview_allows_confirmation(preview_payload):
-            return {"title": "KB Review", "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection), "actions": []}
-        effective_metadata.update(_queue_preview_metadata(preview_payload))
+    preview_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        preview_tool,
+        _queue_descriptor_call_args(
+            descriptor,
+            item,
+            decision=decision,
+            actor=actor,
+            source=source,
+            note=f"Re-previewed before Telegram action-card confirmation for {_item_title(item)}",
+        ),
+    )
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
+        return {"title": "KB Review", "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection), "actions": []}
+    effective_metadata = _queue_preview_metadata(preview_payload)
     confirmed_args = _queue_descriptor_call_args(
         descriptor,
         item,
@@ -4800,6 +4915,7 @@ def _render_queue_descriptor_confirm(
     confirmed_args["session_id"] = _review_session_id(effective_metadata) or f"telegram-kb-card-{int(time.time())}"
     confirmed_args["user_confirmation"] = {
         "confirmed": True,
+        "confirmed_at": _utc_now_text(),
         "surface": "telegram",
         "action": f"queue.{decision}",
         "preview_required": True,
@@ -5184,7 +5300,57 @@ def _preview_text(
     return "\n".join(lines)
 
 
-def _preview_allows_confirmation(payload: Any) -> bool:
+def _generated_preview_contract_ready(capability: str) -> bool:
+    descriptor = _descriptor(capability)
+    schema = descriptor.get("output_schema") if isinstance(descriptor, dict) else None
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    if not {"status", "ok", "preview_hash", "preview_lease", "plan"} <= set(
+        schema.get("required") or []
+    ):
+        return False
+    lease_schema = properties.get("preview_lease") if isinstance(properties.get("preview_lease"), dict) else {}
+    plan_schema = properties.get("plan") if isinstance(properties.get("plan"), dict) else {}
+    if not _schema_is_concrete(lease_schema, require_required=True):
+        return False
+    if not _schema_is_concrete(plan_schema, require_required=True):
+        return False
+    lease_properties = lease_schema.get("properties") if isinstance(lease_schema.get("properties"), dict) else {}
+    lease_required = set(lease_schema.get("required") or [])
+    if not {"preview_lease_id", "preview_hash", "confirm_tool"} <= lease_required:
+        return False
+    confirm_schema = lease_properties.get("confirm_tool") if isinstance(lease_properties.get("confirm_tool"), dict) else {}
+    confirm_tool = str(confirm_schema.get("const") or "").strip()
+    confirm_descriptor = _descriptor(confirm_tool)
+    confirm_annotations = (
+        confirm_descriptor.get("annotations") if isinstance(confirm_descriptor, dict) else {}
+    )
+    if not confirm_tool or not isinstance(confirm_annotations, dict) or confirm_annotations.get("readOnlyHint") is not False:
+        return False
+    scope_fields = [
+        name
+        for name in lease_required
+        if name.endswith("_ids")
+        and isinstance(lease_properties.get(name), dict)
+        and lease_properties[name].get("type") == "array"
+        and int(lease_properties[name].get("minItems") or 0) >= 1
+    ]
+    if not scope_fields:
+        return False
+    plan_properties = plan_schema.get("properties") if isinstance(plan_schema.get("properties"), dict) else {}
+    operations_schema = plan_properties.get("operations") if isinstance(plan_properties.get("operations"), dict) else {}
+    operation_schema = operations_schema.get("items") if isinstance(operations_schema.get("items"), dict) else {}
+    return bool(
+        "operations" in set(plan_schema.get("required") or [])
+        and operations_schema.get("type") == "array"
+        and int(operations_schema.get("minItems") or 0) >= 1
+        and _schema_is_concrete(operation_schema, require_required=True)
+        and "operation_id" in set(operation_schema.get("required") or [])
+    )
+
+
+def _preview_allows_confirmation(payload: Any, *, capability: str = "") -> bool:
     if not isinstance(payload, dict):
         return False
     if payload.get("error") or payload.get("isError"):
@@ -5208,14 +5374,43 @@ def _preview_allows_confirmation(payload: Any) -> bool:
         "validation_failed",
     }:
         return False
-    if status == "noop":
-        lease = payload.get("preview_lease") if isinstance(payload.get("preview_lease"), dict) else {}
-        return bool(
-            lease
-            and _normalized_digest(payload.get("preview_hash") or lease.get("preview_hash"))
-            and isinstance(payload.get("plan"), dict)
+    if not _generated_preview_contract_ready(capability):
+        return False
+    if _validate_runtime_output(capability, payload):
+        return False
+    if not (status == "noop" or "preview" in status or status in {"ready", "valid", "validated", "planned", "success"}):
+        return False
+    lease = payload.get("preview_lease") if isinstance(payload.get("preview_lease"), dict) else {}
+    preview_digest = _normalized_digest(payload.get("preview_hash"))
+    if not preview_digest or _normalized_digest(lease.get("preview_hash")) != preview_digest:
+        return False
+    confirm_tool = str(lease.get("confirm_tool") or "").strip()
+    confirm_descriptor = _descriptor(confirm_tool)
+    confirm_annotations = (
+        confirm_descriptor.get("annotations") if isinstance(confirm_descriptor, dict) else {}
+    )
+    if not isinstance(confirm_annotations, dict) or confirm_annotations.get("readOnlyHint") is not False:
+        return False
+    descriptor = _descriptor(capability) or {}
+    output_schema = descriptor.get("output_schema") if isinstance(descriptor.get("output_schema"), dict) else {}
+    lease_schema = _get_path(output_schema, "properties", "preview_lease", default={})
+    scope_fields = [
+        name
+        for name in (lease_schema.get("required") or [])
+        if isinstance(name, str) and name.endswith("_ids")
+    ] if isinstance(lease_schema, dict) else []
+    if not any(isinstance(lease.get(name), list) and bool(lease[name]) for name in scope_fields):
+        return False
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    operations = plan.get("operations") if isinstance(plan.get("operations"), list) else []
+    return bool(
+        operations
+        and all(
+            isinstance(operation, dict)
+            and bool(str(operation.get("operation_id") or "").strip())
+            for operation in operations
         )
-    return "preview" in status or status in {"ready", "valid", "validated", "planned", "success"}
+    )
 
 
 def _git_summary(git_state: dict[str, Any]) -> str:
@@ -5787,7 +5982,10 @@ def _render_iterative_queue_reply_decision(
         },
     )
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
-    if _preview_allows_confirmation(preview_payload):
+    if _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         text += f"\nTo apply: /kb review {decision} 1 confirm"
     return {"title": "KB Review", "text": text, "actions": []}
 
@@ -5838,7 +6036,10 @@ def _render_visible_scope_all_decision(
     )
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
     text += "\nScope: visible Telegram review window only, not the full pending review inbox."
-    if _preview_allows_confirmation(preview_payload):
+    if _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         indices = [index for index, _ in selection]
         _store_queue_text_preview_scope(
             session_id,
@@ -6707,8 +6908,7 @@ def _render_queue_text_decision(
     actor = _queue_callback_actor(callback_ctx) if callback_ctx is not None else "telegram:operator"
     source = "Hermes Telegram"
     preview_payload: Any = None
-    if not confirm or not preview_metadata.get("preview_lease"):
-        preview_payload = _dispatch_registry_tool(
+    preview_payload = _dispatch_registry_tool(
             ctx,
             target,
             preview_tool,
@@ -6722,15 +6922,18 @@ def _render_queue_text_decision(
                     "source": source,
                     "note": f"Previewed from Telegram /kb review text command for {selected_titles}",
             },
-        )
-        if confirm:
-            preview_metadata.update(_queue_preview_metadata(preview_payload))
+    )
+    if confirm:
+        preview_metadata = _queue_preview_metadata(preview_payload)
     if not confirm:
         text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
         if missing:
             text += "\nMissing review item(s): " + ", ".join(str(index) for index in missing)
         actions: list[Any] = []
-        if _preview_allows_confirmation(preview_payload):
+        if _preview_allows_confirmation(
+            preview_payload,
+            capability=_capability_for_registry_name(target, preview_tool),
+        ):
             _store_queue_text_preview_scope(
                 session_id,
                 decision=decision,
@@ -6765,7 +6968,10 @@ def _render_queue_text_decision(
                 )
             ]
         return {"title": "KB Review", "text": text, "actions": actions}
-    if not preview_metadata.get("preview_lease") and not _preview_allows_confirmation(preview_payload):
+    if not _preview_allows_confirmation(
+        preview_payload,
+        capability=_capability_for_registry_name(target, preview_tool),
+    ):
         return {
             "title": "KB Review",
             "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection),
@@ -6779,6 +6985,7 @@ def _render_queue_text_decision(
         "session_id": _review_session_id(preview_metadata) or f"telegram-kb-text-{int(time.time())}",
         "user_confirmation": {
             "confirmed": True,
+            "confirmed_at": _utc_now_text(),
             "surface": "telegram",
             "action": f"queue.{decision}",
             "preview_required": True,
@@ -7300,8 +7507,6 @@ def _kb_root_command(args: str) -> tuple[str, str]:
         return "kbtoday", rest
     if key in {"status", "info"}:
         return "kbstatus", rest
-    if key in {"reasoning", "reasoning-effort", "kb-reasoning"}:
-        return "kbconfig", rest
     if key in {"runs", "runlog", "history"}:
         return "kbruns", rest
     if key in {"queue", "q"}:
@@ -7347,24 +7552,6 @@ def _kb_command_help() -> dict[str, Any]:
                 "/kb sync - temporarily unavailable pending kb.sync.prepare/commit",
                 "/kb review - lifecycle and proposal judgment inbox",
                 "Retired sync aliases return migration guidance only; they never dispatch a tool.",
-            ]
-        ),
-        "actions": [],
-    }
-
-
-def _render_kb_configuration_guidance(args: str) -> dict[str, Any]:
-    requested = _short((args or "").strip(), "a different reasoning level")
-    return {
-        "title": "KB Reasoning",
-        "status": "operator_configuration_required",
-        "text": "\n".join(
-            [
-                "KB Reasoning",
-                f"Requested: {requested}",
-                "Hermes is transport and rendering only; it does not mutate host runtime configuration.",
-                "Use the trusted-operator NOC configuration and reconciliation route.",
-                "No host or KB state changed.",
             ]
         ),
         "actions": [],
@@ -7457,8 +7644,6 @@ def _card_for_command(
         _, provider_data, _provider_errors = _dispatch_first(ctx, target, [("provider.status", {})])
         hermes_reasoning = _live_hermes_reasoning(gateway, source)
         return _render_status(data, target, provider_data, hermes_reasoning=hermes_reasoning)
-    if command == "kbconfig":
-        return _render_kb_configuration_guidance(args)
     if command == "kbruns":
         _, data, errors = _dispatch_first(
             ctx,
@@ -7959,6 +8144,7 @@ def _evidence_confirm_envelope(
         "evidence_packet": packet,
         "user_confirmation": {
             "confirmed": True,
+            "confirmed_at": _utc_now_text(),
             "surface": "telegram",
             "actor_id": str(actor_id or "").strip(),
         },
@@ -8118,6 +8304,42 @@ def _review_completion_expectation(
     }
 
 
+def _completion_readback_freshness(
+    readback: dict[str, Any],
+    *,
+    receipt: dict[str, Any],
+    confirmation: dict[str, Any],
+) -> str | None:
+    try:
+        observed_at = _parse_aware_timestamp(readback.get("observed_at"))
+    except ValueError:
+        return "readback_timestamp_invalid"
+    now = _dt.datetime.now(_dt.UTC)
+    if observed_at > now + _dt.timedelta(seconds=COMPLETION_CLOCK_SKEW_SECONDS):
+        return "readback_future"
+    if observed_at < now - _dt.timedelta(seconds=COMPLETION_READBACK_TTL_SECONDS):
+        return "readback_stale"
+    related_times: list[_dt.datetime] = []
+    for value in (
+        confirmation.get("confirmed_at"),
+        receipt.get("generated_at"),
+        receipt.get("created_at"),
+        receipt.get("committed_at"),
+    ):
+        if value in (None, ""):
+            continue
+        try:
+            related_times.append(_parse_aware_timestamp(value))
+        except ValueError:
+            return "request_receipt_timestamp_invalid"
+    if any(
+        observed_at + _dt.timedelta(seconds=COMPLETION_CLOCK_SKEW_SECONDS) < related_at
+        for related_at in related_times
+    ):
+        return "readback_precedes_request_or_receipt"
+    return None
+
+
 def _request_bound_review_completion(data: Any, expected: dict[str, Any]) -> dict[str, Any]:
     capability = str(expected.get("route") or "")
     if not _generated_completion_contract_ready(capability):
@@ -8165,14 +8387,17 @@ def _request_bound_review_completion(data: Any, expected: dict[str, Any]) -> dic
         return {"complete": False, "reason": "receipt_digest_mismatch"}
     if not _normalized_digest(readback.get("content_digest")):
         return {"complete": False, "reason": "readback_digest_missing"}
-    try:
-        _parse_aware_timestamp(readback.get("observed_at"))
-    except ValueError:
-        return {"complete": False, "reason": "readback_timestamp_invalid"}
     confirmation = completion.get("confirmation") if isinstance(completion.get("confirmation"), dict) else {}
     expected_confirmation = expected.get("confirmation") if isinstance(expected.get("confirmation"), dict) else {}
     if confirmation.get("confirmed") is not True or confirmation.get("confirmation_digest") != _descriptor_digest(expected_confirmation):
         return {"complete": False, "reason": "confirmation_mismatch"}
+    freshness_error = _completion_readback_freshness(
+        readback,
+        receipt=receipt,
+        confirmation=expected_confirmation,
+    )
+    if freshness_error:
+        return {"complete": False, "reason": freshness_error}
     request = completion.get("request") if isinstance(completion.get("request"), dict) else {}
     lease = expected.get("preview_lease") if isinstance(expected.get("preview_lease"), dict) else {}
     preview_digest = _normalized_digest(lease.get("preview_hash"))
@@ -8255,13 +8480,16 @@ def _request_bound_workflow_completion(data: Any, envelope: dict[str, Any]) -> d
         return {"complete": False, "reason": "receipt_digest_mismatch"}
     if not _normalized_digest(readback.get("content_digest")):
         return {"complete": False, "reason": "readback_digest_missing"}
-    try:
-        _parse_aware_timestamp(readback.get("observed_at"))
-    except ValueError:
-        return {"complete": False, "reason": "readback_timestamp_invalid"}
     confirmation = completion.get("confirmation") if isinstance(completion.get("confirmation"), dict) else {}
     if confirmation.get("confirmed") is not True or confirmation.get("confirmation_digest") != _descriptor_digest(confirmation_packet):
         return {"complete": False, "reason": "confirmation_mismatch"}
+    freshness_error = _completion_readback_freshness(
+        readback,
+        receipt=receipt,
+        confirmation=confirmation_packet,
+    )
+    if freshness_error:
+        return {"complete": False, "reason": freshness_error}
     request = completion.get("request") if isinstance(completion.get("request"), dict) else {}
     expected_request = {
         "preview_digest": _descriptor_digest(plan),
@@ -8289,6 +8517,9 @@ def _completion_truth(data: Any, *, mutation_required: bool) -> dict[str, Any]:
         "canceled",
         "error",
         "failed",
+        "partial",
+        "partially_applied",
+        "completed_with_errors",
         "rejected",
     }
 
@@ -8301,6 +8532,7 @@ def _completion_truth(data: Any, *, mutation_required: bool) -> dict[str, Any]:
             return None
         if not isinstance(value, dict):
             return None
+        diagnostic_branch = "_preview" in path or "_publication" in path
         if value.get("isError") is True:
             return {"accepted": False, "reason": f"contradictory_{path}_isError"}
         for key in ("error", "errors"):
@@ -8316,23 +8548,18 @@ def _completion_truth(data: Any, *, mutation_required: bool) -> dict[str, Any]:
                     "status": status,
                 }
         for key in ("ok", "success"):
-            if value.get(key) is False:
+            if value.get(key) is False and not diagnostic_branch:
                 return {"accepted": False, "reason": f"contradictory_{path}_{key}"}
-        if mutation_required and value.get("mutation_performed") is False:
+        if mutation_required and value.get("mutation_performed") is False and not diagnostic_branch:
             return {
                 "accepted": False,
                 "reason": f"contradictory_{path}_mutation_performed",
             }
         for key in ("saved", "applied"):
-            if value.get(key) is False:
+            if value.get(key) is False and not diagnostic_branch:
                 return {"accepted": False, "reason": f"contradictory_{path}_{key}"}
         for key, child in value.items():
             if isinstance(child, (dict, list)):
-                # Publication is a separate operator action, and the embedded
-                # preview is historical evidence of the pre-write dry run.
-                # Neither may veto a successfully read-back durable mutation.
-                if key in {"publication", "preview"}:
-                    continue
                 clean_key = re.sub(r"[^A-Za-z0-9]+", "_", str(key)).strip("_") or "nested"
                 failure = inspect_value(child, f"{path}_{clean_key}")
                 if failure:
