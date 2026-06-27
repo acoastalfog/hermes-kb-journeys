@@ -1,14 +1,14 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:c2d5d4b66f762c95b5e53c827d668bda5c871d615a83054f03b32ebc3075bf0d",
+      "input_schema_digest": "sha256:7a63c2db19178820f902bda5e2055e67c9038be54c56e7ca2e0249ff873acfc4",
       "name": "review.batch_decide_confirmed",
-      "output_schema_digest": "sha256:e32494bd132f7c384fb3aefa792e54c09331955f193acbc4fe2bf822ac50a250"
+      "output_schema_digest": "sha256:321cee3c8a5f834fb335b5d7be3c0df896b346b3d8f894bca764b7130411d21f"
     },
     {
-      "input_schema_digest": "sha256:525c418ac712645b5e059d2d19c942ecad8d81fa0e594ebb604254e607d632c8",
+      "input_schema_digest": "sha256:b36b6429e9817c99cc6b246435d4d4e92b088c4e89d73d5a0a3163941dbc9a18",
       "name": "review.restore_confirmed",
-      "output_schema_digest": "sha256:025f203129d067cd14c7b700adb5fb7243444d1432591084186b2838748363a8"
+      "output_schema_digest": "sha256:fe97430690ca44aaa5e3fb3f95967385ced8c63d7c35921222f39fdd5732ccf7"
     },
     {
       "input_schema_digest": "sha256:b6e2b241e0122f9c640ec81ee5df34a04bb7c55ff26ffcdf86beabccf3193fe5",
@@ -16,14 +16,14 @@
       "output_schema_digest": "sha256:57835909888f3cffe64d0cc68b1bdd8375af3119eaf6e338ebcb909ceffbde5b"
     }
   ],
-  "digest": "sha256:783fa8f05084e910b19df7ee4d6b2823bbab2fb18bba780aae65fa11647b3d0d",
-  "engine_source_revision": "fc5b134bf4aacb9367299466d66dda506c8c17e3",
-  "engine_version": "0.41.2",
+  "digest": "sha256:2949f282a0daae86cd0d260ee7fc8d49886c074dee73bb0bfa4cfc546d96950f",
+  "engine_source_revision": "5c3de33dea0b91233d474ccedea13027a2aa1800",
+  "engine_version": "0.41.3",
   "journeys": [],
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:af0d9e78658a595f36409c6dc5f9557432077b862e8fae4b3bb90d6b829b9c0a",
+  "source_export_digest": "sha256:4068192898431f4945df8683f93d472efe5a2dcf279c76639a570b08f73c8368",
   "tools": [
     {
       "annotations": {
@@ -385,10 +385,12 @@
               },
               "confirm_tool": {
                 "description": "Only confirmation tool allowed for this lease.",
+                "minLength": 1,
                 "type": "string"
               },
               "cursor_id": {
                 "description": "Guided review cursor id.",
+                "minLength": 1,
                 "type": "string"
               },
               "decision": {
@@ -397,51 +399,92 @@
               },
               "decision_scope": {
                 "description": "Bound decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
                 "type": "string"
               },
               "decisions": {
                 "description": "Bound per-proposal decisions.",
                 "items": {
-                  "additionalProperties": true,
-                  "description": "Per-proposal decision row.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision": {
+                      "description": "Review decision.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Decision note.",
+                      "type": "string"
+                    },
+                    "proposal_id": {
+                      "description": "Proposal id.",
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "decision",
+                    "note"
+                  ],
                   "type": "object"
                 },
                 "type": "array"
               },
               "decisions_hash": {
                 "description": "Digest of the ordered decision rows.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "packet_type": {
+                "const": "guided_kb_review_preview_lease",
                 "description": "Preview lease packet type.",
                 "type": "string"
               },
               "preview_hash": {
                 "description": "Digest of the preview-bound lease fields.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "preview_lease_id": {
                 "description": "Stable preview lease id.",
+                "pattern": "^grl_[0-9a-f]{24}$",
+                "type": "string"
+              },
+              "preview_route": {
+                "description": "Exact preview capability route.",
+                "minLength": 1,
                 "type": "string"
               },
               "preview_status": {
                 "description": "Bound preview outcome.",
+                "minLength": 1,
                 "type": "string"
               },
               "proposal_ids": {
                 "description": "Bound proposal ids.",
                 "items": {
                   "description": "Proposal id.",
+                  "minLength": 1,
                   "type": "string"
                 },
-                "type": "array"
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
               },
               "proposal_ids_hash": {
                 "description": "Digest of the ordered proposal ids.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "review_session_id": {
                 "description": "Guided review session id.",
+                "minLength": 1,
                 "type": "string"
               },
               "schema_version": {
@@ -468,6 +511,7 @@
               "actor",
               "source",
               "preview_status",
+              "preview_route",
               "confirm_tool"
             ],
             "type": "object"
@@ -523,10 +567,12 @@
                   },
                   "confirm_tool": {
                     "description": "Only confirmation tool allowed for this lease.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "cursor_id": {
                     "description": "Guided review cursor id.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "decision": {
@@ -535,51 +581,92 @@
                   },
                   "decision_scope": {
                     "description": "Bound decision scope.",
+                    "enum": [
+                      "explicit_ids",
+                      "all_viewed",
+                      "all_window",
+                      "all_filtered"
+                    ],
                     "type": "string"
                   },
                   "decisions": {
                     "description": "Bound per-proposal decisions.",
                     "items": {
-                      "additionalProperties": true,
-                      "description": "Per-proposal decision row.",
+                      "additionalProperties": false,
+                      "properties": {
+                        "decision": {
+                          "description": "Review decision.",
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "note": {
+                          "description": "Decision note.",
+                          "type": "string"
+                        },
+                        "proposal_id": {
+                          "description": "Proposal id.",
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "proposal_id",
+                        "decision",
+                        "note"
+                      ],
                       "type": "object"
                     },
                     "type": "array"
                   },
                   "decisions_hash": {
                     "description": "Digest of the ordered decision rows.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "packet_type": {
+                    "const": "guided_kb_review_preview_lease",
                     "description": "Preview lease packet type.",
                     "type": "string"
                   },
                   "preview_hash": {
                     "description": "Digest of the preview-bound lease fields.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "preview_lease_id": {
                     "description": "Stable preview lease id.",
+                    "pattern": "^grl_[0-9a-f]{24}$",
+                    "type": "string"
+                  },
+                  "preview_route": {
+                    "description": "Exact preview capability route.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "preview_status": {
                     "description": "Bound preview outcome.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "proposal_ids": {
                     "description": "Bound proposal ids.",
                     "items": {
                       "description": "Proposal id.",
+                      "minLength": 1,
                       "type": "string"
                     },
-                    "type": "array"
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
                   },
                   "proposal_ids_hash": {
                     "description": "Digest of the ordered proposal ids.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "review_session_id": {
                     "description": "Guided review session id.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "schema_version": {
@@ -606,6 +693,7 @@
                   "actor",
                   "source",
                   "preview_status",
+                  "preview_route",
                   "confirm_tool"
                 ],
                 "type": "object"
@@ -627,7 +715,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:c2d5d4b66f762c95b5e53c827d668bda5c871d615a83054f03b32ebc3075bf0d",
+      "input_schema_digest": "sha256:7a63c2db19178820f902bda5e2055e67c9038be54c56e7ca2e0249ff873acfc4",
       "name": "review.batch_decide_confirmed",
       "output_schema": {
         "additionalProperties": true,
@@ -774,10 +862,12 @@
               },
               "confirm_tool": {
                 "description": "Only confirmation tool allowed for this lease.",
+                "minLength": 1,
                 "type": "string"
               },
               "cursor_id": {
                 "description": "Guided review cursor id.",
+                "minLength": 1,
                 "type": "string"
               },
               "decision": {
@@ -786,51 +876,92 @@
               },
               "decision_scope": {
                 "description": "Bound decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
                 "type": "string"
               },
               "decisions": {
                 "description": "Bound per-proposal decisions.",
                 "items": {
-                  "additionalProperties": true,
-                  "description": "Per-proposal decision row.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision": {
+                      "description": "Review decision.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Decision note.",
+                      "type": "string"
+                    },
+                    "proposal_id": {
+                      "description": "Proposal id.",
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "decision",
+                    "note"
+                  ],
                   "type": "object"
                 },
                 "type": "array"
               },
               "decisions_hash": {
                 "description": "Digest of the ordered decision rows.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "packet_type": {
+                "const": "guided_kb_review_preview_lease",
                 "description": "Preview lease packet type.",
                 "type": "string"
               },
               "preview_hash": {
                 "description": "Digest of the preview-bound lease fields.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "preview_lease_id": {
                 "description": "Stable preview lease id.",
+                "pattern": "^grl_[0-9a-f]{24}$",
+                "type": "string"
+              },
+              "preview_route": {
+                "description": "Exact preview capability route.",
+                "minLength": 1,
                 "type": "string"
               },
               "preview_status": {
                 "description": "Bound preview outcome.",
+                "minLength": 1,
                 "type": "string"
               },
               "proposal_ids": {
                 "description": "Bound proposal ids.",
                 "items": {
                   "description": "Proposal id.",
+                  "minLength": 1,
                   "type": "string"
                 },
-                "type": "array"
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
               },
               "proposal_ids_hash": {
                 "description": "Digest of the ordered proposal ids.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "review_session_id": {
                 "description": "Guided review session id.",
+                "minLength": 1,
                 "type": "string"
               },
               "schema_version": {
@@ -857,6 +988,7 @@
               "actor",
               "source",
               "preview_status",
+              "preview_route",
               "confirm_tool"
             ],
             "type": "object"
@@ -1030,7 +1162,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:e32494bd132f7c384fb3aefa792e54c09331955f193acbc4fe2bf822ac50a250",
+      "output_schema_digest": "sha256:321cee3c8a5f834fb335b5d7be3c0df896b346b3d8f894bca764b7130411d21f",
       "title": "Decide Review Batch Confirmed"
     },
     {
@@ -1137,64 +1269,512 @@
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "action": {
+            "const": "review_decision_preview",
+            "type": "string"
+          },
           "decision": {
             "description": "Normalized review decision.",
+            "enum": [
+              "approve",
+              "reject",
+              "archive",
+              "skip",
+              "complete",
+              "keep",
+              "demote",
+              "duplicate",
+              "supersede",
+              "reroute"
+            ],
             "type": "string"
           },
           "ok": {
-            "description": "Whether the decision is previewable.",
+            "description": "Whether the preview is actionable.",
             "type": "boolean"
           },
           "plan": {
-            "additionalProperties": true,
-            "description": "Deterministic control plan.",
+            "additionalProperties": false,
+            "properties": {
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "default": {
+                    "description": "Confirmation default.",
+                    "type": "string"
+                  },
+                  "operation_ids": {
+                    "description": "Operations covered by the confirmation.",
+                    "items": {
+                      "description": "Operation id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "question": {
+                    "description": "Human confirmation question.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "question",
+                  "default",
+                  "operation_ids"
+                ],
+                "type": "object"
+              },
+              "idempotency_key": {
+                "description": "Optional idempotency key.",
+                "type": "string"
+              },
+              "operations": {
+                "description": "Typed deterministic operations.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": true,
+                      "description": "Operation-specific typed arguments validated by the engine registry.",
+                      "minProperties": 1,
+                      "type": "object"
+                    },
+                    "client_id": {
+                      "description": "Optional client operation id.",
+                      "type": "string"
+                    },
+                    "operation_id": {
+                      "description": "Registered operation id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "Reason for the operation.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "plan_id": {
+                "description": "Optional plan id.",
+                "type": "string"
+              },
+              "preconditions": {
+                "description": "Stale-state preconditions.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "description": {
+                      "description": "Precondition description.",
+                      "type": "string"
+                    },
+                    "expected": {
+                      "description": "Expected field value.",
+                      "type": "string"
+                    },
+                    "field": {
+                      "description": "Compared object field.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "object": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "description": "Object id.",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "description": "Object kind.",
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Object path.",
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "Object status.",
+                          "type": "string"
+                        },
+                        "title": {
+                          "description": "Object title.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "id",
+                        "path",
+                        "status",
+                        "title"
+                      ],
+                      "type": "object"
+                    },
+                    "required": {
+                      "description": "Whether this precondition is mandatory.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "object",
+                    "field",
+                    "expected",
+                    "required",
+                    "description"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "raw_response": {
+                "description": "Raw response, when retained.",
+                "type": "string"
+              },
+              "summary": {
+                "description": "Actionable preview summary.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "operations"
+            ],
             "type": "object"
           },
           "preview_hash": {
-            "description": "Preview content hash.",
+            "description": "Preview lease content hash.",
+            "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
           "preview_lease": {
-            "additionalProperties": true,
-            "description": "Digest-bound confirmation lease.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "confirm_tool": {
+                "const": "review.batch_decide_confirmed",
+                "description": "Only confirmation tool allowed for this lease.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "cursor_id": {
+                "description": "Guided review cursor id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "decision": {
+                "description": "Bound common decision, if any.",
+                "type": "string"
+              },
+              "decision_scope": {
+                "description": "Bound decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
+                "type": "string"
+              },
+              "decisions": {
+                "description": "Bound per-proposal decisions.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision": {
+                      "description": "Review decision.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Decision note.",
+                      "type": "string"
+                    },
+                    "proposal_id": {
+                      "description": "Proposal id.",
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "decision",
+                    "note"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decisions_hash": {
+                "description": "Digest of the ordered decision rows.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "packet_type": {
+                "const": "guided_kb_review_preview_lease",
+                "description": "Preview lease packet type.",
+                "type": "string"
+              },
+              "preview_hash": {
+                "description": "Digest of the preview-bound lease fields.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "preview_lease_id": {
+                "description": "Stable preview lease id.",
+                "pattern": "^grl_[0-9a-f]{24}$",
+                "type": "string"
+              },
+              "preview_route": {
+                "const": "review.decision_preview",
+                "description": "Exact preview capability route.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "preview_status": {
+                "description": "Bound preview outcome.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "proposal_ids": {
+                "description": "Bound proposal ids.",
+                "items": {
+                  "description": "Proposal id.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "proposal_ids_hash": {
+                "description": "Digest of the ordered proposal ids.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Guided review session id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Preview lease schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source": {
+                "description": "Preview source harness.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "preview_lease_id",
+              "preview_hash",
+              "review_session_id",
+              "cursor_id",
+              "decision_scope",
+              "proposal_ids",
+              "proposal_ids_hash",
+              "decisions_hash",
+              "actor",
+              "source",
+              "preview_status",
+              "preview_route",
+              "confirm_tool"
+            ],
             "type": "object"
+          },
+          "preview_lease_id": {
+            "pattern": "^grl_[0-9a-f]{24}$",
+            "type": "string"
           },
           "proposal_ids": {
-            "description": "Previewed proposal ids.",
+            "description": "Affected proposal ids.",
             "items": {
               "description": "Proposal id.",
+              "minLength": 1,
               "type": "string"
             },
-            "type": "array"
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "proposal_ids_hash": {
+            "description": "Ordered proposal-id digest.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
           },
           "review_session": {
-            "additionalProperties": true,
-            "description": "Guided review session cursor.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "cursor": {
+                "additionalProperties": false,
+                "properties": {
+                  "candidate_count": {
+                    "description": "Candidate item count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "cursor_id": {
+                    "description": "Review cursor id.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "displayed_count": {
+                    "description": "Displayed item count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "item_ids": {
+                    "description": "Candidate ids.",
+                    "items": {
+                      "description": "Item id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "position": {
+                    "description": "Cursor position.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "viewed_item_ids": {
+                    "description": "Viewed ids.",
+                    "items": {
+                      "description": "Item id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "cursor_id",
+                  "position",
+                  "displayed_count",
+                  "candidate_count",
+                  "item_ids",
+                  "viewed_item_ids"
+                ],
+                "type": "object"
+              },
+              "decision_scope": {
+                "description": "Review decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
+                "type": "string"
+              },
+              "explicit_scope_required": {
+                "description": "Whether an explicit scope is required.",
+                "type": "boolean"
+              },
+              "packet_type": {
+                "const": "guided_kb_review_session",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Review session id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Review session schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "scope": {
+                "description": "Review scope.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "source": {
+                "description": "Preview source.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Review session status.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "surface": {
+                "description": "Review surface.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "review_session_id",
+              "surface",
+              "scope",
+              "status",
+              "cursor",
+              "decision_scope",
+              "explicit_scope_required",
+              "actor",
+              "source"
+            ],
             "type": "object"
           },
+          "route": {
+            "const": "review.decision_preview",
+            "type": "string"
+          },
           "schema_version": {
-            "description": "Review preview schema version.",
+            "description": "Preview schema version.",
             "minimum": 1,
             "type": "integer"
           },
           "status": {
-            "description": "Preview validation status.",
+            "const": "ready_to_confirm",
+            "description": "Actionable preview validation status.",
             "type": "string"
           }
         },
         "required": [
           "schema_version",
+          "route",
+          "action",
           "status",
           "ok",
           "decision",
           "proposal_ids",
+          "review_session",
           "preview_lease",
+          "preview_lease_id",
           "preview_hash",
+          "proposal_ids_hash",
           "plan"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:458c8f7f52ca8850c13dfc5a3ca93e5f7ffbcf27a403dfe9aea0153d2e5b1f03",
+      "output_schema_digest": "sha256:3ab505def2eb43a049651ec68177bf5c00c5cbc8744eb91164ca5eab05b4e5fe",
       "title": "Preview Review Decision"
     },
     {
@@ -1418,10 +1998,12 @@
                   },
                   "confirm_tool": {
                     "description": "Only confirmation tool allowed for this lease.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "cursor_id": {
                     "description": "Guided review cursor id.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "decision": {
@@ -1430,51 +2012,92 @@
                   },
                   "decision_scope": {
                     "description": "Bound decision scope.",
+                    "enum": [
+                      "explicit_ids",
+                      "all_viewed",
+                      "all_window",
+                      "all_filtered"
+                    ],
                     "type": "string"
                   },
                   "decisions": {
                     "description": "Bound per-proposal decisions.",
                     "items": {
-                      "additionalProperties": true,
-                      "description": "Per-proposal decision row.",
+                      "additionalProperties": false,
+                      "properties": {
+                        "decision": {
+                          "description": "Review decision.",
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "note": {
+                          "description": "Decision note.",
+                          "type": "string"
+                        },
+                        "proposal_id": {
+                          "description": "Proposal id.",
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "proposal_id",
+                        "decision",
+                        "note"
+                      ],
                       "type": "object"
                     },
                     "type": "array"
                   },
                   "decisions_hash": {
                     "description": "Digest of the ordered decision rows.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "packet_type": {
+                    "const": "guided_kb_review_preview_lease",
                     "description": "Preview lease packet type.",
                     "type": "string"
                   },
                   "preview_hash": {
                     "description": "Digest of the preview-bound lease fields.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "preview_lease_id": {
                     "description": "Stable preview lease id.",
+                    "pattern": "^grl_[0-9a-f]{24}$",
+                    "type": "string"
+                  },
+                  "preview_route": {
+                    "description": "Exact preview capability route.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "preview_status": {
                     "description": "Bound preview outcome.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "proposal_ids": {
                     "description": "Bound proposal ids.",
                     "items": {
                       "description": "Proposal id.",
+                      "minLength": 1,
                       "type": "string"
                     },
-                    "type": "array"
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
                   },
                   "proposal_ids_hash": {
                     "description": "Digest of the ordered proposal ids.",
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
                   "review_session_id": {
                     "description": "Guided review session id.",
+                    "minLength": 1,
                     "type": "string"
                   },
                   "schema_version": {
@@ -1501,6 +2124,7 @@
                   "actor",
                   "source",
                   "preview_status",
+                  "preview_route",
                   "confirm_tool"
                 ],
                 "type": "object"
@@ -1520,7 +2144,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:525c418ac712645b5e059d2d19c942ecad8d81fa0e594ebb604254e607d632c8",
+      "input_schema_digest": "sha256:b36b6429e9817c99cc6b246435d4d4e92b088c4e89d73d5a0a3163941dbc9a18",
       "name": "review.restore_confirmed",
       "output_schema": {
         "additionalProperties": true,
@@ -1661,10 +2285,12 @@
               },
               "confirm_tool": {
                 "description": "Only confirmation tool allowed for this lease.",
+                "minLength": 1,
                 "type": "string"
               },
               "cursor_id": {
                 "description": "Guided review cursor id.",
+                "minLength": 1,
                 "type": "string"
               },
               "decision": {
@@ -1673,51 +2299,92 @@
               },
               "decision_scope": {
                 "description": "Bound decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
                 "type": "string"
               },
               "decisions": {
                 "description": "Bound per-proposal decisions.",
                 "items": {
-                  "additionalProperties": true,
-                  "description": "Per-proposal decision row.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision": {
+                      "description": "Review decision.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Decision note.",
+                      "type": "string"
+                    },
+                    "proposal_id": {
+                      "description": "Proposal id.",
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "decision",
+                    "note"
+                  ],
                   "type": "object"
                 },
                 "type": "array"
               },
               "decisions_hash": {
                 "description": "Digest of the ordered decision rows.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "packet_type": {
+                "const": "guided_kb_review_preview_lease",
                 "description": "Preview lease packet type.",
                 "type": "string"
               },
               "preview_hash": {
                 "description": "Digest of the preview-bound lease fields.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "preview_lease_id": {
                 "description": "Stable preview lease id.",
+                "pattern": "^grl_[0-9a-f]{24}$",
+                "type": "string"
+              },
+              "preview_route": {
+                "description": "Exact preview capability route.",
+                "minLength": 1,
                 "type": "string"
               },
               "preview_status": {
                 "description": "Bound preview outcome.",
+                "minLength": 1,
                 "type": "string"
               },
               "proposal_ids": {
                 "description": "Bound proposal ids.",
                 "items": {
                   "description": "Proposal id.",
+                  "minLength": 1,
                   "type": "string"
                 },
-                "type": "array"
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
               },
               "proposal_ids_hash": {
                 "description": "Digest of the ordered proposal ids.",
+                "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "review_session_id": {
                 "description": "Guided review session id.",
+                "minLength": 1,
                 "type": "string"
               },
               "schema_version": {
@@ -1744,6 +2411,7 @@
               "actor",
               "source",
               "preview_status",
+              "preview_route",
               "confirm_tool"
             ],
             "type": "object"
@@ -1912,7 +2580,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:025f203129d067cd14c7b700adb5fb7243444d1432591084186b2838748363a8",
+      "output_schema_digest": "sha256:fe97430690ca44aaa5e3fb3f95967385ced8c63d7c35921222f39fdd5732ccf7",
       "title": "Restore Review Decision Confirmed"
     },
     {
@@ -1995,59 +2663,539 @@
       "output_schema": {
         "additionalProperties": true,
         "properties": {
-          "incompatible_ids": {
-            "description": "Non-restorable proposal ids.",
+          "action": {
+            "const": "review_restore_preview",
+            "type": "string"
+          },
+          "already_restored_ids": {
+            "description": "Already restored ids.",
             "items": {
               "description": "Proposal id.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "incompatible_ids": {
+            "description": "Incompatible proposal ids.",
+            "items": {
+              "description": "Proposal id.",
+              "minLength": 1,
               "type": "string"
             },
             "type": "array"
           },
           "ok": {
-            "description": "Whether at least one decision is safely restorable.",
+            "description": "Whether the preview is actionable.",
             "type": "boolean"
           },
           "plan": {
-            "additionalProperties": true,
-            "description": "Deterministic restore plan.",
+            "additionalProperties": false,
+            "properties": {
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "default": {
+                    "description": "Confirmation default.",
+                    "type": "string"
+                  },
+                  "operation_ids": {
+                    "description": "Operations covered by the confirmation.",
+                    "items": {
+                      "description": "Operation id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "question": {
+                    "description": "Human confirmation question.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "question",
+                  "default",
+                  "operation_ids"
+                ],
+                "type": "object"
+              },
+              "idempotency_key": {
+                "description": "Optional idempotency key.",
+                "type": "string"
+              },
+              "operations": {
+                "description": "Typed deterministic operations.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": true,
+                      "description": "Operation-specific typed arguments validated by the engine registry.",
+                      "minProperties": 1,
+                      "type": "object"
+                    },
+                    "client_id": {
+                      "description": "Optional client operation id.",
+                      "type": "string"
+                    },
+                    "operation_id": {
+                      "description": "Registered operation id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "Reason for the operation.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "plan_id": {
+                "description": "Optional plan id.",
+                "type": "string"
+              },
+              "preconditions": {
+                "description": "Stale-state preconditions.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "description": {
+                      "description": "Precondition description.",
+                      "type": "string"
+                    },
+                    "expected": {
+                      "description": "Expected field value.",
+                      "type": "string"
+                    },
+                    "field": {
+                      "description": "Compared object field.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "object": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "description": "Object id.",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "description": "Object kind.",
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Object path.",
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "Object status.",
+                          "type": "string"
+                        },
+                        "title": {
+                          "description": "Object title.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "id",
+                        "path",
+                        "status",
+                        "title"
+                      ],
+                      "type": "object"
+                    },
+                    "required": {
+                      "description": "Whether this precondition is mandatory.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "object",
+                    "field",
+                    "expected",
+                    "required",
+                    "description"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "raw_response": {
+                "description": "Raw response, when retained.",
+                "type": "string"
+              },
+              "summary": {
+                "description": "Actionable preview summary.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "operations"
+            ],
             "type": "object"
+          },
+          "preview_hash": {
+            "description": "Preview lease content hash.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
           },
           "preview_lease": {
-            "additionalProperties": true,
-            "description": "Digest-bound restore confirmation lease.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "confirm_tool": {
+                "const": "review.restore_confirmed",
+                "description": "Only confirmation tool allowed for this lease.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "cursor_id": {
+                "description": "Guided review cursor id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "decision": {
+                "description": "Bound common decision, if any.",
+                "type": "string"
+              },
+              "decision_scope": {
+                "description": "Bound decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
+                "type": "string"
+              },
+              "decisions": {
+                "description": "Bound per-proposal decisions.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision": {
+                      "description": "Review decision.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "note": {
+                      "description": "Decision note.",
+                      "type": "string"
+                    },
+                    "proposal_id": {
+                      "description": "Proposal id.",
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "proposal_id",
+                    "decision",
+                    "note"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decisions_hash": {
+                "description": "Digest of the ordered decision rows.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "packet_type": {
+                "const": "guided_kb_review_preview_lease",
+                "description": "Preview lease packet type.",
+                "type": "string"
+              },
+              "preview_hash": {
+                "description": "Digest of the preview-bound lease fields.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "preview_lease_id": {
+                "description": "Stable preview lease id.",
+                "pattern": "^grl_[0-9a-f]{24}$",
+                "type": "string"
+              },
+              "preview_route": {
+                "const": "review.restore_preview",
+                "description": "Exact preview capability route.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "preview_status": {
+                "description": "Bound preview outcome.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "proposal_ids": {
+                "description": "Bound proposal ids.",
+                "items": {
+                  "description": "Proposal id.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "proposal_ids_hash": {
+                "description": "Digest of the ordered proposal ids.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Guided review session id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Preview lease schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source": {
+                "description": "Preview source harness.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "preview_lease_id",
+              "preview_hash",
+              "review_session_id",
+              "cursor_id",
+              "decision_scope",
+              "proposal_ids",
+              "proposal_ids_hash",
+              "decisions_hash",
+              "actor",
+              "source",
+              "preview_status",
+              "preview_route",
+              "confirm_tool"
+            ],
             "type": "object"
           },
-          "restorable_ids": {
-            "description": "Safely restorable proposal ids.",
+          "preview_lease_id": {
+            "pattern": "^grl_[0-9a-f]{24}$",
+            "type": "string"
+          },
+          "proposal_ids": {
+            "description": "Selected proposal ids.",
             "items": {
               "description": "Proposal id.",
+              "minLength": 1,
               "type": "string"
             },
             "type": "array"
           },
+          "proposal_ids_hash": {
+            "description": "Ordered proposal-id digest.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "restorable_ids": {
+            "description": "Affected proposal ids.",
+            "items": {
+              "description": "Proposal id.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
           "review_session": {
-            "additionalProperties": true,
-            "description": "Guided review session cursor.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "cursor": {
+                "additionalProperties": false,
+                "properties": {
+                  "candidate_count": {
+                    "description": "Candidate item count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "cursor_id": {
+                    "description": "Review cursor id.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "displayed_count": {
+                    "description": "Displayed item count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "item_ids": {
+                    "description": "Candidate ids.",
+                    "items": {
+                      "description": "Item id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "position": {
+                    "description": "Cursor position.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "viewed_item_ids": {
+                    "description": "Viewed ids.",
+                    "items": {
+                      "description": "Item id.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "cursor_id",
+                  "position",
+                  "displayed_count",
+                  "candidate_count",
+                  "item_ids",
+                  "viewed_item_ids"
+                ],
+                "type": "object"
+              },
+              "decision_scope": {
+                "description": "Review decision scope.",
+                "enum": [
+                  "explicit_ids",
+                  "all_viewed",
+                  "all_window",
+                  "all_filtered"
+                ],
+                "type": "string"
+              },
+              "explicit_scope_required": {
+                "description": "Whether an explicit scope is required.",
+                "type": "boolean"
+              },
+              "packet_type": {
+                "const": "guided_kb_review_session",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Review session id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Review session schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "scope": {
+                "description": "Review scope.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "source": {
+                "description": "Preview source.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Review session status.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "surface": {
+                "description": "Review surface.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "review_session_id",
+              "surface",
+              "scope",
+              "status",
+              "cursor",
+              "decision_scope",
+              "explicit_scope_required",
+              "actor",
+              "source"
+            ],
             "type": "object"
           },
+          "route": {
+            "const": "review.restore_preview",
+            "type": "string"
+          },
           "schema_version": {
-            "description": "Restore preview schema version.",
+            "description": "Preview schema version.",
             "minimum": 1,
             "type": "integer"
           },
+          "source_receipt_id": {
+            "description": "Source receipt id.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_transaction_id": {
+            "description": "Source transaction id.",
+            "minLength": 1,
+            "type": "string"
+          },
           "status": {
-            "description": "Restore preview status.",
+            "const": "ready_to_confirm",
+            "description": "Actionable preview validation status.",
+            "type": "string"
+          },
+          "target_status": {
+            "const": "pending_approval",
             "type": "string"
           }
         },
         "required": [
           "schema_version",
+          "route",
+          "action",
           "status",
-          "ok"
+          "ok",
+          "restorable_ids",
+          "review_session",
+          "preview_lease",
+          "preview_lease_id",
+          "preview_hash",
+          "proposal_ids_hash",
+          "plan",
+          "target_status",
+          "source_transaction_id",
+          "source_receipt_id"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:b9f9145c15d75dc1586f5840d7edf328aca0de2c2ca8c26530bcf636cb096998",
+      "output_schema_digest": "sha256:1b21eb9f07e122da90aeb2ce7b03e2bfa0c70c6bf51bc45aab0db14f460fb131",
       "title": "Preview Review Restore"
     },
     {

@@ -48,11 +48,11 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine revision
-`fc5b134bf4aacb9367299466d66dda506c8c17e3`, which owns the exact
+The committed export is pinned to the kb-engine 0.41.3 safety candidate at
+revision `5c3de33dea0b91233d474ccedea13027a2aa1800`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
-descriptor job remains intentionally blocked until that exact K3 revision is
+descriptor job remains intentionally blocked until that exact revision is
 published and remotely reachable; local test results do not count as a green
 GitHub workflow.
 
