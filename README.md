@@ -80,3 +80,22 @@ current-upstream checkout:
 ```bash
 uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
 ```
+
+## Gate S H1 owner evidence
+
+`scripts/h1-owner-evidence.py` is a non-packaged evidence generator for the
+released plugin at `9772526c543cec30ee3aee71be952f95dbaf8301`. It runs the
+four H1 contract groups against an exact upstream Hermes Agent `v2026.6.19`
+checkout, then consumes NOC's root-custodied final plugin deployment receipt
+and a separate post-cutover semantic confirmed-write/readback canary receipt.
+
+It creates `h1-test-report.json` and `h1-candidate.json` together in a fresh
+mode-0700 directory, with both files mode 0600. Missing, stale, pre-cutover,
+secret-bearing, request-lifecycle-only, or digest-mismatched evidence creates
+neither file. The script never calls Hermes, writes to the KB, or admits the
+candidate into NOC.
+
+The exact NOC handoff schema and invocation are documented in
+[`docs/gate-s-h1-owner-evidence.md`](docs/gate-s-h1-owner-evidence.md). NOC
+must implement that semantic canary producer before a real H1 candidate can be
+emitted.
