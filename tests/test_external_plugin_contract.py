@@ -1544,6 +1544,8 @@ def test_generic_concrete_generated_preview_contract_can_enable_confirmation(tmp
     }
     assert plugin._generated_preview_contract_ready(preview_name) is True
     assert plugin._preview_allows_confirmation(payload, capability=preview_name) is True
+    payload["status"] = "noop"
+    assert plugin._preview_allows_confirmation(payload, capability=preview_name) is False
 
 
 def test_restore_preview_requires_route_bound_lease_ids_and_actionable_plan(tmp_path, monkeypatch):
