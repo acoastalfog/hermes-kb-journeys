@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 EXPECTED_PLUGIN_REF = "9772526c543cec30ee3aee71be952f95dbaf8301"
 EXPECTED_HERMES_REF = "v2026.6.19"
+EXPECTED_HERMES_REVISION = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
 EXPECTED_SOURCE_REPOSITORY = "acoastalfog/hermes-kb-journeys"
 EXPECTED_HERMES_REPOSITORY = "NousResearch/hermes-agent"
 EXPECTED_NOC_REPOSITORY = "acoastalfog/noc"
@@ -114,6 +115,7 @@ CANARY_RECEIPT_KEYS = {
     "terminal_state",
     "observer_host",
     "observed_at",
+    "ttl_seconds",
     "source_revision",
     "producer",
     "relay_cutover",
@@ -332,18 +334,33 @@ def validate_source_checkout(repo_root: Path) -> None:
 
 
 def validate_hermes_fixture(path: Path) -> str:
-    if not path.is_absolute() or not (path / "hermes_cli" / "plugins.py").is_file():
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise EvidenceError("hermes_fixture_unavailable") from error
+    if (
+        not path.is_absolute()
+        or resolved != path
+        or not (path / "hermes_cli" / "plugins.py").is_file()
+    ):
         raise EvidenceError("hermes_fixture_unavailable")
     head = str(_run_git(path, "rev-parse", "HEAD^{commit}")).strip()
-    tag = str(_run_git(path, "rev-parse", f"{EXPECTED_HERMES_REF}^{{commit}}")).strip()
     origin = str(_run_git(path, "remote", "get-url", "origin")).strip()
-    dirty = str(_run_git(path, "status", "--porcelain", "--untracked-files=no"))
+    dirty = str(
+        _run_git(
+            path,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        )
+    )
     canonical_origins = {
         f"https://github.com/{EXPECTED_HERMES_REPOSITORY}",
         f"https://github.com/{EXPECTED_HERMES_REPOSITORY}.git",
         f"git@github.com:{EXPECTED_HERMES_REPOSITORY}.git",
     }
-    if head != tag or origin not in canonical_origins or dirty:
+    if head != EXPECTED_HERMES_REVISION or origin not in canonical_origins or dirty:
         raise EvidenceError("hermes_fixture_mismatch")
     return head
 
@@ -527,7 +544,7 @@ def _validate_canary_receipt(
     relay_cutover_observed_at: datetime,
     now: datetime,
     trusted_uid: int,
-) -> datetime:
+) -> tuple[datetime, int, int]:
     if set(payload) != CANARY_RECEIPT_KEYS:
         raise EvidenceError("semantic_canary_schema_invalid")
     claimed = payload.get("receipt_digest")
@@ -536,6 +553,7 @@ def _validate_canary_receipt(
     producer = payload.get("producer")
     relay_cutover = payload.get("relay_cutover")
     service_identity = payload.get("service_identity")
+    ttl_seconds = payload.get("ttl_seconds")
     relay_artifact = (
         relay_cutover.get("artifact") if isinstance(relay_cutover, dict) else None
     )
@@ -564,6 +582,8 @@ def _validate_canary_receipt(
         or payload.get("durable_readback") is not True
         or payload.get("terminal_state") != "completed"
         or payload.get("observer_host") != "helix"
+        or type(ttl_seconds) is not int
+        or not 0 < ttl_seconds <= 86400
         or payload.get("source_revision") != EXPECTED_PLUGIN_REF
         or payload.get("plugin_deployment_receipt_digest") != plugin_receipt_digest
         or not isinstance(producer, dict)
@@ -602,13 +622,20 @@ def _validate_canary_receipt(
     observed_at = _parse_timestamp(
         payload.get("observed_at"), code="canary_timestamp_invalid"
     )
+    current = now.astimezone(UTC)
     if (
         observed_at < installed_at
         or observed_at < relay_cutover_observed_at
-        or observed_at < now.astimezone(UTC) - timedelta(hours=24)
-        or observed_at > now.astimezone(UTC) + timedelta(minutes=5)
+        or observed_at > current + timedelta(minutes=5)
     ):
         raise EvidenceError("semantic_canary_not_current_post_cutover")
+    expires_at = observed_at + timedelta(seconds=ttl_seconds)
+    remaining_ttl = min(
+        ttl_seconds,
+        int((expires_at - current).total_seconds()),
+    )
+    if remaining_ttl <= 0:
+        raise EvidenceError("semantic_canary_expired")
     artifact_path = Path(str(artifact["path"]))
     artifact_payload, artifact_raw = _read_custodied_json(
         artifact_path, trusted_uid=trusted_uid
@@ -632,7 +659,7 @@ def _validate_canary_receipt(
         or not _secret_safe(artifact_payload)
     ):
         raise EvidenceError("semantic_canary_artifact_invalid")
-    return observed_at
+    return observed_at, ttl_seconds, remaining_ttl
 
 
 def run_contract_check(
@@ -701,6 +728,8 @@ def _build_report(
     generated_at: datetime,
     relay_cutover_observed_at: datetime,
     canary_observed_at: datetime,
+    canary_ttl_seconds: int,
+    candidate_ttl_seconds: int,
     check_results: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     checks = {
@@ -729,6 +758,11 @@ def _build_report(
         "service_identity": canary_receipt["service_identity"],
         "semantic_canary_receipt_digest": canary_receipt["receipt_digest"],
         "semantic_canary_observed_at": _format_timestamp(canary_observed_at),
+        "semantic_canary_ttl_seconds": canary_ttl_seconds,
+        "semantic_canary_expires_at": _format_timestamp(
+            canary_observed_at + timedelta(seconds=canary_ttl_seconds)
+        ),
+        "candidate_ttl_seconds": candidate_ttl_seconds,
         "semantic_canary_artifact_sha256": canary_receipt["artifact"]["sha256"],
         "checks": checks,
         "test_counts": {
@@ -764,7 +798,7 @@ def _build_candidate(
         "receipt_id": "h1",
         "status": "pass",
         "observed_at": report["observed_at"],
-        "ttl_seconds": 86400,
+        "ttl_seconds": report["candidate_ttl_seconds"],
         "evidence": evidence,
         "evidence_digest": _digest(evidence),
         "secret_values_exposed": False,
@@ -844,16 +878,18 @@ def generate_evidence(
         canary_receipt_path, trusted_uid=trusted_input_uid
     )
     current = (now or datetime.now(UTC)).astimezone(UTC)
-    canary_observed_at = _validate_canary_receipt(
-        canary_receipt,
-        installed_at=installed_at,
-        plugin_receipt_digest=plugin_receipt["receipt_digest"],
-        relay_cutover_receipt=relay_cutover_receipt,
-        relay_cutover_raw=relay_cutover_raw,
-        relay_cutover_path=relay_cutover_receipt_path,
-        relay_cutover_observed_at=relay_cutover_observed_at,
-        now=current,
-        trusted_uid=trusted_input_uid,
+    canary_observed_at, canary_ttl_seconds, candidate_ttl_seconds = (
+        _validate_canary_receipt(
+            canary_receipt,
+            installed_at=installed_at,
+            plugin_receipt_digest=plugin_receipt["receipt_digest"],
+            relay_cutover_receipt=relay_cutover_receipt,
+            relay_cutover_raw=relay_cutover_raw,
+            relay_cutover_path=relay_cutover_receipt_path,
+            relay_cutover_observed_at=relay_cutover_observed_at,
+            now=current,
+            trusted_uid=trusted_input_uid,
+        )
     )
     check_results: dict[str, dict[str, Any]] = {}
     for check_name, selectors in CHECK_TESTS.items():
@@ -877,6 +913,8 @@ def generate_evidence(
         generated_at=current,
         relay_cutover_observed_at=relay_cutover_observed_at,
         canary_observed_at=canary_observed_at,
+        canary_ttl_seconds=canary_ttl_seconds,
+        candidate_ttl_seconds=candidate_ttl_seconds,
         check_results=check_results,
     )
     report_raw = json.dumps(report, indent=2, sort_keys=True).encode("utf-8") + b"\n"

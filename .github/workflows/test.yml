@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: NousResearch/hermes-agent
-          ref: v2026.6.19
+          ref: 2bd1977d8fad185c9b4be47884f7e87f1add0ce3
           path: hermes-agent
       - uses: astral-sh/setup-uv@v6
       - name: Run exact H1 owner-evidence contracts

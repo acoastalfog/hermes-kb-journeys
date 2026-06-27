@@ -10,8 +10,11 @@ admission.
 Run from a checkout whose plugin runtime files still equal release commit
 `9772526c543cec30ee3aee71be952f95dbaf8301`.
 
-1. An exact clean checkout of `NousResearch/hermes-agent` at annotated tag
-   `v2026.6.19`.
+1. An exact checkout of canonical origin `NousResearch/hermes-agent` at commit
+   `2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (the immutable commit behind
+   `v2026.6.19`). A local tag is not identity evidence. The tracked tree and
+   every untracked or ignored path must be empty of local additions; the
+   generator rejects all such paths before executing the fixture.
 2. NOC's final root-custodied `hermes_plugin_deployment_receipt`. Its nested
    install receipt must bind:
    - `current_ref` to `9772526c543cec30ee3aee71be952f95dbaf8301`;
@@ -55,6 +58,7 @@ digest excludes only `receipt_digest`.
   "terminal_state": "completed",
   "observer_host": "helix",
   "observed_at": "<aware UTC timestamp after plugin installed_at>",
+  "ttl_seconds": 86400,
   "source_revision": "9772526c543cec30ee3aee71be952f95dbaf8301",
   "producer": {
     "source_repository": "acoastalfog/noc",
@@ -92,6 +96,13 @@ and the exact bound relay cutover receipt. The canary's NOC producer revision,
 system-service identity, relay receipt/plan digests, and final plugin receipt
 digest are mandatory. A plugin prepare or deployment receipt by itself cannot
 prove relay cutover.
+
+The H1 candidate never resets this lifetime. Its `observed_at` is the evidence
+generation time and its `ttl_seconds` is the integer remaining lifetime from
+`semantic canary observed_at + semantic canary ttl_seconds`, capped by the
+original TTL. At the expiry boundary the generator emits nothing. For example,
+a 24-hour canary generated 23 hours and 59 minutes earlier can produce at most
+a 60-second H1 candidate, not a new 24-hour receipt.
 
 The bound artifact is also strict:
 
