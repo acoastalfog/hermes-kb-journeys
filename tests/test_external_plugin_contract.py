@@ -1544,6 +1544,8 @@ def test_generic_concrete_generated_preview_contract_can_enable_confirmation(tmp
     }
     assert plugin._generated_preview_contract_ready(preview_name) is True
     assert plugin._preview_allows_confirmation(payload, capability=preview_name) is True
+    payload["status"] = "ready_to_confirm"
+    assert plugin._preview_allows_confirmation(payload, capability=preview_name) is True
     payload["status"] = "noop"
     assert plugin._preview_allows_confirmation(payload, capability=preview_name) is False
 
