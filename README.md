@@ -29,6 +29,10 @@ fields: `current_ref`, `previous_ref`, `installed_digest`,
 `descriptor_digest`, `installed_at`, and `noc_plan_digest`. NOC writes the
 receipt; the plugin only validates and reports it. The recorded previous ref is
 the sole rollback source of truth.
+The renderer labels a receipt verified only when a current, TTL-bounded,
+digest-bound NOC observation proves the same loaded descriptor, artifact
+digest, and current ref. Missing evidence is recorded; malformed, future, or
+expired evidence is invalid.
 
 ## Generated contracts
 
@@ -44,7 +48,7 @@ and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
 The committed export is pinned to kb-engine revision
-`a4bad91b71c80f242d68cabf7c3adc10f37b632f`, which owns the exact
+`361ae4a24d2606b23bb18777d43078476435d664`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job remains intentionally blocked until that exact K3 revision is
@@ -56,7 +60,8 @@ GitHub workflow.
 Version 0.5.0 deliberately makes `/kb sync` return
 `status: temporarily_unavailable` without dispatching an MCP tool. It will be
 restored only when kb-engine publishes canonical `kb.sync.prepare` and
-`kb.sync.commit` contracts. Evidence capture/write likewise remains unavailable
+`kb.sync.commit` contracts. The old `/kbsync` and `update_kb` entrypoints are
+removed and return migration guidance only. Evidence capture/write likewise remains unavailable
 until `evidence.remember.preview/confirmed` is exported. A confirmed evidence
 receipt is rendered as “Evidence remembered”; it never implies a semantic
 object update or publication. Durable wording requires confirmed identity and

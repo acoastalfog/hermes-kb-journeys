@@ -69,7 +69,8 @@ except Exception:
 
 DEFAULT_MCP_TARGET = "kb_engine_prod"
 MENU_COMMANDS = {"kb"}
-LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun", "kbsync"}
+LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun"}
+RETIRED_COMMANDS = {"kbsync", "update_kb"}
 SUPPORTED_COMMANDS = MENU_COMMANDS
 KB_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 QUEUE_REPLY_DECISIONS = {"approve", "reject", "archive", "skip", "complete", "keep", "demote", "detail"}
@@ -130,6 +131,18 @@ INSTALL_RECEIPT_FIELDS = {
     "installed_at",
     "noc_plan_digest",
 }
+INSTALL_EVIDENCE_FIELDS = {
+    "owner",
+    "source",
+    "observed_at",
+    "ttl_seconds",
+    "ref_verified",
+    "artifact_verified",
+    "current_ref",
+    "installed_digest",
+    "descriptor_digest",
+    "binding_digest",
+}
 EVIDENCE_BINDING_FIELDS = {
     "target",
     "preview_digest",
@@ -167,6 +180,83 @@ def _parse_aware_timestamp(value: Any) -> _dt.datetime:
     return parsed.astimezone(_dt.UTC)
 
 
+def _schema_declared_types(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    found = {schema["type"]} if isinstance(schema.get("type"), str) else set()
+    for branch in schema.get("allOf") or []:
+        found.update(_schema_declared_types(branch))
+    return found
+
+
+def _schema_required_fields(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    found = {item for item in schema.get("required") or [] if isinstance(item, str)}
+    for branch in schema.get("allOf") or []:
+        found.update(_schema_required_fields(branch))
+    return found
+
+
+def _schema_forbidden_required_fields(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    found: set[str] = set()
+    denied = schema.get("not")
+    if isinstance(denied, dict):
+        found.update(item for item in denied.get("required") or [] if isinstance(item, str))
+    for branch in schema.get("allOf") or []:
+        found.update(_schema_forbidden_required_fields(branch))
+    return found
+
+
+def _schema_forbidden_types(schema: Any) -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    found: set[str] = set()
+    denied = schema.get("not")
+    if isinstance(denied, dict):
+        found.update(_schema_declared_types(denied))
+    for branch in schema.get("allOf") or []:
+        found.update(_schema_forbidden_types(branch))
+    return found
+
+
+def _schema_shape_is_concrete(schema: Any, *, require_required: bool) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if isinstance(schema.get("$ref"), str) and schema["$ref"].strip():
+        return True
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in schema:
+            branches = schema.get(keyword)
+            return bool(
+                isinstance(branches, list)
+                and branches
+                and all(
+                    _schema_shape_is_concrete(branch, require_required=require_required)
+                    for branch in branches
+                )
+            )
+    if "allOf" in schema:
+        branches = schema.get("allOf")
+        return bool(
+            isinstance(branches, list)
+            and branches
+            and any(
+                _schema_shape_is_concrete(branch, require_required=require_required)
+                for branch in branches
+            )
+        )
+    properties = schema.get("properties")
+    if schema.get("type") == "object":
+        required = schema.get("required")
+        if not isinstance(properties, dict) or not properties:
+            return False
+        return not require_required or (isinstance(required, list) and bool(required))
+    return schema.get("type") in {"array", "boolean", "integer", "number", "string"}
+
+
 def _validate_schema(schema: Any, *, path: str = "$") -> None:
     if not isinstance(schema, dict) or not schema:
         raise ValueError(f"{path} must be a non-empty schema object")
@@ -175,7 +265,7 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
     if "$ref" in schema:
         if not isinstance(ref, str) or not ref.strip():
             raise ValueError(f"{path} has an invalid $ref")
-        has_shape = True
+        raise ValueError(f"{path} contains an unresolved $ref")
     for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword not in schema:
             continue
@@ -184,6 +274,10 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
             raise ValueError(f"{path}.{keyword} must contain at least one schema")
         for index, branch in enumerate(branches):
             _validate_schema(branch, path=f"{path}.{keyword}[{index}]")
+            if keyword in {"oneOf", "anyOf"} and not _schema_shape_is_concrete(
+                branch, require_required=False
+            ):
+                raise ValueError(f"{path}.{keyword}[{index}] is unconstrained")
         has_shape = True
     schema_type = schema.get("type")
     if schema_type is not None:
@@ -206,6 +300,13 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         additional = schema.get("additionalProperties", True)
         if not isinstance(additional, bool):
             _validate_schema(additional, path=f"{path}.additionalProperties")
+    elif "required" in schema:
+        required = schema.get("required")
+        if not isinstance(required, list) or any(not isinstance(item, str) or not item for item in required):
+            raise ValueError(f"{path}.required must contain field names")
+        if len(required) != len(set(required)):
+            raise ValueError(f"{path}.required must be unique")
+        has_shape = True
     if schema_type == "array":
         if "items" not in schema:
             raise ValueError(f"{path}.items is required for arrays")
@@ -214,6 +315,24 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         raise ValueError(f"{path}.enum must not be empty")
     if "const" in schema or "enum" in schema:
         has_shape = True
+    if "not" in schema:
+        denied = schema["not"]
+        if not isinstance(denied, dict) or not denied:
+            raise ValueError(f"{path}.not must be a non-empty schema")
+        _validate_schema(denied, path=f"{path}.not")
+        has_shape = True
+        if schema_type and schema_type in _schema_declared_types(denied):
+            raise ValueError(f"{path} excludes its own type")
+    if "allOf" in schema:
+        declared_types = _schema_declared_types(schema)
+        if len(declared_types) > 1:
+            raise ValueError(f"{path}.allOf contains impossible type constraints")
+    required_fields = _schema_required_fields(schema)
+    forbidden_fields = _schema_forbidden_required_fields(schema)
+    if required_fields.intersection(forbidden_fields):
+        raise ValueError(f"{path} contains impossible required/not constraints")
+    if _schema_declared_types(schema).intersection(_schema_forbidden_types(schema)):
+        raise ValueError(f"{path} contains impossible type/not constraints")
     if not has_shape:
         raise ValueError(f"{path} has no type, reference, composition, enum, or const")
 
@@ -223,17 +342,7 @@ def _schema_is_concrete(schema: Any, *, require_required: bool = False) -> bool:
         _validate_schema(schema)
     except ValueError:
         return False
-    if any(isinstance(schema.get(key), list) and schema[key] for key in ("$ref", "oneOf", "anyOf", "allOf")):
-        return True
-    if isinstance(schema.get("$ref"), str) and schema["$ref"].strip():
-        return True
-    properties = schema.get("properties")
-    if schema.get("type") == "object":
-        required = schema.get("required")
-        if not isinstance(properties, dict) or not properties:
-            return False
-        return not require_required or (isinstance(required, list) and bool(required))
-    return schema.get("type") in {"array", "boolean", "integer", "number", "string"}
+    return _schema_shape_is_concrete(schema, require_required=require_required)
 
 
 def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -288,6 +397,15 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
                 raise ValueError(f"tool descriptor {name} has an invalid {label} schema digest")
             if found != _descriptor_digest(schema):
                 raise ValueError(f"tool descriptor {name} {label} schema digest does not match")
+        annotations = descriptor.get("annotations") if isinstance(descriptor.get("annotations"), dict) else {}
+        input_properties = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
+        executable_envelope = input_properties.get("envelope")
+        if (
+            annotations.get("readOnlyHint") is False
+            and executable_envelope is not None
+            and not _schema_is_concrete(executable_envelope, require_required=True)
+        ):
+            raise ValueError(f"tool descriptor {name} has an unconstrained executable envelope")
         tool_map[name] = descriptor
     actions = body.get("actions")
     if not isinstance(actions, list):
@@ -387,6 +505,39 @@ def _rollback_ref(receipt: dict[str, str]) -> str:
     return _parse_install_receipt(receipt)["previous_ref"]
 
 
+def _install_evidence_status(receipt: dict[str, str], value: Any) -> tuple[str, str]:
+    if value is None:
+        return "recorded", "no live NOC installation evidence was supplied"
+    if not isinstance(value, dict) or set(value) != INSTALL_EVIDENCE_FIELDS:
+        return "invalid", "installation evidence fields do not match the contract"
+    evidence = dict(value)
+    binding_digest = str(evidence.pop("binding_digest") or "").strip()
+    if binding_digest != _descriptor_digest(evidence):
+        return "invalid", "installation evidence digest does not match"
+    if evidence.get("owner") != "noc" or not str(evidence.get("source") or "").startswith("noc."):
+        return "invalid", "installation evidence owner/source is not NOC"
+    if evidence.get("ref_verified") is not True or evidence.get("artifact_verified") is not True:
+        return "invalid", "installation artifact/ref evidence is not verified"
+    try:
+        observed_at = _parse_aware_timestamp(evidence.get("observed_at"))
+        ttl_seconds = int(evidence.get("ttl_seconds"))
+    except (TypeError, ValueError):
+        return "invalid", "installation evidence freshness fields are invalid"
+    if not 1 <= ttl_seconds <= 86400:
+        return "invalid", "installation evidence TTL is outside the allowed range"
+    now = _dt.datetime.now(_dt.UTC)
+    if observed_at > now + _dt.timedelta(minutes=5):
+        return "invalid", "installation evidence is future-dated"
+    if now > observed_at + _dt.timedelta(seconds=ttl_seconds):
+        return "invalid", "installation evidence is expired"
+    if not _DESCRIPTOR_BUNDLE or receipt["descriptor_digest"] != _DESCRIPTOR_BUNDLE.get("digest"):
+        return "invalid", "receipt descriptor digest does not match the loaded bundle"
+    for key in ("current_ref", "installed_digest", "descriptor_digest"):
+        if str(evidence.get(key) or "") != receipt[key]:
+            return "invalid", f"installation evidence {key} does not match the receipt"
+    return "verified", "loaded descriptor, artifact, and ref evidence agree"
+
+
 def _render_install_receipt(value: Any, *, installed_evidence: Any = None) -> dict[str, Any]:
     try:
         receipt = _parse_install_receipt(value)
@@ -397,31 +548,19 @@ def _render_install_receipt(value: Any, *, installed_evidence: Any = None) -> di
             "text": f"Hermes KB Plugin Install\nInstall receipt is invalid: {exc}",
             "actions": [],
         }
-    evidence = installed_evidence if isinstance(installed_evidence, dict) else {}
-    evidence_matches = (
-        evidence.get("ref_verified") is True
-        and evidence.get("artifact_verified") is True
-        and str(evidence.get("current_ref") or "") == receipt["current_ref"]
-        and str(evidence.get("installed_digest") or "") == receipt["installed_digest"]
-        and str(evidence.get("descriptor_digest") or "") == receipt["descriptor_digest"]
-    )
-    try:
-        _parse_aware_timestamp(evidence.get("observed_at"))
-    except ValueError:
-        evidence_matches = False
-    descriptor_matches = bool(
-        _DESCRIPTOR_BUNDLE
-        and receipt["descriptor_digest"] == _DESCRIPTOR_BUNDLE.get("digest")
-    )
-    verified = descriptor_matches and evidence_matches
+    status, evidence_reason = _install_evidence_status(receipt, installed_evidence)
     posture = (
         "Verified against the loaded descriptor bundle and NOC artifact/ref evidence."
-        if verified
-        else "Receipt recorded, not live verification of the installed artifact or ref."
+        if status == "verified"
+        else (
+            "Receipt recorded, not live verification of the installed artifact or ref."
+            if status == "recorded"
+            else f"Install evidence is invalid: {evidence_reason}."
+        )
     )
     return {
         "title": "Hermes KB Plugin Install",
-        "status": "verified" if verified else "recorded",
+        "status": status,
         "text": "\n".join(
             [
                 "Hermes KB Plugin Install",
@@ -583,6 +722,8 @@ def _command_from_text(text: str) -> str | None:
         return None
     token = stripped.split(maxsplit=1)[0][1:]
     command = token.split("@", 1)[0].lower()
+    if command in RETIRED_COMMANDS:
+        return "kbmigration"
     return command if command in MENU_COMMANDS or command in LEGACY_COMMANDS else None
 
 
@@ -604,7 +745,7 @@ def _prose_kb_command_from_text(text: str) -> tuple[str, str] | None:
     if match:
         verb = match.group(1)
         rest = (match.group(2) or "").strip()
-        return {"status": "kbstatus", "sync": "kbsync", "review": "kblifecycle"}[verb], rest
+        return {"status": "kbstatus", "sync": "sync_unavailable", "review": "kblifecycle"}[verb], rest
     if re.search(r"\breview queue\b", normalized) and re.search(
         r"\b(?:what(?: is|'s)?|show|list|open|view|display|check|pending|in)\b",
         normalized,
@@ -6422,11 +6563,20 @@ def _render_queue_text_decision(
     return {"title": "KB Review", "text": text, "actions": []}
 
 
+def _is_retired_sync_request(value: Any) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return normalized == "update kb" or normalized.startswith("update kb ") or normalized.split(" ", 1)[0] == "update_kb"
+
+
 def _workflow_id_from_args(args: str) -> tuple[str, str]:
     text = (args or "").strip()
     lowered = text.lower()
-    if not text or lowered in {"sync", "kb sync", "sync kb", "update kb", "update_kb"}:
-        return "sync", text or "kb sync"
+    if not text:
+        return "", ""
+    if lowered in {"sync", "kb sync", "sync kb"}:
+        return "sync", text
+    if _is_retired_sync_request(lowered):
+        return "", text
     if lowered.startswith("meeting"):
         return "meeting_process", text
     return text.split(maxsplit=1)[0], text
@@ -6930,7 +7080,7 @@ def _kb_root_command(args: str) -> tuple[str, str]:
     if key in {"meeting", "meetings", "notes"}:
         return "kbmeeting", rest
     if key == "sync":
-        return "kbsync", rest
+        return "sync_unavailable", rest
     if key in {"capture", "save", "keep"}:
         return "kbcapture", rest
     if key in {"write", "note", "jot"}:
@@ -6947,7 +7097,7 @@ def _kb_command_help() -> dict[str, Any]:
                 "/kb status - prove lane, runtime, transport, publication, review, sync, dirtiness, and next action",
                 "/kb sync - temporarily unavailable pending kb.sync.prepare/commit",
                 "/kb review - lifecycle and proposal judgment inbox",
-                "Advanced/debug aliases are still accepted for operators, but these three verbs are the normal KB surface.",
+                "Retired sync aliases return migration guidance only; they never dispatch a tool.",
             ]
         ),
         "actions": [],
@@ -7144,11 +7294,24 @@ def _card_for_command(
         return _render_write_command(
             ctx, target, args, event=event, source=source, session_store=session_store
         )
-    if command == "kbsync":
+    if command == "kbmigration":
+        return {
+            "title": "KB Sync Migration",
+            "status": "migration_required",
+            "text": (
+                "KB Sync Migration\nThis legacy sync command was removed. Use /kb sync. "
+                "Hermes sync is temporarily unavailable until kb.sync.prepare/commit is released. "
+                "No KB state changed."
+            ),
+            "actions": [],
+        }
+    if command == "sync_unavailable":
         return _sync_temporarily_unavailable()
     if command == "kbrun":
+        if _is_retired_sync_request(args):
+            return _card_for_command(ctx, "kbmigration", args=args)
         workflow_id, intent, confirm = _workflow_args_from_text(args)
-        if workflow_id in {"sync", "kb_sync", "update_kb"}:
+        if workflow_id in {"sync", "kb_sync"}:
             return _sync_temporarily_unavailable()
         required = ("workflow.plan_request", "workflow.start_confirmed")
         if any(_descriptor(name) is None for name in required):
@@ -7177,15 +7340,14 @@ def _card_for_command(
         )
         if data is None:
             return _render_error("Workflow", target, errors)
-        public_sync = workflow_id == "update_kb"
         if confirm and isinstance(data, dict) and data.get("status") == "confirmation_required":
             return {
-                "title": "KB Sync" if public_sync else "Workflow",
+                "title": "Workflow",
                 "text": _workflow_start_text(
                     ctx,
                     target,
                     data,
-                    prefix="KB sync journey result" if public_sync else "Workflow start result",
+                    prefix="Workflow start result",
                 ),
                 "actions": [],
             }
@@ -7199,9 +7361,9 @@ def _card_for_command(
             target=target,
             adapter=adapter,
             start_hint=f"/kb run {hint_args or 'sync'} confirm",
-            title="KB Sync" if public_sync else "Workflow",
-            heading="KB Sync Journey Preview" if public_sync else "Workflow Preview",
-            public_sync=public_sync,
+            title="Workflow",
+            heading="Workflow Preview",
+            public_sync=False,
         )
     return {"title": "KB", "text": "Unsupported KB command.", "actions": []}
 
@@ -7691,6 +7853,45 @@ def _matching_readback_digest(receipt: dict[str, Any], readback: dict[str, Any])
     return shared or None
 
 
+def _completion_truth(data: Any, *, mutation_required: bool) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"accepted": False, "reason": "contradictory_invalid_response"}
+    sections = {
+        "top": data,
+        "receipt": data.get("receipt") if isinstance(data.get("receipt"), dict) else {},
+        "readback": data.get("readback") if isinstance(data.get("readback"), dict) else {},
+    }
+    failed_statuses = {
+        "blocked",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "noop",
+        "rejected",
+    }
+    for section_name, section in sections.items():
+        for key in ("status", "state"):
+            status = str(section.get(key) or "").strip().lower()
+            if status in failed_statuses:
+                return {
+                    "accepted": False,
+                    "reason": f"contradictory_{section_name}_{key}",
+                    "status": status,
+                }
+        if section.get("ok") is False:
+            return {"accepted": False, "reason": f"contradictory_{section_name}_ok"}
+        if mutation_required and section.get("mutation_performed") is False:
+            return {
+                "accepted": False,
+                "reason": f"contradictory_{section_name}_mutation_performed",
+            }
+        for key in ("saved", "applied"):
+            if section.get(key) is False:
+                return {"accepted": False, "reason": f"contradictory_{section_name}_{key}"}
+    return {"accepted": True, "reason": "consistent"}
+
+
 def _durable_completion(data: Any) -> dict[str, Any]:
     """Return fail-closed proof for wording that claims a durable mutation.
 
@@ -7698,9 +7899,11 @@ def _durable_completion(data: Any) -> dict[str, Any]:
     engine must return an explicitly confirmed receipt, a verified post-write
     readback of the same durable identity, and an agreeing content/state digest.
     """
-    result: dict[str, Any] = {"complete": False, "reason": "invalid_response"}
+    truth = _completion_truth(data, mutation_required=True)
+    if not truth["accepted"]:
+        return {"complete": False, **{key: value for key, value in truth.items() if key != "accepted"}}
     if not isinstance(data, dict) or data.get("ok") is not True:
-        return result
+        return {"complete": False, "reason": "invalid_response"}
     status = str(data.get("status") or data.get("state") or "").strip().lower()
     if status not in {"applied", "committed", "completed", "confirmed"}:
         return {"complete": False, "reason": "non_terminal_status", "status": status}
@@ -7728,6 +7931,9 @@ def _durable_completion(data: Any) -> dict[str, Any]:
 
 
 def _evidence_completion(data: Any) -> dict[str, Any]:
+    truth = _completion_truth(data, mutation_required=True)
+    if not truth["accepted"]:
+        return {"complete": False, **{key: value for key, value in truth.items() if key != "accepted"}}
     if not isinstance(data, dict) or data.get("ok") is not True:
         return {"complete": False, "reason": "invalid_response"}
     if str(data.get("status") or "").strip().lower() not in {"remembered", "completed", "confirmed"}:

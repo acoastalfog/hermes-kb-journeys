@@ -1,29 +1,29 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:fef846e892c68a1d89a1b7e68bdb528241c37f37dff82dd3be5e2de2123e50ef",
+      "input_schema_digest": "sha256:c2d5d4b66f762c95b5e53c827d668bda5c871d615a83054f03b32ebc3075bf0d",
       "name": "review.batch_decide_confirmed",
       "output_schema_digest": "sha256:93a29da8942fd38bfa3fa0e0db737e94e37004b7173504757cd57e842644842c"
     },
     {
-      "input_schema_digest": "sha256:d65f11fc39e5397c938c3460827471daf6107df8540bf93ada6321824e934d9e",
+      "input_schema_digest": "sha256:525c418ac712645b5e059d2d19c942ecad8d81fa0e594ebb604254e607d632c8",
       "name": "review.restore_confirmed",
       "output_schema_digest": "sha256:5ddcebf3929ba70520f2b6e52caa8b1cb9414369bdf030642b755cdade7e9ee2"
     },
     {
-      "input_schema_digest": "sha256:1a335c8314f76b934ceec3c15205c320953f5b438392385a16c82c10ac85b4af",
+      "input_schema_digest": "sha256:b6e2b241e0122f9c640ec81ee5df34a04bb7c55ff26ffcdf86beabccf3193fe5",
       "name": "workflow.start_confirmed",
       "output_schema_digest": "sha256:aae1fcd630fefb60e772efbc4e54c522a4b16b1e7dd2851f5b85625dc95ec8a3"
     }
   ],
-  "digest": "sha256:5c9926686eddb9829b61659ab46d5b8048081cd37fd0b84153c627ce7ad6fc50",
-  "engine_source_revision": "a4bad91b71c80f242d68cabf7c3adc10f37b632f",
+  "digest": "sha256:79bb59a6e4b4469b9fadf1b19d9a7175ad6cad428ac79a6712f0524e2d525787",
+  "engine_source_revision": "361ae4a24d2606b23bb18777d43078476435d664",
   "engine_version": "0.41.2",
   "journeys": [],
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:f7693f55101decbb97ac3a1c7c46858876534ca35183d611bab3c349822cd31d",
+  "source_export_digest": "sha256:32fc51368c4e93fbae8d144c8ebe219357fcf5af5c59ed3842497e65c7fc6de2",
   "tools": [
     {
       "annotations": {
@@ -377,8 +377,99 @@
             "type": "string"
           },
           "preview_lease": {
-            "additionalProperties": true,
-            "description": "Echo the preview_lease object returned by the immediately-preceding decision_preview here, verbatim, to confirm a guided-review decision. The engine validates it against the live preview; you may instead nest it as user_confirmation.preview_lease. session_id / review_session_id / cursor_id alone are not sufficient.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "confirm_tool": {
+                "description": "Only confirmation tool allowed for this lease.",
+                "type": "string"
+              },
+              "cursor_id": {
+                "description": "Guided review cursor id.",
+                "type": "string"
+              },
+              "decision": {
+                "description": "Bound common decision, if any.",
+                "type": "string"
+              },
+              "decision_scope": {
+                "description": "Bound decision scope.",
+                "type": "string"
+              },
+              "decisions": {
+                "description": "Bound per-proposal decisions.",
+                "items": {
+                  "additionalProperties": true,
+                  "description": "Per-proposal decision row.",
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decisions_hash": {
+                "description": "Digest of the ordered decision rows.",
+                "type": "string"
+              },
+              "packet_type": {
+                "description": "Preview lease packet type.",
+                "type": "string"
+              },
+              "preview_hash": {
+                "description": "Digest of the preview-bound lease fields.",
+                "type": "string"
+              },
+              "preview_lease_id": {
+                "description": "Stable preview lease id.",
+                "type": "string"
+              },
+              "preview_status": {
+                "description": "Bound preview outcome.",
+                "type": "string"
+              },
+              "proposal_ids": {
+                "description": "Bound proposal ids.",
+                "items": {
+                  "description": "Proposal id.",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "proposal_ids_hash": {
+                "description": "Digest of the ordered proposal ids.",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Guided review session id.",
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Preview lease schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source": {
+                "description": "Preview source harness.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "preview_lease_id",
+              "preview_hash",
+              "review_session_id",
+              "cursor_id",
+              "decision_scope",
+              "proposal_ids",
+              "proposal_ids_hash",
+              "decisions_hash",
+              "actor",
+              "source",
+              "preview_status",
+              "confirm_tool"
+            ],
             "type": "object"
           },
           "proposal_ids": {
@@ -406,7 +497,123 @@
           },
           "user_confirmation": {
             "additionalProperties": true,
-            "description": "Explicit confirmation payload with confirmed=true.",
+            "properties": {
+              "confirmation_text": {
+                "description": "Optional human confirmation copy.",
+                "type": "string"
+              },
+              "confirmed": {
+                "const": true,
+                "type": "boolean"
+              },
+              "confirmed_at": {
+                "description": "Confirmation timestamp.",
+                "type": "string"
+              },
+              "confirmed_by": {
+                "description": "Confirming actor.",
+                "type": "string"
+              },
+              "preview_lease": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor": {
+                    "description": "Preview actor.",
+                    "type": "string"
+                  },
+                  "confirm_tool": {
+                    "description": "Only confirmation tool allowed for this lease.",
+                    "type": "string"
+                  },
+                  "cursor_id": {
+                    "description": "Guided review cursor id.",
+                    "type": "string"
+                  },
+                  "decision": {
+                    "description": "Bound common decision, if any.",
+                    "type": "string"
+                  },
+                  "decision_scope": {
+                    "description": "Bound decision scope.",
+                    "type": "string"
+                  },
+                  "decisions": {
+                    "description": "Bound per-proposal decisions.",
+                    "items": {
+                      "additionalProperties": true,
+                      "description": "Per-proposal decision row.",
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "decisions_hash": {
+                    "description": "Digest of the ordered decision rows.",
+                    "type": "string"
+                  },
+                  "packet_type": {
+                    "description": "Preview lease packet type.",
+                    "type": "string"
+                  },
+                  "preview_hash": {
+                    "description": "Digest of the preview-bound lease fields.",
+                    "type": "string"
+                  },
+                  "preview_lease_id": {
+                    "description": "Stable preview lease id.",
+                    "type": "string"
+                  },
+                  "preview_status": {
+                    "description": "Bound preview outcome.",
+                    "type": "string"
+                  },
+                  "proposal_ids": {
+                    "description": "Bound proposal ids.",
+                    "items": {
+                      "description": "Proposal id.",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "proposal_ids_hash": {
+                    "description": "Digest of the ordered proposal ids.",
+                    "type": "string"
+                  },
+                  "review_session_id": {
+                    "description": "Guided review session id.",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "description": "Preview lease schema version.",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "source": {
+                    "description": "Preview source harness.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "packet_type",
+                  "schema_version",
+                  "preview_lease_id",
+                  "preview_hash",
+                  "review_session_id",
+                  "cursor_id",
+                  "decision_scope",
+                  "proposal_ids",
+                  "proposal_ids_hash",
+                  "decisions_hash",
+                  "actor",
+                  "source",
+                  "preview_status",
+                  "confirm_tool"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "confirmed"
+            ],
             "type": "object"
           }
         },
@@ -420,7 +627,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:fef846e892c68a1d89a1b7e68bdb528241c37f37dff82dd3be5e2de2123e50ef",
+      "input_schema_digest": "sha256:c2d5d4b66f762c95b5e53c827d668bda5c871d615a83054f03b32ebc3075bf0d",
       "name": "review.batch_decide_confirmed",
       "output_schema": {
         "additionalProperties": true,
@@ -839,7 +1046,123 @@
           },
           "user_confirmation": {
             "additionalProperties": true,
-            "description": "Explicit confirmation payload with confirmed=true.",
+            "properties": {
+              "confirmation_text": {
+                "description": "Optional human confirmation copy.",
+                "type": "string"
+              },
+              "confirmed": {
+                "const": true,
+                "type": "boolean"
+              },
+              "confirmed_at": {
+                "description": "Confirmation timestamp.",
+                "type": "string"
+              },
+              "confirmed_by": {
+                "description": "Confirming actor.",
+                "type": "string"
+              },
+              "preview_lease": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor": {
+                    "description": "Preview actor.",
+                    "type": "string"
+                  },
+                  "confirm_tool": {
+                    "description": "Only confirmation tool allowed for this lease.",
+                    "type": "string"
+                  },
+                  "cursor_id": {
+                    "description": "Guided review cursor id.",
+                    "type": "string"
+                  },
+                  "decision": {
+                    "description": "Bound common decision, if any.",
+                    "type": "string"
+                  },
+                  "decision_scope": {
+                    "description": "Bound decision scope.",
+                    "type": "string"
+                  },
+                  "decisions": {
+                    "description": "Bound per-proposal decisions.",
+                    "items": {
+                      "additionalProperties": true,
+                      "description": "Per-proposal decision row.",
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "decisions_hash": {
+                    "description": "Digest of the ordered decision rows.",
+                    "type": "string"
+                  },
+                  "packet_type": {
+                    "description": "Preview lease packet type.",
+                    "type": "string"
+                  },
+                  "preview_hash": {
+                    "description": "Digest of the preview-bound lease fields.",
+                    "type": "string"
+                  },
+                  "preview_lease_id": {
+                    "description": "Stable preview lease id.",
+                    "type": "string"
+                  },
+                  "preview_status": {
+                    "description": "Bound preview outcome.",
+                    "type": "string"
+                  },
+                  "proposal_ids": {
+                    "description": "Bound proposal ids.",
+                    "items": {
+                      "description": "Proposal id.",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "proposal_ids_hash": {
+                    "description": "Digest of the ordered proposal ids.",
+                    "type": "string"
+                  },
+                  "review_session_id": {
+                    "description": "Guided review session id.",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "description": "Preview lease schema version.",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "source": {
+                    "description": "Preview source harness.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "packet_type",
+                  "schema_version",
+                  "preview_lease_id",
+                  "preview_hash",
+                  "review_session_id",
+                  "cursor_id",
+                  "decision_scope",
+                  "proposal_ids",
+                  "proposal_ids_hash",
+                  "decisions_hash",
+                  "actor",
+                  "source",
+                  "preview_status",
+                  "confirm_tool"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "confirmed"
+            ],
             "type": "object"
           }
         },
@@ -851,7 +1174,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:d65f11fc39e5397c938c3460827471daf6107df8540bf93ada6321824e934d9e",
+      "input_schema_digest": "sha256:525c418ac712645b5e059d2d19c942ecad8d81fa0e594ebb604254e607d632c8",
       "name": "review.restore_confirmed",
       "output_schema": {
         "additionalProperties": true,
@@ -1400,8 +1723,113 @@
         "additionalProperties": false,
         "properties": {
           "envelope": {
-            "additionalProperties": true,
-            "description": "Versioned confirmed workflow-start envelope built from workflow.plan_request.",
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "plan": {
+                "additionalProperties": true,
+                "properties": {
+                  "args": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "force": {
+                    "type": "boolean"
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  },
+                  "preconditions": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "queue_gate_limit": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "workflow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workflow_id",
+                  "args",
+                  "idempotency_key",
+                  "preconditions"
+                ],
+                "type": "object"
+              },
+              "provenance": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor": {
+                    "type": "string"
+                  },
+                  "episode_id": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "actor",
+                  "source",
+                  "session_id"
+                ],
+                "type": "object"
+              },
+              "schema_version": {
+                "const": 1,
+                "description": "Confirmed workflow-start envelope schema version.",
+                "type": "integer"
+              },
+              "tool": {
+                "const": "workflow.start_confirmed",
+                "description": "Only confirmed workflow starts are eligible for this envelope.",
+                "type": "string"
+              },
+              "user_confirmation": {
+                "additionalProperties": true,
+                "properties": {
+                  "confirmation_text": {
+                    "type": "string"
+                  },
+                  "confirmed": {
+                    "const": true,
+                    "type": "boolean"
+                  },
+                  "confirmed_at": {
+                    "type": "string"
+                  },
+                  "confirmed_by": {
+                    "type": "string"
+                  },
+                  "preview_status": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirmed"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema_version",
+              "tool",
+              "plan",
+              "provenance",
+              "user_confirmation"
+            ],
             "type": "object"
           }
         },
@@ -1410,7 +1838,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:1a335c8314f76b934ceec3c15205c320953f5b438392385a16c82c10ac85b4af",
+      "input_schema_digest": "sha256:b6e2b241e0122f9c640ec81ee5df34a04bb7c55ff26ffcdf86beabccf3193fe5",
       "name": "workflow.start_confirmed",
       "output_schema": {
         "additionalProperties": true,

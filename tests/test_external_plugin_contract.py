@@ -83,6 +83,23 @@ def _conforming_descriptor_packet(plugin):
         }
         descriptor["output_schema"] = schema
         descriptor["output_schema_digest"] = plugin._descriptor_digest(schema)
+        if descriptor["name"] == "workflow.start_confirmed":
+            envelope = {
+                "type": "object",
+                "properties": {
+                    "plan_digest": {"type": "string"},
+                    "user_confirmation": {
+                        "type": "object",
+                        "properties": {"confirmed": {"type": "boolean"}},
+                        "required": ["confirmed"],
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["plan_digest", "user_confirmation"],
+                "additionalProperties": True,
+            }
+            descriptor["input_schema"]["properties"]["envelope"] = envelope
+            descriptor["input_schema_digest"] = plugin._descriptor_digest(descriptor["input_schema"])
     tools = {descriptor["name"]: descriptor for descriptor in body["tools"]}
     for action in body["actions"]:
         action["input_schema_digest"] = tools[action["name"]]["input_schema_digest"]
@@ -511,6 +528,40 @@ def test_durable_completion_rejects_any_joint_identity_mismatch(tmp_path, monkey
     assert proof["reason"] == "identity_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("top", "status", "cancelled"),
+        ("top", "ok", False),
+        ("top", "mutation_performed", False),
+        ("top", "applied", False),
+        ("receipt", "status", "failed"),
+        ("readback", "status", "blocked"),
+        ("receipt", "ok", False),
+        ("readback", "mutation_performed", False),
+        ("receipt", "saved", False),
+        ("readback", "applied", False),
+    ],
+)
+@pytest.mark.parametrize("completion_name", ["_durable_completion", "_evidence_completion"])
+def test_completion_truth_rejects_any_contradictory_engine_signal(
+    completion_name, section, field, value, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    digest = "sha256:" + "a" * 64
+    payload = {
+        "status": "remembered" if completion_name == "_evidence_completion" else "applied",
+        "ok": True,
+        "receipt": {"confirmed": True, "receipt_id": "r-1", "content_digest": digest},
+        "readback": {"status": "verified", "receipt_id": "r-1", "content_digest": digest},
+    }
+    target = payload if section == "top" else payload[section]
+    target[field] = value
+    proof = getattr(plugin, completion_name)(payload)
+    assert proof["complete"] is False
+    assert proof["reason"].startswith("contradictory_")
+
+
 def test_evidence_completion_requires_digest_bound_readback(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     receipt_id_only = {
@@ -900,7 +951,7 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_source_revision"] == "a4bad91b71c80f242d68cabf7c3adc10f37b632f"
+    assert source["engine_source_revision"] == "361ae4a24d2606b23bb18777d43078476435d664"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 12
@@ -940,6 +991,55 @@ def test_descriptor_validation_rejects_empty_composition(tmp_path, monkeypatch):
     body.pop("digest")
     packet["digest"] = plugin._descriptor_digest(body)
     with pytest.raises(ValueError, match="invalid output schema"):
+        plugin._validate_descriptor_bundle(packet)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"anyOf": [{"type": "object", "additionalProperties": True}, {"type": "string"}]},
+        {"oneOf": [{"type": "string"}, {"type": "object", "additionalProperties": True}]},
+        {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/unproven"}]},
+        {"allOf": [{"type": "string"}, {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}]},
+        {"allOf": [{"type": "string"}, {"not": {"type": "string"}}]},
+        {"type": "string", "not": {}},
+        {"type": "string", "not": {"type": "string"}},
+        {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "not": {"required": ["x"]},
+        },
+    ],
+)
+def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    packet["tools"][0]["output_schema"] = schema
+    packet["tools"][0]["output_schema_digest"] = plugin._descriptor_digest(schema)
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="invalid output schema|unconstrained output schema"):
+        plugin._validate_descriptor_bundle(packet)
+
+
+def test_descriptor_validation_rejects_unconstrained_executable_envelope(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    workflow = next(tool for tool in packet["tools"] if tool["name"] == "workflow.start_confirmed")
+    workflow["input_schema"]["properties"]["envelope"] = {
+        "type": "object",
+        "additionalProperties": True,
+    }
+    workflow["input_schema_digest"] = plugin._descriptor_digest(workflow["input_schema"])
+    for action in packet["actions"]:
+        if action["name"] == workflow["name"]:
+            action["input_schema_digest"] = workflow["input_schema_digest"]
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="executable envelope"):
         plugin._validate_descriptor_bundle(packet)
 
 
@@ -1078,30 +1178,84 @@ def test_install_receipt_verified_only_with_matching_loaded_and_artifact_evidenc
         "installed_at": "2026-06-27T00:00:00Z",
         "noc_plan_digest": "sha256:" + "b" * 64,
     }
-    verified = plugin._render_install_receipt(
-        receipt,
-        installed_evidence={
-            "ref_verified": True,
-            "artifact_verified": True,
-            "current_ref": "v0.5.0",
-            "installed_digest": "sha256:" + "a" * 64,
-            "descriptor_digest": bundle["digest"],
-            "observed_at": "2026-06-27T00:01:00Z",
-        },
-    )
+    evidence = {
+        "owner": "noc",
+        "source": "noc.hermes-plugin-install-observation",
+        "observed_at": plugin._capture_now(),
+        "ttl_seconds": 3600,
+        "ref_verified": True,
+        "artifact_verified": True,
+        "current_ref": "v0.5.0",
+        "installed_digest": "sha256:" + "a" * 64,
+        "descriptor_digest": bundle["digest"],
+    }
+    evidence["binding_digest"] = plugin._descriptor_digest(evidence)
+    verified = plugin._render_install_receipt(receipt, installed_evidence=evidence)
     assert verified["status"] == "verified"
+    mismatch_evidence = dict(evidence)
+    mismatch_evidence["current_ref"] = "different-ref"
+    mismatch_evidence["binding_digest"] = plugin._descriptor_digest(mismatch_evidence)
     mismatch = plugin._render_install_receipt(
         receipt,
-        installed_evidence={
-            "ref_verified": True,
-            "artifact_verified": True,
-            "current_ref": "different-ref",
-            "installed_digest": "sha256:" + "a" * 64,
-            "descriptor_digest": bundle["digest"],
-            "observed_at": "2026-06-27T00:01:00Z",
-        },
+        installed_evidence=mismatch_evidence,
     )
-    assert mismatch["status"] == "recorded"
+    assert mismatch["status"] == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "ttl_seconds"),
+    [
+        ("2099-01-01T00:00:00Z", 3600),
+        ("2020-01-01T00:00:00Z", 60),
+    ],
+)
+def test_install_evidence_rejects_future_or_expired_observation(
+    observed_at, ttl_seconds, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    bundle = _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    receipt = {
+        "current_ref": "v0.5.0",
+        "previous_ref": "v0.4.0",
+        "installed_digest": "sha256:" + "a" * 64,
+        "descriptor_digest": bundle["digest"],
+        "installed_at": "2026-06-27T00:00:00Z",
+        "noc_plan_digest": "sha256:" + "b" * 64,
+    }
+    evidence = {
+        "owner": "noc",
+        "source": "noc.hermes-plugin-install-observation",
+        "observed_at": observed_at,
+        "ttl_seconds": ttl_seconds,
+        "ref_verified": True,
+        "artifact_verified": True,
+        "current_ref": receipt["current_ref"],
+        "installed_digest": receipt["installed_digest"],
+        "descriptor_digest": receipt["descriptor_digest"],
+    }
+    evidence["binding_digest"] = plugin._descriptor_digest(evidence)
+    assert plugin._render_install_receipt(receipt, installed_evidence=evidence)["status"] == "invalid"
+
+
+def test_install_evidence_rejects_unowned_caller_shape(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    bundle = _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    receipt = {
+        "current_ref": "v0.5.0",
+        "previous_ref": "v0.4.0",
+        "installed_digest": "sha256:" + "a" * 64,
+        "descriptor_digest": bundle["digest"],
+        "installed_at": "2026-06-27T00:00:00Z",
+        "noc_plan_digest": "sha256:" + "b" * 64,
+    }
+    caller_shape = {
+        "ref_verified": True,
+        "artifact_verified": True,
+        "current_ref": receipt["current_ref"],
+        "installed_digest": receipt["installed_digest"],
+        "descriptor_digest": receipt["descriptor_digest"],
+    }
+    assert plugin._render_install_receipt(receipt, installed_evidence=caller_shape)["status"] == "invalid"
 
 
 def test_readme_and_manifest_define_real_rollback_contract():
@@ -1115,13 +1269,37 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
 
-@pytest.mark.parametrize("args", ["sync", "sync confirm", "run sync", "run update_kb"])
+@pytest.mark.parametrize("args", ["sync", "sync confirm", "run sync"])
 def test_all_sync_entrypoints_fail_closed(args, tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     ctx = FakeContext({})
     card = plugin._card_for_command(ctx, "kb", args=args)
     assert card["status"] == "temporarily_unavailable"
     assert card["actions"] == []
+    assert ctx.calls == []
+
+
+@pytest.mark.parametrize("text", ["/kbsync", "/update_kb"])
+def test_removed_legacy_sync_commands_only_return_migration_guidance(text, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._command_from_text(text) == "kbmigration"
+    ctx = FakeContext({})
+    card = plugin._card_for_command(ctx, "kbmigration", args=text)
+    assert card["status"] == "migration_required"
+    assert "/kb sync" in card["text"]
+    assert "temporarily unavailable" in card["text"]
+    assert ctx.calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    ["run update_kb", "run update_kb anything", "run update kb", "run update kb confirm"],
+)
+def test_update_kb_workflow_name_is_never_executable(args, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    card = plugin._card_for_command(ctx, "kb", args=args)
+    assert card["status"] == "migration_required"
     assert ctx.calls == []
 
 

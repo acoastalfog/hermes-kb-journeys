@@ -19,4 +19,4 @@ install_receipt:
   rollback_ref_field: previous_ref
 migrations:
   - version: 0.5.0
-    hard_break: "/kb sync is temporarily unavailable until kb.sync.prepare/commit is released"
+    hard_break: "/kb sync is temporarily unavailable until kb.sync.prepare/commit; /kbsync and update_kb are removed"
