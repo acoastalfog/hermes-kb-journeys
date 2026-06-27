@@ -27,6 +27,7 @@ EXPECTED_PLUGIN_REF = "9772526c543cec30ee3aee71be952f95dbaf8301"
 EXPECTED_HERMES_REF = "v2026.6.19"
 EXPECTED_SOURCE_REPOSITORY = "acoastalfog/hermes-kb-journeys"
 EXPECTED_HERMES_REPOSITORY = "NousResearch/hermes-agent"
+EXPECTED_NOC_REPOSITORY = "acoastalfog/noc"
 EXPECTED_WORKSPACE = "kb_engine_prod"
 MAX_INPUT_BYTES = 1024 * 1024
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -50,23 +51,27 @@ OWNER_EVIDENCE_PATHS = {
 }
 CHECK_TESTS: dict[str, tuple[str, ...]] = {
     "descriptor_contract": (
+        "test_user_plugin_loads_from_standard_plugin_directory",
         "test_generated_descriptor_bundle_is_strict_and_legacy_free",
         "test_conforming_concrete_output_fixture_loads",
         "test_descriptor_validation_recomputes_schema_digests",
     ),
     "durable_readback": (
+        "test_user_plugin_loads_from_standard_plugin_directory",
         "test_optimistic_confirm_without_readback_never_renders_durable_success",
         "test_durable_completion_requires_generated_request_binding_in_addition_to_readback",
         "test_generated_completion_binding_proves_only_the_exact_selected_request",
         "test_evidence_completion_requires_digest_bound_readback",
     ),
     "strict_profile_compatible": (
+        "test_user_plugin_loads_from_standard_plugin_directory",
         "test_generated_descriptor_bundle_is_strict_and_legacy_free",
         "test_kb_sync_is_typed_unavailable_and_dispatches_nothing",
         "test_dispatch_first_skips_every_non_allowlisted_tool",
         "test_runtime_rejects_more_than_twelve_effective_tools",
     ),
     "rendering_degradation_safe": (
+        "test_user_plugin_loads_from_standard_plugin_directory",
         "test_upstream_env_status_renders_plain_text",
         "test_upstream_env_today_renders_plain_text",
         "test_upstream_env_readiness_reports_text_only_degraded",
@@ -110,9 +115,53 @@ CANARY_RECEIPT_KEYS = {
     "observer_host",
     "observed_at",
     "source_revision",
+    "producer",
+    "relay_cutover",
+    "plugin_deployment_receipt_digest",
+    "service_identity",
     "artifact",
     "secret_values_exposed",
     "receipt_digest",
+}
+CANARY_PRODUCER_KEYS = {"source_repository", "source_revision"}
+CANARY_RELAY_CUTOVER_KEYS = {
+    "artifact",
+    "receipt_digest",
+    "plan_digest",
+}
+CANARY_SERVICE_IDENTITY = {
+    "os_user": "hermes-relay",
+    "service_manager": "systemd",
+    "service_scope": "system",
+    "unit": "hermes-relay.service",
+}
+RELAY_CUTOVER_RECEIPT_KEYS = {
+    "schema_version",
+    "kind",
+    "action",
+    "status",
+    "plan_digest",
+    "observed_at",
+    "checks",
+    "secret_values_exposed",
+    "receipt_digest",
+}
+RELAY_CUTOVER_CHECKS = {
+    "service_identity",
+    "target_unit_enabled",
+    "legacy_unit_disabled",
+    "authority_denied",
+    "namespace_filesystem_boundaries",
+    "dashboard_canary",
+    "telegram_canary",
+    "legacy_service_preserved",
+    "rollback_canary",
+    "idmapped_projection",
+    "source_identity_and_mode_unchanged",
+    "private_host_projection",
+    "exact_writable_root_projection",
+    "safefs_idmap_canary",
+    "config_restart_fence",
 }
 CANARY_ARTIFACT_KEYS = {
     "schema_version",
@@ -183,30 +232,47 @@ def _run_git(root: Path, *arguments: str, binary: bool = False) -> str | bytes:
 def expected_plugin_artifact_digest(repo_root: Path) -> str:
     """Recompute NOC's installed tracked-tree digest at the released ref."""
 
-    names_raw = _run_git(
+    listing = _run_git(
         repo_root,
         "ls-tree",
         "-r",
-        "--name-only",
         "-z",
         EXPECTED_PLUGIN_REF,
         binary=True,
     )
-    assert isinstance(names_raw, bytes)
-    artifact = hashlib.sha256()
-    for raw_name in sorted(item for item in names_raw.split(b"\0") if item):
-        relative = raw_name.decode("utf-8")
+    assert isinstance(listing, bytes)
+    rows: list[dict[str, str | int]] = []
+    for entry in (item for item in listing.split(b"\0") if item):
+        try:
+            metadata, raw_name = entry.split(b"\t", 1)
+            raw_mode, object_type, object_id = metadata.split(b" ", 2)
+            relative = raw_name.decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise EvidenceError("released_plugin_tree_invalid") from error
+        if object_type != b"blob" or raw_mode not in {b"100644", b"100755"}:
+            raise EvidenceError("released_plugin_tree_invalid")
         content = _run_git(
-            repo_root,
-            "show",
-            f"{EXPECTED_PLUGIN_REF}:{relative}",
-            binary=True,
+            repo_root, "cat-file", "blob", object_id.decode(), binary=True
         )
         assert isinstance(content, bytes)
-        artifact.update(raw_name)
-        artifact.update(b"\0")
-        artifact.update(content)
-        artifact.update(b"\0")
+        rows.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "mode": 0o755 if raw_mode == b"100755" else 0o644,
+            }
+        )
+    artifact = hashlib.sha256()
+    for row in sorted(rows, key=lambda item: str(item["path"])):
+        for value in (
+            row["path"],
+            row["sha256"],
+            str(row["size"]),
+            str(row["mode"]),
+        ):
+            artifact.update(str(value).encode("utf-8"))
+            artifact.update(b"\0")
     return f"sha256:{artifact.hexdigest()}"
 
 
@@ -421,10 +487,44 @@ def _validate_identifier(value: Any, *, code: str) -> str:
     return value
 
 
+def _validate_relay_cutover_receipt(payload: dict[str, Any]) -> datetime:
+    if set(payload) != RELAY_CUTOVER_RECEIPT_KEYS:
+        raise EvidenceError("relay_cutover_receipt_schema_invalid")
+    claimed = payload.get("receipt_digest")
+    unsigned = {key: value for key, value in payload.items() if key != "receipt_digest"}
+    checks = payload.get("checks")
+    if (
+        not isinstance(claimed, str)
+        or DIGEST.fullmatch(claimed) is None
+        or not _non_placeholder(claimed)
+        or claimed != _digest(unsigned)
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "hermes_relay_deployment_receipt"
+        or payload.get("action") != "cutover"
+        or payload.get("status") != "pass"
+        or DIGEST.fullmatch(str(payload.get("plan_digest") or "")) is None
+        or not _non_placeholder(str(payload.get("plan_digest") or ""))
+        or not isinstance(checks, dict)
+        or set(checks) != RELAY_CUTOVER_CHECKS
+        or not all(value is True for value in checks.values())
+        or payload.get("secret_values_exposed") is not False
+        or not _secret_safe(payload)
+    ):
+        raise EvidenceError("relay_cutover_receipt_invalid")
+    return _parse_timestamp(
+        payload.get("observed_at"), code="relay_cutover_timestamp_invalid"
+    )
+
+
 def _validate_canary_receipt(
     payload: dict[str, Any],
     *,
     installed_at: datetime,
+    plugin_receipt_digest: str,
+    relay_cutover_receipt: dict[str, Any],
+    relay_cutover_raw: bytes,
+    relay_cutover_path: Path,
+    relay_cutover_observed_at: datetime,
     now: datetime,
     trusted_uid: int,
 ) -> datetime:
@@ -433,6 +533,12 @@ def _validate_canary_receipt(
     claimed = payload.get("receipt_digest")
     unsigned = {key: value for key, value in payload.items() if key != "receipt_digest"}
     artifact = payload.get("artifact")
+    producer = payload.get("producer")
+    relay_cutover = payload.get("relay_cutover")
+    service_identity = payload.get("service_identity")
+    relay_artifact = (
+        relay_cutover.get("artifact") if isinstance(relay_cutover, dict) else None
+    )
     digests = (
         str(payload.get("plan_digest") or ""),
         str(payload.get("confirmed_digest") or ""),
@@ -459,6 +565,23 @@ def _validate_canary_receipt(
         or payload.get("terminal_state") != "completed"
         or payload.get("observer_host") != "helix"
         or payload.get("source_revision") != EXPECTED_PLUGIN_REF
+        or payload.get("plugin_deployment_receipt_digest") != plugin_receipt_digest
+        or not isinstance(producer, dict)
+        or set(producer) != CANARY_PRODUCER_KEYS
+        or producer.get("source_repository") != EXPECTED_NOC_REPOSITORY
+        or SHA.fullmatch(str(producer.get("source_revision") or "")) is None
+        or not _non_placeholder(str(producer.get("source_revision") or ""))
+        or service_identity != CANARY_SERVICE_IDENTITY
+        or not isinstance(relay_cutover, dict)
+        or set(relay_cutover) != CANARY_RELAY_CUTOVER_KEYS
+        or relay_cutover.get("receipt_digest")
+        != relay_cutover_receipt.get("receipt_digest")
+        or relay_cutover.get("plan_digest") != relay_cutover_receipt.get("plan_digest")
+        or not isinstance(relay_artifact, dict)
+        or set(relay_artifact) != {"path", "sha256"}
+        or Path(str(relay_artifact.get("path") or "")) != relay_cutover_path
+        or relay_artifact.get("sha256")
+        != "sha256:" + hashlib.sha256(relay_cutover_raw).hexdigest()
         or payload.get("workspace") != EXPECTED_WORKSPACE
         or payload.get("secret_values_exposed") is not False
         or not isinstance(artifact, dict)
@@ -481,6 +604,7 @@ def _validate_canary_receipt(
     )
     if (
         observed_at < installed_at
+        or observed_at < relay_cutover_observed_at
         or observed_at < now.astimezone(UTC) - timedelta(hours=24)
         or observed_at > now.astimezone(UTC) + timedelta(minutes=5)
     ):
@@ -575,6 +699,7 @@ def _build_report(
     canary_receipt: dict[str, Any],
     hermes_revision: str,
     generated_at: datetime,
+    relay_cutover_observed_at: datetime,
     canary_observed_at: datetime,
     check_results: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
@@ -595,6 +720,13 @@ def _build_report(
         },
         "descriptor_digest": plugin_receipt["install_receipt"]["descriptor_digest"],
         "plugin_deployment_receipt_digest": plugin_receipt["receipt_digest"],
+        "relay_cutover_receipt_digest": canary_receipt["relay_cutover"][
+            "receipt_digest"
+        ],
+        "relay_cutover_plan_digest": canary_receipt["relay_cutover"]["plan_digest"],
+        "relay_cutover_observed_at": _format_timestamp(relay_cutover_observed_at),
+        "noc_producer": canary_receipt["producer"],
+        "service_identity": canary_receipt["service_identity"],
         "semantic_canary_receipt_digest": canary_receipt["receipt_digest"],
         "semantic_canary_observed_at": _format_timestamp(canary_observed_at),
         "semantic_canary_artifact_sha256": canary_receipt["artifact"]["sha256"],
@@ -688,6 +820,7 @@ def generate_evidence(
     repo_root: Path,
     hermes_fixture: Path,
     plugin_receipt_path: Path,
+    relay_cutover_receipt_path: Path,
     canary_receipt_path: Path,
     output_directory: Path,
     now: datetime | None = None,
@@ -703,6 +836,10 @@ def generate_evidence(
         plugin_receipt_path, trusted_uid=trusted_input_uid
     )
     installed_at = _validate_plugin_receipt(plugin_receipt, repo_root=repo_root)
+    relay_cutover_receipt, relay_cutover_raw = _read_custodied_json(
+        relay_cutover_receipt_path, trusted_uid=trusted_input_uid
+    )
+    relay_cutover_observed_at = _validate_relay_cutover_receipt(relay_cutover_receipt)
     canary_receipt, _canary_raw = _read_custodied_json(
         canary_receipt_path, trusted_uid=trusted_input_uid
     )
@@ -710,6 +847,11 @@ def generate_evidence(
     canary_observed_at = _validate_canary_receipt(
         canary_receipt,
         installed_at=installed_at,
+        plugin_receipt_digest=plugin_receipt["receipt_digest"],
+        relay_cutover_receipt=relay_cutover_receipt,
+        relay_cutover_raw=relay_cutover_raw,
+        relay_cutover_path=relay_cutover_receipt_path,
+        relay_cutover_observed_at=relay_cutover_observed_at,
         now=current,
         trusted_uid=trusted_input_uid,
     )
@@ -733,6 +875,7 @@ def generate_evidence(
         canary_receipt=canary_receipt,
         hermes_revision=hermes_revision,
         generated_at=current,
+        relay_cutover_observed_at=relay_cutover_observed_at,
         canary_observed_at=canary_observed_at,
         check_results=check_results,
     )
@@ -776,6 +919,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hermes-fixture", type=Path, required=True)
     parser.add_argument("--plugin-deployment-receipt", type=Path, required=True)
+    parser.add_argument("--relay-cutover-receipt", type=Path, required=True)
     parser.add_argument("--semantic-canary-receipt", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--json", action="store_true")
@@ -790,6 +934,7 @@ def main() -> int:
             repo_root=repo_root,
             hermes_fixture=args.hermes_fixture,
             plugin_receipt_path=args.plugin_deployment_receipt,
+            relay_cutover_receipt_path=args.relay_cutover_receipt,
             canary_receipt_path=args.semantic_canary_receipt,
             output_directory=args.output_directory,
         )

@@ -16,10 +16,15 @@ Run from a checkout whose plugin runtime files still equal release commit
    install receipt must bind:
    - `current_ref` to `9772526c543cec30ee3aee71be952f95dbaf8301`;
    - `previous_ref` and `rollback_ref` to the same different 40-character ref;
-   - the installed tracked-tree digest to this release;
+   - the NOC builder tracked-tree digest to
+     `sha256:2efb67ed1c201e7e95b64e9868fa5feee06d75cfb9499c6fbd9ca7e267e3436c`;
    - the descriptor digest to the committed generated descriptor bundle;
    - an aware install timestamp and non-placeholder NOC plan digest.
-3. A separate root-custodied NOC semantic canary receipt and its root-custodied
+3. The separate root-custodied NOC `hermes_relay_deployment_receipt` produced
+   by the successful controlled `cutover` apply. Every NOC cutover check must
+   be true, including `service_identity`, the target/legacy unit state,
+   authority denial, dashboard and Telegram canaries, and rollback canary.
+4. A separate root-custodied NOC semantic canary receipt and its root-custodied
    artifact. NOC does not currently produce this exact packet; implementing
    the producer is the remaining external blocker.
 
@@ -51,6 +56,25 @@ digest excludes only `receipt_digest`.
   "observer_host": "helix",
   "observed_at": "<aware UTC timestamp after plugin installed_at>",
   "source_revision": "9772526c543cec30ee3aee71be952f95dbaf8301",
+  "producer": {
+    "source_repository": "acoastalfog/noc",
+    "source_revision": "<40 lowercase hex NOC revision>"
+  },
+  "relay_cutover": {
+    "artifact": {
+      "path": "/absolute/root-custodied/hermes-relay-cutover-receipt.json",
+      "sha256": "sha256:<digest of the exact cutover receipt bytes>"
+    },
+    "receipt_digest": "<canonical NOC cutover receipt digest>",
+    "plan_digest": "<same raw 64-hex plan digest as the cutover receipt>"
+  },
+  "plugin_deployment_receipt_digest": "<final plugin deployment receipt digest>",
+  "service_identity": {
+    "os_user": "hermes-relay",
+    "service_manager": "systemd",
+    "service_scope": "system",
+    "unit": "hermes-relay.service"
+  },
   "artifact": {
     "path": "/absolute/root-custodied/canary-artifact.json",
     "sha256": "sha256:<digest of the exact artifact bytes>"
@@ -63,7 +87,11 @@ digest excludes only `receipt_digest`.
 `confirmed_digest` must equal `plan_digest`; `workflow_running` and every other
 request-lifecycle state are rejected. The before and after observation digests
 must differ. The receipt must be no more than 24 hours old, no more than five
-minutes in the future, and observed after the final plugin install receipt.
+minutes in the future, and observed after both the final plugin install receipt
+and the exact bound relay cutover receipt. The canary's NOC producer revision,
+system-service identity, relay receipt/plan digests, and final plugin receipt
+digest are mandatory. A plugin prepare or deployment receipt by itself cannot
+prove relay cutover.
 
 The bound artifact is also strict:
 
@@ -96,6 +124,7 @@ uv run --with pytest --with pyyaml \
   scripts/h1-owner-evidence.py \
   --hermes-fixture /absolute/path/to/hermes-agent-v2026.6.19 \
   --plugin-deployment-receipt /absolute/path/to/noc-final-plugin-receipt.json \
+  --relay-cutover-receipt /absolute/path/to/noc-relay-cutover-receipt.json \
   --semantic-canary-receipt /absolute/path/to/noc-semantic-canary-receipt.json \
   --output-directory /absolute/mode-0700-parent/h1-owner-evidence \
   --json
@@ -103,8 +132,9 @@ uv run --with pytest --with pyyaml \
 
 On success, review:
 
-- `h1-test-report.json`: deterministic check identities, counts, fixture ref,
-  descriptor digest, and receipt/artifact digests;
+- `h1-test-report.json`: deterministic check identities, counts, exact fixture
+  repository/ref/revision, service identity, NOC producer, descriptor digest,
+  and cutover/plugin/canary receipt and plan digests;
 - `h1-candidate.json`: the schema-v1 `knowledge_system_gate_s_receipt` for H1.
 
 Generation does not admit the candidate. A trusted operator separately uses

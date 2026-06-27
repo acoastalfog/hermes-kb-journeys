@@ -69,20 +69,6 @@ jobs:
           mkdir -p artifacts
           uv run --with pytest --with pyyaml pytest -q \
             tests/test_h1_owner_evidence.py \
-            tests/test_external_plugin_contract.py::test_generated_descriptor_bundle_is_strict_and_legacy_free \
-            tests/test_external_plugin_contract.py::test_conforming_concrete_output_fixture_loads \
-            tests/test_external_plugin_contract.py::test_descriptor_validation_recomputes_schema_digests \
-            tests/test_external_plugin_contract.py::test_optimistic_confirm_without_readback_never_renders_durable_success \
-            tests/test_external_plugin_contract.py::test_durable_completion_requires_generated_request_binding_in_addition_to_readback \
-            tests/test_external_plugin_contract.py::test_generated_completion_binding_proves_only_the_exact_selected_request \
-            tests/test_external_plugin_contract.py::test_evidence_completion_requires_digest_bound_readback \
-            tests/test_external_plugin_contract.py::test_kb_sync_is_typed_unavailable_and_dispatches_nothing \
-            tests/test_external_plugin_contract.py::test_dispatch_first_skips_every_non_allowlisted_tool \
-            tests/test_external_plugin_contract.py::test_runtime_rejects_more_than_twelve_effective_tools \
-            tests/test_external_plugin_contract.py::test_upstream_env_status_renders_plain_text \
-            tests/test_external_plugin_contract.py::test_upstream_env_today_renders_plain_text \
-            tests/test_external_plugin_contract.py::test_upstream_env_readiness_reports_text_only_degraded \
-            tests/test_external_plugin_contract.py::test_upstream_env_text_delivery_drops_unavailable_buttons \
             --junitxml=artifacts/h1-owner-evidence-v2026.6.19.xml
       - name: Retain non-admissible H1 test report
         if: always()
