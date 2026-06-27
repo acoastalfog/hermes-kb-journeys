@@ -77,9 +77,12 @@ def _conforming_descriptor_packet(plugin):
     for descriptor in body["tools"]:
         schema = {
             "type": "object",
-            "properties": {"status": {"type": "string"}},
+            "properties": {
+                "status": {"type": "string"},
+                "ok": {"type": "boolean"},
+            },
             "required": ["status"],
-            "additionalProperties": False,
+            "additionalProperties": True,
         }
         descriptor["output_schema"] = schema
         descriptor["output_schema_digest"] = plugin._descriptor_digest(schema)
@@ -325,8 +328,9 @@ def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path,
         {
             "mcp_kb_engine_prod_lifecycle_review": [
                 {
-                    "result": {
-                        "packet_type": "lifecycle_review.packet",
+                        "result": {
+                            "status": "review",
+                            "packet_type": "lifecycle_review.packet",
                         "workflow": "Lifecycle Review",
                         "stewardship_area": "KB Stewardship",
                         "target": "situations",
@@ -359,6 +363,7 @@ def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path,
             "mcp_kb_engine_prod_review_inbox": [
                 {
                     "result": {
+                        "status": "ready",
                         "total": 1,
                         "items": [
                             {
@@ -483,7 +488,7 @@ def test_optimistic_confirm_without_readback_never_renders_durable_success(tmp_p
     assert "saved" not in text.lower()
 
 
-def test_durable_completion_requires_identity_and_digest_readback(tmp_path, monkeypatch):
+def test_durable_completion_requires_generated_request_binding_in_addition_to_readback(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     payload = {
         "status": "applied",
@@ -502,7 +507,124 @@ def test_durable_completion_requires_identity_and_digest_readback(tmp_path, monk
         },
     }
     assert plugin._durable_completion(payload)["complete"] is True
-    assert "Applied" in plugin._confirmed_text("approve", payload, proposal_ids=["p1"])
+    text = plugin._confirmed_text("approve", payload, proposal_ids=["p1"])
+    assert "Applied" not in text
+    assert "generated_completion_contract_missing" in text
+
+
+def test_unrelated_matching_receipt_never_proves_selected_proposal_completion(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    digest = "sha256:" + "a" * 64
+    payload = {
+        "status": "applied",
+        "ok": True,
+        "receipt": {
+            "confirmed": True,
+            "transaction_id": "tx-unrelated",
+            "content_digest": digest,
+        },
+        "readback": {
+            "status": "verified",
+            "transaction_id": "tx-unrelated",
+            "content_digest": digest,
+        },
+    }
+    text = plugin._confirmed_text("approve", payload, proposal_ids=["p-selected"])
+    assert "Applied" not in text
+    assert "unverified" in text
+
+
+def test_generated_completion_binding_proves_only_the_exact_selected_request(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    route = "review.batch_decide_confirmed"
+    preview_hash = "a" * 64
+    args = {
+        "proposal_ids": ["p-selected"],
+        "decision": "approve",
+        "actor": "telegram:operator",
+        "source": "Hermes Telegram",
+        "session_id": "session-1",
+        "user_confirmation": {
+            "confirmed": True,
+            "surface": "telegram",
+            "preview_lease": {
+                "preview_lease_id": "lease-1",
+                "preview_hash": preview_hash,
+            },
+        },
+    }
+    expected = plugin._review_completion_expectation(route, args)
+    transaction_id = "tx-1"
+    receipt = {
+        "route": route,
+        "state": "applied",
+        "ok": True,
+        "saved": True,
+        "receipt_id": "receipt-1",
+        "transaction_id": transaction_id,
+        "affected_ids": ["p-selected"],
+    }
+    receipt["receipt_digest"] = plugin._descriptor_digest(receipt)
+    request_payload = {
+        "route": route,
+        "affected_ids": ["p-selected"],
+        "decision": "approve",
+        "target_status": "",
+        "source_transaction_id": "",
+        "actor": args["actor"],
+        "source": args["source"],
+        "session_id": args["session_id"],
+        "preview_lease": args["user_confirmation"]["preview_lease"],
+        "idempotency_key": transaction_id,
+    }
+    payload = {
+        "schema_version": 1,
+        "status": "applied",
+        "ok": True,
+        "completion": {
+            "route": route,
+            "action": "review_decision",
+            "state": "applied",
+            "affected_ids": ["p-selected"],
+            "decision": "approve",
+            "request": {
+                "preview_digest": "sha256:" + preview_hash,
+                "preview_lease_id": "lease-1",
+                "request_digest": plugin._descriptor_digest(request_payload),
+                "idempotency_key": transaction_id,
+            },
+            "confirmation": {
+                "confirmed": True,
+                "confirmation_digest": plugin._descriptor_digest(args["user_confirmation"]),
+            },
+            "transaction_id": transaction_id,
+        },
+        "receipt": receipt,
+        "readback": {
+            "route": route,
+            "state": "applied",
+            "ok": True,
+            "receipt_id": "receipt-1",
+            "receipt_digest": receipt["receipt_digest"],
+            "transaction_id": transaction_id,
+            "affected_ids": ["p-selected"],
+            "content_digest": "sha256:" + "b" * 64,
+            "observed_at": "2026-06-27T00:00:00Z",
+        },
+    }
+    assert plugin._validate_runtime_output(route, payload) is None
+    assert plugin._request_bound_review_completion(payload, expected)["complete"] is True
+    assert "Applied" in plugin._confirmed_text(
+        "approve",
+        payload,
+        proposal_ids=["p-selected"],
+        expected_completion=expected,
+    )
+
+    unrelated = deepcopy(payload)
+    for section in (unrelated["completion"], unrelated["receipt"], unrelated["readback"]):
+        section["affected_ids"] = ["p-unrelated"]
+    assert plugin._request_bound_review_completion(unrelated, expected)["reason"] == "affected_ids_mismatch"
 
 
 def test_durable_completion_rejects_any_joint_identity_mismatch(tmp_path, monkeypatch):
@@ -558,6 +680,31 @@ def test_completion_truth_rejects_any_contradictory_engine_signal(
     target = payload if section == "top" else payload[section]
     target[field] = value
     proof = getattr(plugin, completion_name)(payload)
+    assert proof["complete"] is False
+    assert proof["reason"].startswith("contradictory_")
+
+
+@pytest.mark.parametrize(
+    "nested_failure",
+    [
+        {"outcome": {"status": "failed"}},
+        {"result": {"ok": False}},
+        {"transaction": {"state": "cancelled"}},
+        {"operations": [{"operation_id": "op-1", "status": "failed"}]},
+        {"errors": [{"code": "write_failed"}]},
+    ],
+)
+def test_completion_truth_rejects_nested_failure_signals(nested_failure, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    digest = "sha256:" + "a" * 64
+    payload = {
+        "status": "applied",
+        "ok": True,
+        "receipt": {"confirmed": True, "receipt_id": "r-1", "content_digest": digest},
+        "readback": {"status": "verified", "receipt_id": "r-1", "content_digest": digest},
+        **nested_failure,
+    }
+    proof = plugin._durable_completion(payload)
     assert proof["complete"] is False
     assert proof["reason"].startswith("contradictory_")
 
@@ -951,7 +1098,7 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_source_revision"] == "361ae4a24d2606b23bb18777d43078476435d664"
+    assert source["engine_source_revision"] == "fc5b134bf4aacb9367299466d66dda506c8c17e3"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 12
@@ -1010,6 +1157,13 @@ def test_descriptor_validation_rejects_empty_composition(tmp_path, monkeypatch):
             "required": ["x"],
             "not": {"required": ["x"]},
         },
+        {"type": "string", "enum": [1]},
+        {"type": "string", "const": 1},
+        {"allOf": [{"type": "string"}, {"enum": [1]}]},
+        {"allOf": [{"type": "string"}, {"const": 1}]},
+        {"oneOf": [{"type": "string"}, {"type": "string"}]},
+        {"allOf": [{"enum": ["a"]}, {"enum": ["b"]}]},
+        {"type": "string", "not": {"anyOf": [{"type": "integer"}, {"type": "string"}]}},
     ],
 )
 def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp_path, monkeypatch):
@@ -1105,6 +1259,49 @@ def test_dispatch_first_skips_every_non_allowlisted_tool(tmp_path, monkeypatch):
     assert errors == ["dashboard.live: not present in generated descriptor allowlist"]
 
 
+def test_unwrap_rejects_top_level_iserror_even_with_structured_content(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload, error = plugin._unwrap_tool_result(
+        {
+            "isError": True,
+            "structuredContent": {"status": "ready"},
+            "content": [{"type": "text", "text": "backend failed"}],
+        }
+    )
+    assert payload is None
+    assert "isError" in error
+
+
+def test_dispatch_rejects_runtime_output_that_violates_generated_schema(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakeContext({"mcp_kb_engine_prod_attention_cockpit": [{"ok": True}]})
+    selected, payload, errors = plugin._dispatch_first(
+        ctx,
+        "kb_engine_prod",
+        [("attention.cockpit", {})],
+    )
+    assert selected is None
+    assert payload is None
+    assert any("runtime output violates generated schema" in error for error in errors)
+
+
+def test_empty_preview_never_enables_confirmation(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._preview_allows_confirmation({}) is False
+    assert plugin._preview_allows_confirmation({"status": "preview", "ok": True}) is True
+    assert plugin._preview_allows_confirmation({"status": "noop", "ok": True}) is False
+    assert plugin._preview_allows_confirmation(
+        {
+            "status": "noop",
+            "ok": True,
+            "preview_hash": "a" * 64,
+            "preview_lease": {"preview_lease_id": "lease-1"},
+            "plan": {},
+        }
+    ) is True
+
+
 def test_runtime_rejects_more_than_twelve_effective_tools(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -1147,8 +1344,8 @@ def test_install_receipt_reports_previous_ref_and_rollback_command(tmp_path, mon
     assert receipt["previous_ref"] == "v0.4.0"
     assert plugin._rollback_ref(receipt) == "v0.4.0"
     rendered = plugin._render_install_receipt(receipt)
-    assert rendered["status"] == "recorded"
-    assert "recorded, not live verification" in rendered["text"]
+    assert rendered["status"] == "not_observed"
+    assert "not live verification" in rendered["text"]
     assert "Previous ref: v0.4.0" in rendered["text"]
 
 
@@ -1167,7 +1364,7 @@ def test_install_receipt_requires_valid_timezone_timestamp(tmp_path, monkeypatch
         )
 
 
-def test_install_receipt_verified_only_with_matching_loaded_and_artifact_evidence(tmp_path, monkeypatch):
+def test_caller_supplied_install_evidence_can_never_self_attest_as_verified(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     bundle = _install_conforming_descriptor_fixture(plugin, monkeypatch)
     receipt = {
@@ -1190,8 +1387,9 @@ def test_install_receipt_verified_only_with_matching_loaded_and_artifact_evidenc
         "descriptor_digest": bundle["digest"],
     }
     evidence["binding_digest"] = plugin._descriptor_digest(evidence)
-    verified = plugin._render_install_receipt(receipt, installed_evidence=evidence)
-    assert verified["status"] == "verified"
+    unverified = plugin._render_install_receipt(receipt, installed_evidence=evidence)
+    assert unverified["status"] == "unverified"
+    assert "authenticated NOC observation channel" in unverified["text"]
     mismatch_evidence = dict(evidence)
     mismatch_evidence["current_ref"] = "different-ref"
     mismatch_evidence["binding_digest"] = plugin._descriptor_digest(mismatch_evidence)
@@ -1199,7 +1397,7 @@ def test_install_receipt_verified_only_with_matching_loaded_and_artifact_evidenc
         receipt,
         installed_evidence=mismatch_evidence,
     )
-    assert mismatch["status"] == "invalid"
+    assert mismatch["status"] == "unverified"
 
 
 @pytest.mark.parametrize(
@@ -1234,7 +1432,7 @@ def test_install_evidence_rejects_future_or_expired_observation(
         "descriptor_digest": receipt["descriptor_digest"],
     }
     evidence["binding_digest"] = plugin._descriptor_digest(evidence)
-    assert plugin._render_install_receipt(receipt, installed_evidence=evidence)["status"] == "invalid"
+    assert plugin._render_install_receipt(receipt, installed_evidence=evidence)["status"] == "unverified"
 
 
 def test_install_evidence_rejects_unowned_caller_shape(tmp_path, monkeypatch):
@@ -1255,7 +1453,17 @@ def test_install_evidence_rejects_unowned_caller_shape(tmp_path, monkeypatch):
         "installed_digest": receipt["installed_digest"],
         "descriptor_digest": receipt["descriptor_digest"],
     }
-    assert plugin._render_install_receipt(receipt, installed_evidence=caller_shape)["status"] == "invalid"
+    assert plugin._render_install_receipt(receipt, installed_evidence=caller_shape)["status"] == "unverified"
+
+
+def test_kb_reasoning_is_transport_only_and_never_mutates_host_runtime(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    card = plugin._card_for_command(ctx, "kb", args="reasoning high")
+    assert card["status"] == "operator_configuration_required"
+    assert "NOC" in card["text"]
+    assert "_reload_mcp" not in card
+    assert ctx.calls == []
 
 
 def test_readme_and_manifest_define_real_rollback_contract():

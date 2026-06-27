@@ -72,7 +72,6 @@ MENU_COMMANDS = {"kb"}
 LEGACY_COMMANDS = {"kbtoday", "kbstatus", "kbruns", "kbqueue", "kbreview", "kbrun"}
 RETIRED_COMMANDS = {"kbsync", "update_kb"}
 SUPPORTED_COMMANDS = MENU_COMMANDS
-KB_REASONING_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 QUEUE_REPLY_DECISIONS = {"approve", "reject", "archive", "skip", "complete", "keep", "demote", "detail"}
 QUEUE_REPLY_TOOL_DECISIONS = {"approve", "reject", "archive", "skip", "complete", "keep", "demote"}
 QUEUE_REPLY_STATE_TTL_SECONDS = 15 * 60
@@ -189,6 +188,67 @@ def _schema_declared_types(schema: Any) -> set[str]:
     return found
 
 
+def _schema_denies_type(schema: Any, schema_type: str) -> bool:
+    """Return whether a denial schema covers every value of ``schema_type``."""
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("type") == schema_type:
+        return True
+    branches = schema.get("anyOf")
+    if isinstance(branches, list) and any(
+        _schema_denies_type(branch, schema_type) for branch in branches
+    ):
+        return True
+    branches = schema.get("oneOf")
+    if isinstance(branches, list) and len(branches) == 1:
+        return _schema_denies_type(branches[0], schema_type)
+    branches = schema.get("allOf")
+    return bool(
+        isinstance(branches, list)
+        and branches
+        and all(_schema_denies_type(branch, schema_type) for branch in branches)
+    )
+
+
+def _value_matches_schema_type(value: Any, schema_type: str) -> bool:
+    if schema_type == "null":
+        return value is None
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "array":
+        return isinstance(value, list)
+    if schema_type == "object":
+        return isinstance(value, dict)
+    return False
+
+
+def _json_value_key(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _schema_finite_values(schema: Any) -> set[str] | None:
+    """Return a finite allowed-value set when enum/const constraints provide one."""
+    if not isinstance(schema, dict):
+        return None
+    finite: set[str] | None = None
+    if "const" in schema:
+        finite = {_json_value_key(schema["const"])}
+    if "enum" in schema and isinstance(schema.get("enum"), list):
+        enum_values = {_json_value_key(value) for value in schema["enum"]}
+        finite = enum_values if finite is None else finite.intersection(enum_values)
+    for branch in schema.get("allOf") or []:
+        branch_values = _schema_finite_values(branch)
+        if branch_values is not None:
+            finite = branch_values if finite is None else finite.intersection(branch_values)
+    return finite
+
+
 def _schema_required_fields(schema: Any) -> set[str]:
     if not isinstance(schema, dict):
         return set()
@@ -278,6 +338,10 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
                 branch, require_required=False
             ):
                 raise ValueError(f"{path}.{keyword}[{index}] is unconstrained")
+        if keyword == "oneOf":
+            canonical = [_json_value_key(branch) for branch in branches]
+            if len(canonical) != len(set(canonical)):
+                raise ValueError(f"{path}.oneOf contains duplicate branches")
         has_shape = True
     schema_type = schema.get("type")
     if schema_type is not None:
@@ -311,8 +375,15 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         if "items" not in schema:
             raise ValueError(f"{path}.items is required for arrays")
         _validate_schema(schema["items"], path=f"{path}.items")
-    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
-        raise ValueError(f"{path}.enum must not be empty")
+    if "enum" in schema:
+        if not isinstance(schema["enum"], list) or not schema["enum"]:
+            raise ValueError(f"{path}.enum must not be empty")
+        if schema_type and any(
+            not _value_matches_schema_type(value, schema_type) for value in schema["enum"]
+        ):
+            raise ValueError(f"{path}.enum contains a value incompatible with its type")
+    if "const" in schema and schema_type and not _value_matches_schema_type(schema["const"], schema_type):
+        raise ValueError(f"{path}.const is incompatible with its type")
     if "const" in schema or "enum" in schema:
         has_shape = True
     if "not" in schema:
@@ -321,12 +392,20 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
             raise ValueError(f"{path}.not must be a non-empty schema")
         _validate_schema(denied, path=f"{path}.not")
         has_shape = True
-        if schema_type and schema_type in _schema_declared_types(denied):
+        if schema_type and _schema_denies_type(denied, schema_type):
             raise ValueError(f"{path} excludes its own type")
     if "allOf" in schema:
         declared_types = _schema_declared_types(schema)
         if len(declared_types) > 1:
             raise ValueError(f"{path}.allOf contains impossible type constraints")
+        finite_values = _schema_finite_values(schema)
+        if finite_values == set():
+            raise ValueError(f"{path}.allOf contains disjoint enum/const constraints")
+        if len(declared_types) == 1 and finite_values is not None and any(
+            not _value_matches_schema_type(json.loads(value), next(iter(declared_types)))
+            for value in finite_values
+        ):
+            raise ValueError(f"{path}.allOf contains enum/const values incompatible with its type")
     required_fields = _schema_required_fields(schema)
     forbidden_fields = _schema_forbidden_required_fields(schema)
     if required_fields.intersection(forbidden_fields):
@@ -343,6 +422,85 @@ def _schema_is_concrete(schema: Any, *, require_required: bool = False) -> bool:
     except ValueError:
         return False
     return _schema_shape_is_concrete(schema, require_required=require_required)
+
+
+def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | None:
+    """Validate a runtime packet against the generated schema subset we export."""
+    if not isinstance(schema, dict):
+        return f"{path}: schema is unavailable"
+    for keyword in ("allOf",):
+        for index, branch in enumerate(schema.get(keyword) or []):
+            error = _runtime_schema_error(value, branch, path=path)
+            if error:
+                return f"{path}: {keyword}[{index}] failed ({error})"
+    if "anyOf" in schema:
+        errors = [_runtime_schema_error(value, branch, path=path) for branch in schema["anyOf"]]
+        if all(error is not None for error in errors):
+            return f"{path}: no anyOf branch matched"
+    if "oneOf" in schema:
+        matches = sum(
+            _runtime_schema_error(value, branch, path=path) is None for branch in schema["oneOf"]
+        )
+        if matches != 1:
+            return f"{path}: expected exactly one oneOf match, got {matches}"
+    if "not" in schema and _runtime_schema_error(value, schema["not"], path=path) is None:
+        return f"{path}: matched forbidden schema"
+    schema_type = schema.get("type")
+    if schema_type and not _value_matches_schema_type(value, schema_type):
+        return f"{path}: expected {schema_type}"
+    if "const" in schema and _json_value_key(value) != _json_value_key(schema["const"]):
+        return f"{path}: does not match const"
+    if "enum" in schema and _json_value_key(value) not in {
+        _json_value_key(item) for item in schema["enum"]
+    }:
+        return f"{path}: is not in enum"
+    if schema_type == "object" and isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{path}.{name}: required property is missing"
+        for name, child_value in value.items():
+            if name in properties:
+                error = _runtime_schema_error(child_value, properties[name], path=f"{path}.{name}")
+                if error:
+                    return error
+                continue
+            additional = schema.get("additionalProperties", True)
+            if additional is False:
+                return f"{path}.{name}: additional property is forbidden"
+            if isinstance(additional, dict):
+                error = _runtime_schema_error(child_value, additional, path=f"{path}.{name}")
+                if error:
+                    return error
+    if schema_type == "array" and isinstance(value, list):
+        if isinstance(schema.get("minItems"), int) and len(value) < schema["minItems"]:
+            return f"{path}: has fewer than minItems"
+        if isinstance(schema.get("maxItems"), int) and len(value) > schema["maxItems"]:
+            return f"{path}: has more than maxItems"
+        if schema.get("uniqueItems") is True:
+            canonical_items = [_json_value_key(item) for item in value]
+            if len(canonical_items) != len(set(canonical_items)):
+                return f"{path}: contains duplicate items"
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                error = _runtime_schema_error(item, item_schema, path=f"{path}[{index}]")
+                if error:
+                    return error
+    if schema_type == "string" and isinstance(value, str):
+        if isinstance(schema.get("minLength"), int) and len(value) < schema["minLength"]:
+            return f"{path}: is shorter than minLength"
+        if isinstance(schema.get("maxLength"), int) and len(value) > schema["maxLength"]:
+            return f"{path}: is longer than maxLength"
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            return f"{path}: does not match pattern"
+    if schema_type in {"integer", "number"} and _value_matches_schema_type(value, schema_type):
+        if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
+            return f"{path}: is below minimum"
+        if isinstance(schema.get("maximum"), (int, float)) and value > schema["maximum"]:
+            return f"{path}: is above maximum"
+    return None
 
 
 def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -507,35 +665,38 @@ def _rollback_ref(receipt: dict[str, str]) -> str:
 
 def _install_evidence_status(receipt: dict[str, str], value: Any) -> tuple[str, str]:
     if value is None:
-        return "recorded", "no live NOC installation evidence was supplied"
+        return "not_observed", "no authenticated live NOC installation evidence was supplied"
     if not isinstance(value, dict) or set(value) != INSTALL_EVIDENCE_FIELDS:
-        return "invalid", "installation evidence fields do not match the contract"
+        return "unverified", "installation evidence fields do not match the contract"
     evidence = dict(value)
     binding_digest = str(evidence.pop("binding_digest") or "").strip()
     if binding_digest != _descriptor_digest(evidence):
-        return "invalid", "installation evidence digest does not match"
+        return "unverified", "installation evidence digest does not match"
     if evidence.get("owner") != "noc" or not str(evidence.get("source") or "").startswith("noc."):
-        return "invalid", "installation evidence owner/source is not NOC"
+        return "unverified", "caller-asserted installation evidence owner/source is not trusted"
     if evidence.get("ref_verified") is not True or evidence.get("artifact_verified") is not True:
-        return "invalid", "installation artifact/ref evidence is not verified"
+        return "unverified", "installation artifact/ref evidence is not verified"
     try:
         observed_at = _parse_aware_timestamp(evidence.get("observed_at"))
         ttl_seconds = int(evidence.get("ttl_seconds"))
     except (TypeError, ValueError):
-        return "invalid", "installation evidence freshness fields are invalid"
+        return "unverified", "installation evidence freshness fields are invalid"
     if not 1 <= ttl_seconds <= 86400:
-        return "invalid", "installation evidence TTL is outside the allowed range"
+        return "unverified", "installation evidence TTL is outside the allowed range"
     now = _dt.datetime.now(_dt.UTC)
     if observed_at > now + _dt.timedelta(minutes=5):
-        return "invalid", "installation evidence is future-dated"
+        return "unverified", "installation evidence is future-dated"
     if now > observed_at + _dt.timedelta(seconds=ttl_seconds):
-        return "invalid", "installation evidence is expired"
+        return "unverified", "installation evidence is expired"
     if not _DESCRIPTOR_BUNDLE or receipt["descriptor_digest"] != _DESCRIPTOR_BUNDLE.get("digest"):
-        return "invalid", "receipt descriptor digest does not match the loaded bundle"
+        return "unverified", "receipt descriptor digest does not match the loaded bundle"
     for key in ("current_ref", "installed_digest", "descriptor_digest"):
         if str(evidence.get(key) or "") != receipt[key]:
-            return "invalid", f"installation evidence {key} does not match the receipt"
-    return "verified", "loaded descriptor, artifact, and ref evidence agree"
+            return "unverified", f"installation evidence {key} does not match the receipt"
+    return (
+        "unverified",
+        "caller-supplied evidence is internally consistent but is not an authenticated NOC observation",
+    )
 
 
 def _render_install_receipt(value: Any, *, installed_evidence: Any = None) -> dict[str, Any]:
@@ -549,15 +710,13 @@ def _render_install_receipt(value: Any, *, installed_evidence: Any = None) -> di
             "actions": [],
         }
     status, evidence_reason = _install_evidence_status(receipt, installed_evidence)
-    posture = (
-        "Verified against the loaded descriptor bundle and NOC artifact/ref evidence."
-        if status == "verified"
-        else (
-            "Receipt recorded, not live verification of the installed artifact or ref."
-            if status == "recorded"
-            else f"Install evidence is invalid: {evidence_reason}."
+    if status == "not_observed":
+        posture = "Receipt recorded; this is not live verification of the installed artifact or ref."
+    elif status == "unverified":
+        posture = (
+            f"Caller-supplied evidence remains unverified ({evidence_reason}) until it arrives "
+            "through an authenticated NOC observation channel."
         )
-    )
     return {
         "title": "Hermes KB Plugin Install",
         "status": status,
@@ -1200,7 +1359,7 @@ def _render_lifecycle_descriptor_preview(
     del callback_ctx
     label = _short(descriptor.get("label") or descriptor.get("action_id") or "Lifecycle proposal", "Lifecycle proposal")
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
-    payload = _result_payload(ctx.dispatch_tool(preview_tool, _descriptor_params(descriptor)))
+    payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
     if isinstance(payload, dict) and payload.get("error"):
         return {"title": label, "text": f"{label}\n{payload['error']}", "actions": []}
     packet_card = _render_supported_result_packet(payload, ctx=ctx, target=target)
@@ -2003,7 +2162,7 @@ def _render_restore_preview(
 ) -> dict[str, Any]:
     del callback_ctx
     preview_tool, _confirm_tool = _restore_tools(target, receipt)
-    preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _restore_args_from_receipt(receipt)))
+    preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _restore_args_from_receipt(receipt))
     text = _restore_preview_text(preview_payload)
     if not _preview_allows_confirmation(preview_payload):
         return {"title": "KB Review Restore", "text": text, "actions": []}
@@ -2043,7 +2202,7 @@ def _render_restore_confirm(
     preview_tool, confirm_tool = _restore_tools(target, receipt)
     effective_metadata = dict(preview_metadata or {})
     if not effective_metadata.get("preview_lease"):
-        preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _restore_args_from_receipt(receipt)))
+        preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _restore_args_from_receipt(receipt))
         if not _preview_allows_confirmation(preview_payload):
             return {"title": "KB Review Restore", "text": _restore_preview_text(preview_payload), "actions": []}
         effective_metadata.update(_queue_preview_metadata(preview_payload))
@@ -2067,8 +2226,12 @@ def _render_restore_confirm(
         "actor_name": _short(getattr(callback_ctx, "actor_name", ""), ""),
     }
     _apply_queue_confirmation_preview_metadata(args["user_confirmation"], effective_metadata)
-    payload = _result_payload(ctx.dispatch_tool(confirm_tool, args))
-    completion = _durable_completion(payload)
+    payload = _dispatch_registry_tool(ctx, target, confirm_tool, args)
+    capability = _capability_for_registry_name(target, confirm_tool)
+    completion = _request_bound_review_completion(
+        payload,
+        _review_completion_expectation(capability, args),
+    )
     if not completion["complete"]:
         return {
             "title": "KB Review Restore",
@@ -2265,6 +2428,8 @@ def _unwrap_tool_result(raw: Any) -> tuple[Any | None, str | None]:
     parsed = _maybe_json(raw)
     if not isinstance(parsed, dict):
         return parsed, None
+    if parsed.get("isError") is True:
+        return None, "tool response declared isError=true"
     if parsed.get("error"):
         return None, _short(parsed.get("error"))
     payload = parsed.get("structuredContent")
@@ -2272,6 +2437,59 @@ def _unwrap_tool_result(raw: Any) -> tuple[Any | None, str | None]:
         payload = parsed.get("result", parsed)
     payload = _maybe_json(payload)
     return payload, None
+
+
+def _validate_runtime_output(capability: str, payload: Any) -> str | None:
+    descriptor = _descriptor(capability)
+    if descriptor is None:
+        return "capability is not present in the generated descriptor allowlist"
+    schema = descriptor.get("output_schema")
+    if not isinstance(schema, dict):
+        return "generated output schema is unavailable"
+    return _runtime_schema_error(payload, schema)
+
+
+def _dispatch_selected_tool(
+    ctx: Any,
+    target: str,
+    capability: str,
+    args: dict[str, Any],
+) -> tuple[str, Any | None, str | None]:
+    registry_name = _mcp_tool_name(target, capability)
+    if capability not in _descriptor_allowlist():
+        return registry_name, None, "not present in generated descriptor allowlist"
+    try:
+        payload, error = _unwrap_tool_result(ctx.dispatch_tool(registry_name, args))
+    except Exception as exc:
+        return registry_name, None, str(exc)
+    if error:
+        return registry_name, None, error
+    schema_error = _validate_runtime_output(capability, payload)
+    if schema_error:
+        return registry_name, None, f"runtime output violates generated schema: {schema_error}"
+    return registry_name, payload, None
+
+
+def _capability_for_registry_name(target: str, registry_name: str) -> str:
+    matches = [
+        capability
+        for capability in _descriptor_allowlist()
+        if _mcp_tool_name(target, capability) == registry_name
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _dispatch_registry_tool(
+    ctx: Any,
+    target: str,
+    registry_name: str,
+    args: dict[str, Any],
+) -> Any:
+    capability = _capability_for_registry_name(target, registry_name)
+    if not capability:
+        return {"error": "tool is not uniquely present in the generated descriptor allowlist"}
+    _selected, payload, error = _dispatch_selected_tool(ctx, target, capability, args)
+    return {"error": error} if error else payload
 
 
 def _dispatch_first(
@@ -2282,17 +2500,10 @@ def _dispatch_first(
     errors: list[str] = []
     for kb_tool, args in candidates:
         capability = str(kb_tool or "").strip()
-        if capability not in _descriptor_allowlist():
-            errors.append(f"{capability}: not present in generated descriptor allowlist")
-            continue
-        registry_name = _mcp_tool_name(target, capability)
-        try:
-            payload, error = _unwrap_tool_result(ctx.dispatch_tool(registry_name, args))
-        except Exception as exc:
-            errors.append(f"{registry_name}: {exc}")
-            continue
+        registry_name, payload, error = _dispatch_selected_tool(ctx, target, capability, args)
         if error:
-            errors.append(f"{registry_name}: {error}")
+            label = capability if capability not in _descriptor_allowlist() else registry_name
+            errors.append(f"{label}: {error}")
             continue
         return registry_name, payload, errors
     return None, None, errors
@@ -2995,7 +3206,7 @@ def _render_readonly_descriptor_action(
     del callback_ctx
     method = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
     params = descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {}
-    payload = _result_payload(ctx.dispatch_tool(method, params))
+    payload = _dispatch_registry_tool(ctx, target, method, params)
     label = _short(descriptor.get("label") or descriptor.get("action_id") or "KB Context", "KB Context")
     if isinstance(payload, dict) and payload.get("error"):
         return {"title": label, "text": f"{label}\n{payload['error']}", "actions": []}
@@ -3124,7 +3335,7 @@ def _render_generic_descriptor_preview(
     label = _short(descriptor.get("label") or descriptor.get("action_id") or "KB Action", "KB Action")
     action_id = _short(descriptor.get("action_id") or label, label)
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method"))
-    preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _descriptor_params(descriptor)))
+    preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
     text = _generic_preview_text(label, preview_payload)
     if not _preview_allows_confirmation(preview_payload):
         return {"title": label, "text": text, "actions": []}
@@ -3167,7 +3378,7 @@ def _render_generic_descriptor_confirm(
     confirm_tool = _descriptor_tool_name(target, descriptor.get("confirm_tool"))
     effective_metadata = dict(preview_metadata or {})
     if not effective_metadata.get("preview_lease"):
-        preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _descriptor_params(descriptor)))
+        preview_payload = _dispatch_registry_tool(ctx, target, preview_tool, _descriptor_params(descriptor))
         if not _preview_allows_confirmation(preview_payload):
             return {"title": label, "text": _generic_preview_text(label, preview_payload), "actions": []}
         effective_metadata.update(_queue_preview_metadata(preview_payload))
@@ -3186,7 +3397,7 @@ def _render_generic_descriptor_confirm(
     confirm_args.setdefault("actor", _queue_callback_actor(callback_ctx))
     confirm_args.setdefault("source", "Hermes Telegram Action Card")
     confirm_args.setdefault("session_id", _review_session_id(effective_metadata) or f"telegram-kb-card-{int(time.time())}")
-    confirmed_payload = _result_payload(ctx.dispatch_tool(confirm_tool, confirm_args))
+    confirmed_payload = _dispatch_registry_tool(ctx, target, confirm_tool, confirm_args)
     completion = _durable_completion(confirmed_payload)
     if not completion["complete"]:
         return {
@@ -3852,13 +4063,6 @@ def _queue_scope_lines(payload: Any) -> list[str]:
     return lines
 
 
-def _result_payload(raw: Any) -> Any:
-    payload, error = _unwrap_tool_result(raw)
-    if error:
-        return {"error": error}
-    return payload
-
-
 def _item_kind(item: Any) -> str:
     if not isinstance(item, dict):
         return ""
@@ -4315,10 +4519,12 @@ def _render_control_action_confirm(
     actor = _queue_callback_actor(callback_ctx)
     source = "Hermes Telegram Action Card"
     session_id = _review_session_id(_queue_item_review_metadata(item)) or f"telegram-kb-control-{int(time.time())}"
-    envelope_payload = _result_payload(
-        ctx.dispatch_tool(
-            _descriptor_tool_name(target, "control.build_confirmed_envelope"),
-            {
+    envelope_tool = _descriptor_tool_name(target, "control.build_confirmed_envelope")
+    envelope_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        envelope_tool,
+        {
                 "packet": packet,
                 "plan": plan,
                 "actor": actor,
@@ -4331,17 +4537,17 @@ def _render_control_action_confirm(
                     "preview_status": _short(preview_payload.get("status"), ""),
                     "review_session_id": session_id,
                 },
-            },
-        )
+        },
     )
     envelope = envelope_payload.get("envelope") if isinstance(envelope_payload, dict) else None
     if not isinstance(envelope, dict):
         return {"title": "KB Control", "text": _control_result_text(label, envelope_payload), "actions": []}
-    applied = _result_payload(
-        ctx.dispatch_tool(
-            _descriptor_tool_name(target, "control.apply_confirmed"),
-            {"envelope": envelope},
-        )
+    applied_tool = _descriptor_tool_name(target, "control.apply_confirmed")
+    applied = _dispatch_registry_tool(
+        ctx,
+        target,
+        applied_tool,
+        {"envelope": envelope},
     )
     return {"title": "KB Control", "text": _control_result_text(label, applied), "actions": []}
 
@@ -4370,25 +4576,27 @@ def _render_control_action_preview(
     source = "Hermes Telegram Action Card"
     reason = f"{label} previewed from Telegram KB Review for {_item_title(item)}."
     obj = _control_action_object(action)
-    packet = _result_payload(
-        ctx.dispatch_tool(
-            _descriptor_tool_name(target, "control.context"),
-            {"object": obj, "user_input": reason},
-        )
+    context_tool = _descriptor_tool_name(target, "control.context")
+    packet = _dispatch_registry_tool(
+        ctx,
+        target,
+        context_tool,
+        {"object": obj, "user_input": reason},
     )
     if not isinstance(packet, dict) or packet.get("error"):
         return {"title": "KB Control", "text": _control_preview_text(label, item, packet), "actions": []}
     plan = _control_action_plan(action, reason=reason)
-    preview_payload = _result_payload(
-        ctx.dispatch_tool(
-            _descriptor_tool_name(target, "control.apply_preview"),
-            {
+    apply_preview_tool = _descriptor_tool_name(target, "control.apply_preview")
+    preview_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        apply_preview_tool,
+        {
                 "packet": packet,
                 "plan": plan,
                 "actor": actor,
                 "source": source,
-            },
-        )
+        },
     )
     actions: list[Any] = []
     if isinstance(preview_payload, dict) and _preview_allows_confirmation(preview_payload):
@@ -4486,18 +4694,18 @@ def _render_queue_descriptor_preview(
     preview_tool = _descriptor_tool_name(target, descriptor.get("preview_tool"))
     if not preview_tool:
         return _capability_unavailable("KB Review", (str(descriptor.get("preview_tool") or "review preview"),))
-    preview_payload = _result_payload(
-        ctx.dispatch_tool(
-            preview_tool,
-            _queue_descriptor_call_args(
+    preview_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        preview_tool,
+        _queue_descriptor_call_args(
                 descriptor,
                 item,
                 decision=decision,
                 actor=actor,
                 source=source,
                 note=f"Previewed from Telegram action card for {_item_title(item)}",
-            ),
-        )
+        ),
     )
     selection = [(index, item)]
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
@@ -4564,18 +4772,18 @@ def _render_queue_descriptor_confirm(
     selection = [(index, item)]
     effective_metadata = dict(preview_metadata or {})
     if not effective_metadata.get("preview_lease"):
-        preview_payload = _result_payload(
-            ctx.dispatch_tool(
-                preview_tool,
-                _queue_descriptor_call_args(
+        preview_payload = _dispatch_registry_tool(
+            ctx,
+            target,
+            preview_tool,
+            _queue_descriptor_call_args(
                     descriptor,
                     item,
                     decision=decision,
                     actor=actor,
                     source=source,
                     note=f"Re-previewed before Telegram action-card confirmation for {_item_title(item)}",
-                ),
-            )
+            ),
         )
         if not _preview_allows_confirmation(preview_payload):
             return {"title": "KB Review", "text": _preview_text(decision, proposal_ids, preview_payload, selection=selection), "actions": []}
@@ -4599,10 +4807,19 @@ def _render_queue_descriptor_confirm(
         "proposal_ids": proposal_ids,
     }
     _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], effective_metadata)
-    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
+    confirmed_payload = _dispatch_registry_tool(ctx, target, confirmed_tool, confirmed_args)
     return {
         "title": "KB Review",
-        "text": _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids),
+        "text": _confirmed_text(
+            decision,
+            confirmed_payload,
+            selection=selection,
+            proposal_ids=proposal_ids,
+            expected_completion=_review_completion_expectation(
+                _capability_for_registry_name(target, confirmed_tool),
+                confirmed_args,
+            ),
+        ),
         "actions": [],
     }
 
@@ -4972,9 +5189,11 @@ def _preview_allows_confirmation(payload: Any) -> bool:
         return False
     if payload.get("error") or payload.get("isError"):
         return False
-    if payload.get("ok") is False:
+    if payload.get("ok") is not True:
         return False
     status = str(payload.get("status") or payload.get("state") or "").strip().lower()
+    if not status:
+        return False
     if status in {
         "blocked",
         "error",
@@ -4989,7 +5208,14 @@ def _preview_allows_confirmation(payload: Any) -> bool:
         "validation_failed",
     }:
         return False
-    return True
+    if status == "noop":
+        lease = payload.get("preview_lease") if isinstance(payload.get("preview_lease"), dict) else {}
+        return bool(
+            lease
+            and _normalized_digest(payload.get("preview_hash") or lease.get("preview_hash"))
+            and isinstance(payload.get("plan"), dict)
+        )
+    return "preview" in status or status in {"ready", "valid", "validated", "planned", "success"}
 
 
 def _git_summary(git_state: dict[str, Any]) -> str:
@@ -5025,6 +5251,7 @@ def _confirmed_text(
     *,
     selection: list[tuple[int, dict[str, Any]]] | None = None,
     proposal_ids: list[str] | None = None,
+    expected_completion: dict[str, Any] | None = None,
 ) -> str:
     if isinstance(payload, dict) and payload.get("error"):
         return f"Review {decision} failed\n{payload['error']}"
@@ -5063,7 +5290,11 @@ def _confirmed_text(
             lines.extend(_receipt_lines(payload))
             lines.append("Next: /kb review")
             return "\n".join(lines)
-        completion = _durable_completion(payload)
+        completion = (
+            _request_bound_review_completion(payload, expected_completion)
+            if isinstance(expected_completion, dict)
+            else {"complete": False, "reason": "generated_completion_contract_missing"}
+        )
         if not completion["complete"]:
             lines = [
                 f"Review {decision.title()} Confirmation Received",
@@ -5543,17 +5774,17 @@ def _render_iterative_queue_reply_decision(
     preview_tool = _descriptor_tool_name(target, "review.decision_preview")
     if not preview_tool:
         return _capability_unavailable("KB Review", ("review.decision_preview",))
-    preview_payload = _result_payload(
-        ctx.dispatch_tool(
-            preview_tool,
-            {
+    preview_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        preview_tool,
+        {
                 "proposal_ids": proposal_ids,
                 "decision": decision,
                 "actor": actor,
                 "source": source,
                 "note": f"Previewed from Telegram iterative review reply for {title}",
-            },
-        )
+        },
     )
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
     if _preview_allows_confirmation(preview_payload):
@@ -5590,10 +5821,11 @@ def _render_visible_scope_all_decision(
         return _capability_unavailable("KB Review", ("review.decision_preview",))
     candidate_count = _queue_count_value(visible_record.get("candidate_count"), len(selection))
     displayed_count = _queue_count_value(visible_record.get("displayed_count"), len(selection))
-    preview_payload = _result_payload(
-        ctx.dispatch_tool(
-            preview_tool,
-            {
+    preview_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        preview_tool,
+        {
                 "proposal_ids": proposal_ids,
                 "decision": decision,
                 "decision_scope": "all_viewed",
@@ -5602,8 +5834,7 @@ def _render_visible_scope_all_decision(
                 "actor": actor,
                 "source": source,
                 "note": f"Previewed from Telegram visible queue scope for {len(selection)} shown item(s)",
-            },
-        )
+        },
     )
     text = _preview_text(decision, proposal_ids, preview_payload, selection=selection)
     text += "\nScope: visible Telegram review window only, not the full pending review inbox."
@@ -5811,7 +6042,7 @@ def _render_publication_preflight_descriptor(
 ) -> dict[str, Any]:
     del callback_ctx
     tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method") or "publication.preflight")
-    payload = _result_payload(ctx.dispatch_tool(tool, _descriptor_params(descriptor)))
+    payload = _dispatch_registry_tool(ctx, target, tool, _descriptor_params(descriptor))
     if isinstance(payload, dict) and payload.get("error"):
         return {"title": "KB Publish", "text": f"KB Publication Preflight Failed\n{payload['error']}", "actions": []}
     packet_card = _render_supported_result_packet(payload)
@@ -5896,8 +6127,8 @@ def _render_publish_descriptor_confirm(
     actor = _queue_callback_actor(callback_ctx)
     source = "Hermes Telegram Action Card"
     session_id = f"telegram-kb-publish-{int(time.time())}"
-    preview_payload = _result_payload(
-        ctx.dispatch_tool(preview_tool, _publication_descriptor_args(preview_descriptor, message=message))
+    preview_payload = _dispatch_registry_tool(
+        ctx, target, preview_tool, _publication_descriptor_args(preview_descriptor, message=message)
     )
     if not isinstance(preview_payload, dict) or preview_payload.get("error"):
         return _render_publish_preview(preview_payload)
@@ -5927,19 +6158,19 @@ def _render_publish_descriptor_confirm(
             "user_confirmation": confirmation,
         }
     )
-    commit_payload = _result_payload(ctx.dispatch_tool(commit_tool, commit_args))
+    commit_payload = _dispatch_registry_tool(ctx, target, commit_tool, commit_args)
     if not isinstance(commit_payload, dict) or not commit_payload.get("ok"):
         return _render_publish_result(preview_payload, commit_payload, None)
-    push_payload = _result_payload(
-        ctx.dispatch_tool(
-            push_tool,
-            {
+    push_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        push_tool,
+        {
                 "actor": actor,
                 "source": source,
                 "session_id": session_id,
                 "user_confirmation": confirmation,
-            },
-        )
+        },
     )
     return _render_publish_result(preview_payload, commit_payload, push_payload)
 
@@ -6119,7 +6350,9 @@ def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
     actor = "telegram:operator"
     source = "Hermes Telegram"
     session_id = f"telegram-kb-publish-{int(time.time())}"
-    preview_payload = _result_payload(ctx.dispatch_tool(preview_tool, _publication_descriptor_args(preview_descriptor, message=message)))
+    preview_payload = _dispatch_registry_tool(
+        ctx, target, preview_tool, _publication_descriptor_args(preview_descriptor, message=message)
+    )
     if not confirm:
         actions = _publication_preflight_action(ctx, target, preflight_descriptor)
         if _changed_paths(preview_payload):
@@ -6154,10 +6387,11 @@ def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
         "preview_required": True,
         "confirmation_text": "/kb publish confirm",
     }
-    commit_payload = _result_payload(
-        ctx.dispatch_tool(
-            commit_tool,
-            {
+    commit_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        commit_tool,
+        {
                 **_publication_descriptor_args(commit_descriptor, message=message),
                 "message": message,
                 "expected_git_head": _short(_get_path(preview_payload, "git", "head"), ""),
@@ -6167,21 +6401,20 @@ def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
                 "source": source,
                 "session_id": session_id,
                 "user_confirmation": confirmation,
-            },
-        )
+        },
     )
     if not isinstance(commit_payload, dict) or not commit_payload.get("ok"):
         return _render_publish_result(preview_payload, commit_payload, None)
-    push_payload = _result_payload(
-        ctx.dispatch_tool(
-            push_tool,
-            {
+    push_payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        push_tool,
+        {
                 "actor": actor,
                 "source": source,
                 "session_id": session_id,
                 "user_confirmation": confirmation,
-            },
-        )
+        },
     )
     return _render_publish_result(preview_payload, commit_payload, push_payload)
 
@@ -6475,10 +6708,11 @@ def _render_queue_text_decision(
     source = "Hermes Telegram"
     preview_payload: Any = None
     if not confirm or not preview_metadata.get("preview_lease"):
-        preview_payload = _result_payload(
-            ctx.dispatch_tool(
-                preview_tool,
-                {
+        preview_payload = _dispatch_registry_tool(
+            ctx,
+            target,
+            preview_tool,
+            {
                     "proposal_ids": proposal_ids,
                     "decision": decision,
                     "decision_scope": "explicit_ids",
@@ -6487,8 +6721,7 @@ def _render_queue_text_decision(
                     "actor": actor,
                     "source": source,
                     "note": f"Previewed from Telegram /kb review text command for {selected_titles}",
-                },
-            )
+            },
         )
         if confirm:
             preview_metadata.update(_queue_preview_metadata(preview_payload))
@@ -6556,8 +6789,17 @@ def _render_queue_text_decision(
     }
     _apply_queue_preview_metadata(confirmed_args, preview_metadata)
     _apply_queue_confirmation_preview_metadata(confirmed_args["user_confirmation"], preview_metadata)
-    confirmed_payload = _result_payload(ctx.dispatch_tool(confirmed_tool, confirmed_args))
-    text = _confirmed_text(decision, confirmed_payload, selection=selection, proposal_ids=proposal_ids)
+    confirmed_payload = _dispatch_registry_tool(ctx, target, confirmed_tool, confirmed_args)
+    text = _confirmed_text(
+        decision,
+        confirmed_payload,
+        selection=selection,
+        proposal_ids=proposal_ids,
+        expected_completion=_review_completion_expectation(
+            "review.batch_decide_confirmed",
+            confirmed_args,
+        ),
+    )
     if missing:
         text += "\nSkipped missing review item(s): " + ", ".join(str(index) for index in missing)
     return {"title": "KB Review", "text": text, "actions": []}
@@ -6645,12 +6887,18 @@ def _workflow_start_text(
         actor_name="Telegram",
     )
     envelope = _workflow_envelope(plan, callback_ctx)
-    payload = _result_payload(
-        ctx.dispatch_tool(
-            start_tool,
-            {"envelope": envelope},
-        )
+    payload = _dispatch_registry_tool(
+        ctx,
+        target,
+        start_tool,
+        {"envelope": envelope},
     )
+    proof = _request_bound_workflow_completion(payload, envelope)
+    if not proof["complete"]:
+        return (
+            f"{prefix}\nConfirmation received, but workflow start readback is not verified "
+            f"({proof['reason']}). No workflow start is claimed."
+        )
     text = _workflow_status_text(prefix, payload, include_run_details=False)
     run_id = _workflow_run_id(payload)
     if run_id:
@@ -6844,7 +7092,8 @@ def _workflow_run_id(payload: Any) -> str:
     if not isinstance(payload, dict):
         return ""
     run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
-    return str(payload.get("run_id") or run.get("run_id") or "")
+    completion = payload.get("completion") if isinstance(payload.get("completion"), dict) else {}
+    return str(payload.get("run_id") or run.get("run_id") or completion.get("run_id") or "")
 
 
 def _workflow_status_text(prefix: str, payload: Any, *, include_run_details: bool = True) -> str:
@@ -7052,7 +7301,7 @@ def _kb_root_command(args: str) -> tuple[str, str]:
     if key in {"status", "info"}:
         return "kbstatus", rest
     if key in {"reasoning", "reasoning-effort", "kb-reasoning"}:
-        return "kbreasoning", rest
+        return "kbconfig", rest
     if key in {"runs", "runlog", "history"}:
         return "kbruns", rest
     if key in {"queue", "q"}:
@@ -7104,44 +7353,21 @@ def _kb_command_help() -> dict[str, Any]:
     }
 
 
-def _normalize_kb_reasoning_effort(args: str) -> tuple[str, str]:
-    effort = ((args or "").strip().split(maxsplit=1) or [""])[0].lower()
-    if not effort:
-        return "", f"Send /kb reasoning <level>. Options: {', '.join(sorted(KB_REASONING_LEVELS))}."
-    if effort not in KB_REASONING_LEVELS:
-        return "", f"Unknown KB reasoning effort '{effort}'. Options: {', '.join(sorted(KB_REASONING_LEVELS))}."
-    return effort, ""
-
-
-def _render_kb_reasoning_command(args: str, *, reload_available: bool) -> dict[str, Any]:
-    effort, error = _normalize_kb_reasoning_effort(args)
-    if error:
-        return {"title": "KB Reasoning", "text": f"KB Reasoning\n{error}", "actions": []}
-    try:
-        from hermes_cli.config import get_env_path, save_env_value
-
-        save_env_value("HERMES_KB_REASONING_EFFORT", effort)
-        env_path = get_env_path()
-    except Exception as exc:
-        logger.warning("kb_journeys: failed to save KB reasoning effort", exc_info=True)
-        return {
-            "title": "KB Reasoning",
-            "text": f"KB Reasoning\nCould not save KB reasoning effort: {_short(exc)}",
-            "actions": [],
-        }
-
-    reload_line = "MCP reload started." if reload_available else "Run /reload-mcp to apply it to the KB MCP server."
+def _render_kb_configuration_guidance(args: str) -> dict[str, Any]:
+    requested = _short((args or "").strip(), "a different reasoning level")
     return {
         "title": "KB Reasoning",
+        "status": "operator_configuration_required",
         "text": "\n".join(
             [
-                f"KB reasoning set to {effort}.",
-                f"Saved: {env_path}:HERMES_KB_REASONING_EFFORT",
-                reload_line,
+                "KB Reasoning",
+                f"Requested: {requested}",
+                "Hermes is transport and rendering only; it does not mutate host runtime configuration.",
+                "Use the trusted-operator NOC configuration and reconciliation route.",
+                "No host or KB state changed.",
             ]
         ),
         "actions": [],
-        "_reload_mcp": reload_available,
     }
 
 
@@ -7231,9 +7457,8 @@ def _card_for_command(
         _, provider_data, _provider_errors = _dispatch_first(ctx, target, [("provider.status", {})])
         hermes_reasoning = _live_hermes_reasoning(gateway, source)
         return _render_status(data, target, provider_data, hermes_reasoning=hermes_reasoning)
-    if command == "kbreasoning":
-        reload_available = callable(getattr(gateway, "_execute_mcp_reload", None))
-        return _render_kb_reasoning_command(args, reload_available=reload_available)
+    if command == "kbconfig":
+        return _render_kb_configuration_guidance(args)
     if command == "kbruns":
         _, data, errors = _dispatch_first(
             ctx,
@@ -7486,21 +7711,6 @@ async def _send_card(adapter: Any, event: Any, card: dict[str, Any]) -> None:
         fallback = adapter.send(chat_id, fallback_text, reply_to=reply_to, metadata=metadata)
         if inspect.isawaitable(fallback):
             await fallback
-
-
-async def _send_mcp_reload_result(adapter: Any, event: Any, gateway: Any) -> None:
-    reload_fn = getattr(gateway, "_execute_mcp_reload", None)
-    if not callable(reload_fn):
-        return
-    try:
-        result = reload_fn(event)
-        if inspect.isawaitable(result):
-            result = await result
-        text = "KB MCP Reload\n" + _short(result, "complete")
-    except Exception as exc:
-        logger.warning("kb_journeys: MCP reload after KB reasoning change failed", exc_info=True)
-        text = f"KB MCP Reload\nReload failed: {_short(exc)}"
-    await _send_card(adapter, event, {"title": "KB MCP Reload", "text": text, "actions": []})
 
 
 def _run_delivery(coro: Any) -> None:
@@ -7842,7 +8052,7 @@ def _matching_readback_identity(receipt: dict[str, Any], readback: dict[str, Any
 
 def _matching_readback_digest(receipt: dict[str, Any], readback: dict[str, Any]) -> dict[str, str] | None:
     shared: dict[str, str] = {}
-    for key in ("content_digest", "state_digest", "ledger_digest", "object_digest"):
+    for key in ("content_digest", "state_digest", "ledger_digest", "object_digest", "receipt_digest"):
         expected = str(receipt.get(key) or "").strip()
         observed = str(readback.get(key) or "").strip()
         if not expected or not observed:
@@ -7853,42 +8063,285 @@ def _matching_readback_digest(receipt: dict[str, Any], readback: dict[str, Any])
     return shared or None
 
 
+def _normalized_digest(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if DESCRIPTOR_DIGEST_RE.fullmatch(text):
+        return text
+    if re.fullmatch(r"[0-9a-f]{64}", text):
+        return f"sha256:{text}"
+    return ""
+
+
+def _generated_completion_contract_ready(capability: str) -> bool:
+    descriptor = _descriptor(capability)
+    schema = descriptor.get("output_schema") if isinstance(descriptor, dict) else None
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = set(schema.get("required") or [])
+    if not {"completion", "receipt", "readback"} <= required:
+        return False
+    completion = properties.get("completion") if isinstance(properties.get("completion"), dict) else {}
+    receipt = properties.get("receipt") if isinstance(properties.get("receipt"), dict) else {}
+    readback = properties.get("readback") if isinstance(properties.get("readback"), dict) else {}
+    for section in (completion, receipt, readback):
+        section_properties = section.get("properties") if isinstance(section.get("properties"), dict) else {}
+        route = section_properties.get("route") if isinstance(section_properties.get("route"), dict) else {}
+        if route.get("const") != capability:
+            return False
+    completion_required = set(completion.get("required") or [])
+    return {"route", "action", "affected_ids", "request", "confirmation", "transaction_id"} <= completion_required
+
+
+def _review_completion_expectation(
+    capability: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    confirmation = args.get("user_confirmation") if isinstance(args.get("user_confirmation"), dict) else {}
+    preview_lease = confirmation.get("preview_lease") if isinstance(confirmation.get("preview_lease"), dict) else {}
+    requested_ids = [str(item) for item in (args.get("proposal_ids") or []) if str(item)]
+    lease_ids = [str(item) for item in (preview_lease.get("proposal_ids") or []) if str(item)]
+    is_restore = capability.endswith("restore_confirmed")
+    affected_ids = lease_ids if is_restore and lease_ids else requested_ids
+    return {
+        "route": capability,
+        "action": "review_restore" if is_restore else "review_decision",
+        "affected_ids": affected_ids,
+        "decision": str(args.get("decision") or ("restore" if is_restore else "")),
+        "target_status": str(args.get("target_status") or ("pending_approval" if is_restore else "")),
+        "source_transaction_id": str(args.get("transaction_id") or args.get("source_transaction_id") or ""),
+        "actor": str(args.get("actor") or ""),
+        "source": str(args.get("source") or ""),
+        "session_id": str(args.get("session_id") or ""),
+        "preview_lease": dict(preview_lease),
+        "confirmation": dict(confirmation),
+    }
+
+
+def _request_bound_review_completion(data: Any, expected: dict[str, Any]) -> dict[str, Any]:
+    capability = str(expected.get("route") or "")
+    if not _generated_completion_contract_ready(capability):
+        return {"complete": False, "reason": "generated_completion_contract_missing"}
+    truth = _completion_truth(data, mutation_required=True)
+    if not truth["accepted"]:
+        return {"complete": False, **{key: value for key, value in truth.items() if key != "accepted"}}
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        return {"complete": False, "reason": "invalid_response"}
+    completion = data.get("completion") if isinstance(data.get("completion"), dict) else {}
+    receipt = data.get("receipt") if isinstance(data.get("receipt"), dict) else {}
+    readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
+    if any(section.get("route") != capability for section in (completion, receipt, readback)):
+        return {"complete": False, "reason": "route_mismatch"}
+    if completion.get("action") != expected.get("action"):
+        return {"complete": False, "reason": "action_mismatch"}
+    expected_ids = list(expected.get("affected_ids") or [])
+    if not expected_ids or any(
+        section.get("affected_ids") != expected_ids for section in (completion, receipt, readback)
+    ):
+        return {"complete": False, "reason": "affected_ids_mismatch"}
+    if expected.get("action") == "review_decision" and completion.get("decision") != expected.get("decision"):
+        return {"complete": False, "reason": "decision_mismatch"}
+    if expected.get("action") == "review_restore":
+        if completion.get("target_status") != expected.get("target_status"):
+            return {"complete": False, "reason": "target_status_mismatch"}
+        if completion.get("source_transaction_id") != expected.get("source_transaction_id"):
+            return {"complete": False, "reason": "source_transaction_mismatch"}
+    if any(str(section.get("state") or "").lower() != "applied" for section in (completion, receipt, readback)):
+        return {"complete": False, "reason": "non_terminal_status"}
+    if receipt.get("ok") is not True or receipt.get("saved") is not True or readback.get("ok") is not True:
+        return {"complete": False, "reason": "unverified_receipt"}
+    transaction_id = str(completion.get("transaction_id") or "")
+    receipt_id = str(receipt.get("receipt_id") or "")
+    if not transaction_id or any(str(section.get("transaction_id") or "") != transaction_id for section in (receipt, readback)):
+        return {"complete": False, "reason": "transaction_mismatch"}
+    if not receipt_id or str(readback.get("receipt_id") or "") != receipt_id:
+        return {"complete": False, "reason": "identity_mismatch"}
+    receipt_digest = _normalized_digest(receipt.get("receipt_digest"))
+    if not receipt_digest or _normalized_digest(readback.get("receipt_digest")) != receipt_digest:
+        return {"complete": False, "reason": "digest_mismatch"}
+    digest_body = dict(receipt)
+    digest_body.pop("receipt_digest", None)
+    if _descriptor_digest(digest_body) != receipt_digest:
+        return {"complete": False, "reason": "receipt_digest_mismatch"}
+    if not _normalized_digest(readback.get("content_digest")):
+        return {"complete": False, "reason": "readback_digest_missing"}
+    try:
+        _parse_aware_timestamp(readback.get("observed_at"))
+    except ValueError:
+        return {"complete": False, "reason": "readback_timestamp_invalid"}
+    confirmation = completion.get("confirmation") if isinstance(completion.get("confirmation"), dict) else {}
+    expected_confirmation = expected.get("confirmation") if isinstance(expected.get("confirmation"), dict) else {}
+    if confirmation.get("confirmed") is not True or confirmation.get("confirmation_digest") != _descriptor_digest(expected_confirmation):
+        return {"complete": False, "reason": "confirmation_mismatch"}
+    request = completion.get("request") if isinstance(completion.get("request"), dict) else {}
+    lease = expected.get("preview_lease") if isinstance(expected.get("preview_lease"), dict) else {}
+    preview_digest = _normalized_digest(lease.get("preview_hash"))
+    preview_lease_id = str(lease.get("preview_lease_id") or "")
+    if not preview_digest or request.get("preview_digest") != preview_digest:
+        return {"complete": False, "reason": "preview_digest_mismatch"}
+    if not preview_lease_id or request.get("preview_lease_id") != preview_lease_id:
+        return {"complete": False, "reason": "preview_lease_mismatch"}
+    if request.get("idempotency_key") != transaction_id:
+        return {"complete": False, "reason": "idempotency_mismatch"}
+    request_payload = {
+        "route": capability,
+        "affected_ids": expected_ids,
+        "decision": str(expected.get("decision") or ""),
+        "target_status": str(expected.get("target_status") or ""),
+        "source_transaction_id": str(expected.get("source_transaction_id") or ""),
+        "actor": str(expected.get("actor") or ""),
+        "source": str(expected.get("source") or ""),
+        "session_id": str(expected.get("session_id") or ""),
+        "preview_lease": lease,
+        "idempotency_key": transaction_id,
+    }
+    if request.get("request_digest") != _descriptor_digest(request_payload):
+        return {"complete": False, "reason": "request_digest_mismatch"}
+    return {
+        "complete": True,
+        "reason": "verified",
+        "status": "applied",
+        "identity": {"transaction_id": transaction_id, "receipt_id": receipt_id},
+        "digest": str(readback.get("content_digest")),
+    }
+
+
+def _request_bound_workflow_completion(data: Any, envelope: dict[str, Any]) -> dict[str, Any]:
+    capability = "workflow.start_confirmed"
+    if not _generated_completion_contract_ready(capability):
+        return {"complete": False, "reason": "generated_completion_contract_missing"}
+    truth = _completion_truth(data, mutation_required=True)
+    if not truth["accepted"]:
+        return {"complete": False, **{key: value for key, value in truth.items() if key != "accepted"}}
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        return {"complete": False, "reason": "invalid_response"}
+    completion = data.get("completion") if isinstance(data.get("completion"), dict) else {}
+    receipt = data.get("receipt") if isinstance(data.get("receipt"), dict) else {}
+    readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
+    if any(section.get("route") != capability for section in (completion, receipt, readback)):
+        return {"complete": False, "reason": "route_mismatch"}
+    if completion.get("action") != "workflow_start":
+        return {"complete": False, "reason": "action_mismatch"}
+    plan = envelope.get("plan") if isinstance(envelope.get("plan"), dict) else {}
+    confirmation_packet = envelope.get("user_confirmation") if isinstance(envelope.get("user_confirmation"), dict) else {}
+    workflow_id = str(plan.get("workflow_id") or "")
+    transaction_id = str(plan.get("idempotency_key") or "")
+    run_id = str(completion.get("run_id") or "")
+    if not workflow_id or completion.get("workflow_id") != workflow_id or not run_id:
+        return {"complete": False, "reason": "workflow_identity_mismatch"}
+    if completion.get("transaction_id") != transaction_id or any(
+        section.get("transaction_id") != transaction_id for section in (receipt, readback)
+    ):
+        return {"complete": False, "reason": "transaction_mismatch"}
+    affected_ids = [run_id]
+    if any(section.get("affected_ids") != affected_ids for section in (completion, receipt, readback)):
+        return {"complete": False, "reason": "affected_ids_mismatch"}
+    state = str(completion.get("state") or "").lower()
+    if state not in {"started", "replayed"} or any(
+        str(section.get("state") or "").lower() != state for section in (receipt, readback)
+    ):
+        return {"complete": False, "reason": "non_terminal_status"}
+    if receipt.get("ok") is not True or receipt.get("saved") is not True or readback.get("ok") is not True:
+        return {"complete": False, "reason": "unverified_receipt"}
+    receipt_id = str(receipt.get("receipt_id") or "")
+    if not receipt_id or readback.get("receipt_id") != receipt_id:
+        return {"complete": False, "reason": "identity_mismatch"}
+    receipt_digest = _normalized_digest(receipt.get("receipt_digest"))
+    if not receipt_digest or _normalized_digest(readback.get("receipt_digest")) != receipt_digest:
+        return {"complete": False, "reason": "digest_mismatch"}
+    digest_body = dict(receipt)
+    digest_body.pop("receipt_digest", None)
+    if _descriptor_digest(digest_body) != receipt_digest:
+        return {"complete": False, "reason": "receipt_digest_mismatch"}
+    if not _normalized_digest(readback.get("content_digest")):
+        return {"complete": False, "reason": "readback_digest_missing"}
+    try:
+        _parse_aware_timestamp(readback.get("observed_at"))
+    except ValueError:
+        return {"complete": False, "reason": "readback_timestamp_invalid"}
+    confirmation = completion.get("confirmation") if isinstance(completion.get("confirmation"), dict) else {}
+    if confirmation.get("confirmed") is not True or confirmation.get("confirmation_digest") != _descriptor_digest(confirmation_packet):
+        return {"complete": False, "reason": "confirmation_mismatch"}
+    request = completion.get("request") if isinstance(completion.get("request"), dict) else {}
+    expected_request = {
+        "preview_digest": _descriptor_digest(plan),
+        "preview_lease_id": str(plan.get("request_id") or transaction_id),
+        "request_digest": _descriptor_digest(envelope),
+        "idempotency_key": transaction_id,
+    }
+    if request != expected_request:
+        return {"complete": False, "reason": "request_binding_mismatch"}
+    return {
+        "complete": True,
+        "reason": "verified",
+        "status": state,
+        "identity": {"transaction_id": transaction_id, "receipt_id": receipt_id, "run_id": run_id},
+        "digest": str(readback.get("content_digest")),
+    }
+
+
 def _completion_truth(data: Any, *, mutation_required: bool) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"accepted": False, "reason": "contradictory_invalid_response"}
-    sections = {
-        "top": data,
-        "receipt": data.get("receipt") if isinstance(data.get("receipt"), dict) else {},
-        "readback": data.get("readback") if isinstance(data.get("readback"), dict) else {},
-    }
     failed_statuses = {
         "blocked",
         "cancelled",
         "canceled",
         "error",
         "failed",
-        "noop",
         "rejected",
     }
-    for section_name, section in sections.items():
+
+    def inspect_value(value: Any, path: str) -> dict[str, Any] | None:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                failure = inspect_value(item, f"{path}_{index}")
+                if failure:
+                    return failure
+            return None
+        if not isinstance(value, dict):
+            return None
+        if value.get("isError") is True:
+            return {"accepted": False, "reason": f"contradictory_{path}_isError"}
+        for key in ("error", "errors"):
+            error_value = value.get(key)
+            if error_value not in (None, "", [], {}):
+                return {"accepted": False, "reason": f"contradictory_{path}_{key}"}
         for key in ("status", "state"):
-            status = str(section.get(key) or "").strip().lower()
+            status = str(value.get(key) or "").strip().lower()
             if status in failed_statuses:
                 return {
                     "accepted": False,
-                    "reason": f"contradictory_{section_name}_{key}",
+                    "reason": f"contradictory_{path}_{key}",
                     "status": status,
                 }
-        if section.get("ok") is False:
-            return {"accepted": False, "reason": f"contradictory_{section_name}_ok"}
-        if mutation_required and section.get("mutation_performed") is False:
+        for key in ("ok", "success"):
+            if value.get(key) is False:
+                return {"accepted": False, "reason": f"contradictory_{path}_{key}"}
+        if mutation_required and value.get("mutation_performed") is False:
             return {
                 "accepted": False,
-                "reason": f"contradictory_{section_name}_mutation_performed",
+                "reason": f"contradictory_{path}_mutation_performed",
             }
         for key in ("saved", "applied"):
-            if section.get(key) is False:
-                return {"accepted": False, "reason": f"contradictory_{section_name}_{key}"}
+            if value.get(key) is False:
+                return {"accepted": False, "reason": f"contradictory_{path}_{key}"}
+        for key, child in value.items():
+            if isinstance(child, (dict, list)):
+                # Publication is a separate operator action, and the embedded
+                # preview is historical evidence of the pre-write dry run.
+                # Neither may veto a successfully read-back durable mutation.
+                if key in {"publication", "preview"}:
+                    continue
+                clean_key = re.sub(r"[^A-Za-z0-9]+", "_", str(key)).strip("_") or "nested"
+                failure = inspect_value(child, f"{path}_{clean_key}")
+                if failure:
+                    return failure
+        return None
+
+    failure = inspect_value(data, "top")
+    if failure:
+        return failure
     return {"accepted": True, "reason": "consistent"}
 
 
@@ -8114,10 +8567,7 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 session_store=session_store,
                 event=event,
             )
-        reload_mcp = bool(card.pop("_reload_mcp", False))
         _run_delivery(_send_card(adapter, event, card))
-        if reload_mcp:
-            _run_delivery(_send_mcp_reload_result(adapter, event, gateway))
         return {"action": "skip", "reason": "kb_journeys"}
 
     return _hook

@@ -29,10 +29,11 @@ fields: `current_ref`, `previous_ref`, `installed_digest`,
 `descriptor_digest`, `installed_at`, and `noc_plan_digest`. NOC writes the
 receipt; the plugin only validates and reports it. The recorded previous ref is
 the sole rollback source of truth.
-The renderer labels a receipt verified only when a current, TTL-bounded,
-digest-bound NOC observation proves the same loaded descriptor, artifact
-digest, and current ref. Missing evidence is recorded; malformed, future, or
-expired evidence is invalid.
+The renderer never treats caller-supplied, self-digested evidence as proof of
+installation. Missing live evidence is `not_observed`; any caller-supplied
+evidence is `unverified`, including malformed, future, expired, or mismatched
+packets. A future `verified` posture requires an authenticated, NOC-owned
+observation channel that is not part of this plugin contract.
 
 ## Generated contracts
 
@@ -48,7 +49,7 @@ and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
 The committed export is pinned to kb-engine revision
-`361ae4a24d2606b23bb18777d43078476435d664`, which owns the exact
+`fc5b134bf4aacb9367299466d66dda506c8c17e3`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job remains intentionally blocked until that exact K3 revision is
@@ -65,7 +66,10 @@ removed and return migration guidance only. Evidence capture/write likewise rema
 until `evidence.remember.preview/confirmed` is exported. A confirmed evidence
 receipt is rendered as “Evidence remembered”; it never implies a semantic
 object update or publication. Durable wording requires confirmed identity and
-digest readback.
+digest readback and a generated completion binding to the selected request.
+Until kb-engine exports that binding contract, Hermes does not render review
+confirmation as applied. `/kb reasoning` is guidance-only: host runtime
+configuration remains a trusted-operator NOC concern.
 
 ## Local Test
 

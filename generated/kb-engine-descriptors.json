@@ -3,27 +3,27 @@
     {
       "input_schema_digest": "sha256:c2d5d4b66f762c95b5e53c827d668bda5c871d615a83054f03b32ebc3075bf0d",
       "name": "review.batch_decide_confirmed",
-      "output_schema_digest": "sha256:93a29da8942fd38bfa3fa0e0db737e94e37004b7173504757cd57e842644842c"
+      "output_schema_digest": "sha256:e32494bd132f7c384fb3aefa792e54c09331955f193acbc4fe2bf822ac50a250"
     },
     {
       "input_schema_digest": "sha256:525c418ac712645b5e059d2d19c942ecad8d81fa0e594ebb604254e607d632c8",
       "name": "review.restore_confirmed",
-      "output_schema_digest": "sha256:5ddcebf3929ba70520f2b6e52caa8b1cb9414369bdf030642b755cdade7e9ee2"
+      "output_schema_digest": "sha256:025f203129d067cd14c7b700adb5fb7243444d1432591084186b2838748363a8"
     },
     {
       "input_schema_digest": "sha256:b6e2b241e0122f9c640ec81ee5df34a04bb7c55ff26ffcdf86beabccf3193fe5",
       "name": "workflow.start_confirmed",
-      "output_schema_digest": "sha256:aae1fcd630fefb60e772efbc4e54c522a4b16b1e7dd2851f5b85625dc95ec8a3"
+      "output_schema_digest": "sha256:57835909888f3cffe64d0cc68b1bdd8375af3119eaf6e338ebcb909ceffbde5b"
     }
   ],
-  "digest": "sha256:79bb59a6e4b4469b9fadf1b19d9a7175ad6cad428ac79a6712f0524e2d525787",
-  "engine_source_revision": "361ae4a24d2606b23bb18777d43078476435d664",
+  "digest": "sha256:783fa8f05084e910b19df7ee4d6b2823bbab2fb18bba780aae65fa11647b3d0d",
+  "engine_source_revision": "fc5b134bf4aacb9367299466d66dda506c8c17e3",
   "engine_version": "0.41.2",
   "journeys": [],
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:32fc51368c4e93fbae8d144c8ebe219357fcf5af5c59ed3842497e65c7fc6de2",
+  "source_export_digest": "sha256:af0d9e78658a595f36409c6dc5f9557432077b862e8fae4b3bb90d6b829b9c0a",
   "tools": [
     {
       "annotations": {
@@ -636,13 +636,229 @@
             "description": "Deterministic apply outcome.",
             "type": "string"
           },
+          "completion": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "review_decision",
+                "description": "Normalized confirmed action kind.",
+                "type": "string"
+              },
+              "affected_ids": {
+                "description": "Exact object identities bound to this request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirmation_digest": {
+                    "description": "Digest of the normalized confirmation packet.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "confirmed": {
+                    "const": true,
+                    "description": "True only for the user-confirmed request.",
+                    "type": "boolean"
+                  },
+                  "confirmed_at": {
+                    "description": "Confirmation timestamp when supplied.",
+                    "type": "string"
+                  },
+                  "confirmed_by": {
+                    "description": "Confirmation actor identity.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirmed",
+                  "confirmation_digest"
+                ],
+                "type": "object"
+              },
+              "decision": {
+                "description": "Exact decision applied to every affected proposal.",
+                "enum": [
+                  "approve",
+                  "reject",
+                  "archive",
+                  "skip",
+                  "complete",
+                  "keep",
+                  "demote",
+                  "duplicate",
+                  "supersede",
+                  "reroute"
+                ],
+                "type": "string"
+              },
+              "request": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Engine idempotency key bound to this request.",
+                    "type": "string"
+                  },
+                  "preview_digest": {
+                    "description": "Digest of the exact preview or request plan confirmed by the user.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "preview_lease_id": {
+                    "description": "Preview lease or versioned request id bound to confirmation.",
+                    "type": "string"
+                  },
+                  "request_digest": {
+                    "description": "Digest of the exact confirmed tool request.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "preview_digest",
+                  "preview_lease_id",
+                  "request_digest",
+                  "idempotency_key"
+                ],
+                "type": "object"
+              },
+              "route": {
+                "const": "review.batch_decide_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Request-bound completion state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "action",
+              "state",
+              "affected_ids",
+              "request",
+              "confirmation",
+              "transaction_id",
+              "decision"
+            ],
+            "type": "object"
+          },
           "ok": {
-            "description": "Whether every required confirmed operation succeeded.",
+            "description": "Whether the exact confirmed request and readback succeeded.",
             "type": "boolean"
           },
           "preview_lease": {
-            "additionalProperties": true,
-            "description": "Validated preview lease.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "confirm_tool": {
+                "description": "Only confirmation tool allowed for this lease.",
+                "type": "string"
+              },
+              "cursor_id": {
+                "description": "Guided review cursor id.",
+                "type": "string"
+              },
+              "decision": {
+                "description": "Bound common decision, if any.",
+                "type": "string"
+              },
+              "decision_scope": {
+                "description": "Bound decision scope.",
+                "type": "string"
+              },
+              "decisions": {
+                "description": "Bound per-proposal decisions.",
+                "items": {
+                  "additionalProperties": true,
+                  "description": "Per-proposal decision row.",
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decisions_hash": {
+                "description": "Digest of the ordered decision rows.",
+                "type": "string"
+              },
+              "packet_type": {
+                "description": "Preview lease packet type.",
+                "type": "string"
+              },
+              "preview_hash": {
+                "description": "Digest of the preview-bound lease fields.",
+                "type": "string"
+              },
+              "preview_lease_id": {
+                "description": "Stable preview lease id.",
+                "type": "string"
+              },
+              "preview_status": {
+                "description": "Bound preview outcome.",
+                "type": "string"
+              },
+              "proposal_ids": {
+                "description": "Bound proposal ids.",
+                "items": {
+                  "description": "Proposal id.",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "proposal_ids_hash": {
+                "description": "Digest of the ordered proposal ids.",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Guided review session id.",
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Preview lease schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source": {
+                "description": "Preview source harness.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "preview_lease_id",
+              "preview_hash",
+              "review_session_id",
+              "cursor_id",
+              "decision_scope",
+              "proposal_ids",
+              "proposal_ids_hash",
+              "decisions_hash",
+              "actor",
+              "source",
+              "preview_status",
+              "confirm_tool"
+            ],
             "type": "object"
           },
           "preview_status": {
@@ -650,7 +866,7 @@
             "type": "string"
           },
           "proposal_ids": {
-            "description": "Confirmed proposal ids.",
+            "description": "Requested proposal ids.",
             "items": {
               "description": "Proposal id.",
               "type": "string"
@@ -662,29 +878,159 @@
             "description": "Separate publication posture.",
             "type": "object"
           },
+          "readback": {
+            "additionalProperties": true,
+            "properties": {
+              "affected_ids": {
+                "description": "Exact affected objects observed after the write.",
+                "items": {
+                  "description": "Read-back proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "content_digest": {
+                "description": "Digest of the observed post-write state used for success rendering.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "observed_at": {
+                "description": "UTC timestamp of post-write observation.",
+                "type": "string"
+              },
+              "ok": {
+                "description": "Whether post-write readback succeeded.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Receipt digest verified by readback.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Receipt identity verified by readback.",
+                "type": "string"
+              },
+              "route": {
+                "const": "review.batch_decide_confirmed",
+                "description": "Exact confirmed capability route read back.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Post-write readback state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction identity verified by readback.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids",
+              "content_digest",
+              "observed_at"
+            ],
+            "type": "object"
+          },
           "receipt": {
             "additionalProperties": true,
-            "description": "Durable review decision receipt.",
+            "properties": {
+              "affected_ids": {
+                "description": "Exact durable objects affected by the request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "ok": {
+                "description": "Whether the engine receipt records success.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Digest of the engine-owned receipt.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Engine-owned durable receipt identity.",
+                "type": "string"
+              },
+              "route": {
+                "const": "review.batch_decide_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "saved": {
+                "description": "Whether durable state was written or replayed.",
+                "type": "boolean"
+              },
+              "state": {
+                "description": "Engine receipt state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "saved",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids"
+            ],
             "type": "object"
           },
           "schema_version": {
-            "description": "Review confirmation schema version.",
+            "description": "Confirmed completion schema version.",
             "minimum": 1,
             "type": "integer"
           },
           "status": {
-            "description": "Confirmed decision outcome.",
+            "description": "Confirmed request outcome.",
             "type": "string"
           }
         },
         "required": [
           "schema_version",
           "status",
-          "ok"
+          "ok",
+          "completion",
+          "receipt",
+          "readback"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:93a29da8942fd38bfa3fa0e0db737e94e37004b7173504757cd57e842644842c",
+      "output_schema_digest": "sha256:e32494bd132f7c384fb3aefa792e54c09331955f193acbc4fe2bf822ac50a250",
       "title": "Decide Review Batch Confirmed"
     },
     {
@@ -1183,26 +1529,363 @@
             "description": "Deterministic restore apply outcome.",
             "type": "string"
           },
+          "completion": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "review_restore",
+                "description": "Normalized confirmed action kind.",
+                "type": "string"
+              },
+              "affected_ids": {
+                "description": "Exact object identities bound to this request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirmation_digest": {
+                    "description": "Digest of the normalized confirmation packet.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "confirmed": {
+                    "const": true,
+                    "description": "True only for the user-confirmed request.",
+                    "type": "boolean"
+                  },
+                  "confirmed_at": {
+                    "description": "Confirmation timestamp when supplied.",
+                    "type": "string"
+                  },
+                  "confirmed_by": {
+                    "description": "Confirmation actor identity.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirmed",
+                  "confirmation_digest"
+                ],
+                "type": "object"
+              },
+              "request": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Engine idempotency key bound to this request.",
+                    "type": "string"
+                  },
+                  "preview_digest": {
+                    "description": "Digest of the exact preview or request plan confirmed by the user.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "preview_lease_id": {
+                    "description": "Preview lease or versioned request id bound to confirmation.",
+                    "type": "string"
+                  },
+                  "request_digest": {
+                    "description": "Digest of the exact confirmed tool request.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "preview_digest",
+                  "preview_lease_id",
+                  "request_digest",
+                  "idempotency_key"
+                ],
+                "type": "object"
+              },
+              "route": {
+                "const": "review.restore_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "source_transaction_id": {
+                "description": "Prior review transaction selected for restore.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Request-bound completion state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "target_status": {
+                "const": "pending_approval",
+                "description": "Exact proposal status restored by the request.",
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "action",
+              "state",
+              "affected_ids",
+              "request",
+              "confirmation",
+              "transaction_id",
+              "target_status",
+              "source_transaction_id"
+            ],
+            "type": "object"
+          },
           "ok": {
-            "description": "Whether every required restore operation succeeded.",
+            "description": "Whether the exact confirmed request and readback succeeded.",
             "type": "boolean"
           },
           "preview_lease": {
-            "additionalProperties": true,
-            "description": "Validated restore preview lease.",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "description": "Preview actor.",
+                "type": "string"
+              },
+              "confirm_tool": {
+                "description": "Only confirmation tool allowed for this lease.",
+                "type": "string"
+              },
+              "cursor_id": {
+                "description": "Guided review cursor id.",
+                "type": "string"
+              },
+              "decision": {
+                "description": "Bound common decision, if any.",
+                "type": "string"
+              },
+              "decision_scope": {
+                "description": "Bound decision scope.",
+                "type": "string"
+              },
+              "decisions": {
+                "description": "Bound per-proposal decisions.",
+                "items": {
+                  "additionalProperties": true,
+                  "description": "Per-proposal decision row.",
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decisions_hash": {
+                "description": "Digest of the ordered decision rows.",
+                "type": "string"
+              },
+              "packet_type": {
+                "description": "Preview lease packet type.",
+                "type": "string"
+              },
+              "preview_hash": {
+                "description": "Digest of the preview-bound lease fields.",
+                "type": "string"
+              },
+              "preview_lease_id": {
+                "description": "Stable preview lease id.",
+                "type": "string"
+              },
+              "preview_status": {
+                "description": "Bound preview outcome.",
+                "type": "string"
+              },
+              "proposal_ids": {
+                "description": "Bound proposal ids.",
+                "items": {
+                  "description": "Proposal id.",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "proposal_ids_hash": {
+                "description": "Digest of the ordered proposal ids.",
+                "type": "string"
+              },
+              "review_session_id": {
+                "description": "Guided review session id.",
+                "type": "string"
+              },
+              "schema_version": {
+                "description": "Preview lease schema version.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source": {
+                "description": "Preview source harness.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "packet_type",
+              "schema_version",
+              "preview_lease_id",
+              "preview_hash",
+              "review_session_id",
+              "cursor_id",
+              "decision_scope",
+              "proposal_ids",
+              "proposal_ids_hash",
+              "decisions_hash",
+              "actor",
+              "source",
+              "preview_status",
+              "confirm_tool"
+            ],
             "type": "object"
           },
           "preview_status": {
             "description": "Bound restore preview outcome.",
             "type": "string"
           },
+          "readback": {
+            "additionalProperties": true,
+            "properties": {
+              "affected_ids": {
+                "description": "Exact affected objects observed after the write.",
+                "items": {
+                  "description": "Read-back proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "content_digest": {
+                "description": "Digest of the observed post-write state used for success rendering.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "observed_at": {
+                "description": "UTC timestamp of post-write observation.",
+                "type": "string"
+              },
+              "ok": {
+                "description": "Whether post-write readback succeeded.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Receipt digest verified by readback.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Receipt identity verified by readback.",
+                "type": "string"
+              },
+              "route": {
+                "const": "review.restore_confirmed",
+                "description": "Exact confirmed capability route read back.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Post-write readback state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction identity verified by readback.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids",
+              "content_digest",
+              "observed_at"
+            ],
+            "type": "object"
+          },
           "receipt": {
             "additionalProperties": true,
-            "description": "Durable restore receipt.",
+            "properties": {
+              "affected_ids": {
+                "description": "Exact durable objects affected by the request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "ok": {
+                "description": "Whether the engine receipt records success.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Digest of the engine-owned receipt.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Engine-owned durable receipt identity.",
+                "type": "string"
+              },
+              "route": {
+                "const": "review.restore_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "saved": {
+                "description": "Whether durable state was written or replayed.",
+                "type": "boolean"
+              },
+              "state": {
+                "description": "Engine receipt state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "saved",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids"
+            ],
             "type": "object"
           },
           "restorable_ids": {
-            "description": "Restored proposal ids.",
+            "description": "Requested restorable proposal ids.",
             "items": {
               "description": "Proposal id.",
               "type": "string"
@@ -1210,23 +1893,26 @@
             "type": "array"
           },
           "schema_version": {
-            "description": "Restore confirmation schema version.",
+            "description": "Confirmed completion schema version.",
             "minimum": 1,
             "type": "integer"
           },
           "status": {
-            "description": "Confirmed restore outcome.",
+            "description": "Confirmed request outcome.",
             "type": "string"
           }
         },
         "required": [
           "schema_version",
           "status",
-          "ok"
+          "ok",
+          "completion",
+          "receipt",
+          "readback"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:5ddcebf3929ba70520f2b6e52caa8b1cb9414369bdf030642b755cdade7e9ee2",
+      "output_schema_digest": "sha256:025f203129d067cd14c7b700adb5fb7243444d1432591084186b2838748363a8",
       "title": "Restore Review Decision Confirmed"
     },
     {
@@ -1843,9 +2529,267 @@
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "completion": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "workflow_start",
+                "description": "Normalized confirmed action kind.",
+                "type": "string"
+              },
+              "affected_ids": {
+                "description": "Exact object identities bound to this request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirmation_digest": {
+                    "description": "Digest of the normalized confirmation packet.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "confirmed": {
+                    "const": true,
+                    "description": "True only for the user-confirmed request.",
+                    "type": "boolean"
+                  },
+                  "confirmed_at": {
+                    "description": "Confirmation timestamp when supplied.",
+                    "type": "string"
+                  },
+                  "confirmed_by": {
+                    "description": "Confirmation actor identity.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "confirmed",
+                  "confirmation_digest"
+                ],
+                "type": "object"
+              },
+              "request": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Engine idempotency key bound to this request.",
+                    "type": "string"
+                  },
+                  "preview_digest": {
+                    "description": "Digest of the exact preview or request plan confirmed by the user.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "preview_lease_id": {
+                    "description": "Preview lease or versioned request id bound to confirmation.",
+                    "type": "string"
+                  },
+                  "request_digest": {
+                    "description": "Digest of the exact confirmed tool request.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "preview_digest",
+                  "preview_lease_id",
+                  "request_digest",
+                  "idempotency_key"
+                ],
+                "type": "object"
+              },
+              "route": {
+                "const": "workflow.start_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "run_id": {
+                "description": "Durable started or replayed run id.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Request-bound completion state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              },
+              "workflow_id": {
+                "description": "Exact workflow id requested.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "action",
+              "state",
+              "affected_ids",
+              "request",
+              "confirmation",
+              "transaction_id",
+              "workflow_id",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          "idempotent_replay": {
+            "description": "Whether an existing committed start was replayed.",
+            "type": "boolean"
+          },
+          "ok": {
+            "description": "Whether the exact confirmed request and readback succeeded.",
+            "type": "boolean"
+          },
           "pre_write_snapshot": {
             "additionalProperties": true,
             "description": "Secret-safe pre-write runtime snapshot.",
+            "type": "object"
+          },
+          "readback": {
+            "additionalProperties": true,
+            "properties": {
+              "affected_ids": {
+                "description": "Exact affected objects observed after the write.",
+                "items": {
+                  "description": "Read-back proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "content_digest": {
+                "description": "Digest of the observed post-write state used for success rendering.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "observed_at": {
+                "description": "UTC timestamp of post-write observation.",
+                "type": "string"
+              },
+              "ok": {
+                "description": "Whether post-write readback succeeded.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Receipt digest verified by readback.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Receipt identity verified by readback.",
+                "type": "string"
+              },
+              "route": {
+                "const": "workflow.start_confirmed",
+                "description": "Exact confirmed capability route read back.",
+                "type": "string"
+              },
+              "state": {
+                "description": "Post-write readback state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction identity verified by readback.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids",
+              "content_digest",
+              "observed_at"
+            ],
+            "type": "object"
+          },
+          "receipt": {
+            "additionalProperties": true,
+            "properties": {
+              "affected_ids": {
+                "description": "Exact durable objects affected by the request.",
+                "items": {
+                  "description": "Affected proposal or run id.",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "ok": {
+                "description": "Whether the engine receipt records success.",
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Digest of the engine-owned receipt.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "receipt_id": {
+                "description": "Engine-owned durable receipt identity.",
+                "type": "string"
+              },
+              "route": {
+                "const": "workflow.start_confirmed",
+                "description": "Exact confirmed capability route.",
+                "type": "string"
+              },
+              "saved": {
+                "description": "Whether durable state was written or replayed.",
+                "type": "boolean"
+              },
+              "state": {
+                "description": "Engine receipt state.",
+                "enum": [
+                  "applied",
+                  "started",
+                  "replayed",
+                  "blocked",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "description": "Transaction or idempotency identity for this exact request.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "route",
+              "state",
+              "ok",
+              "saved",
+              "receipt_id",
+              "receipt_digest",
+              "transaction_id",
+              "affected_ids"
+            ],
             "type": "object"
           },
           "results": {
@@ -1857,35 +2801,36 @@
             },
             "type": "array"
           },
-          "run_id": {
-            "description": "Started or replayed durable run id.",
-            "type": "string"
+          "schema_version": {
+            "description": "Confirmed completion schema version.",
+            "minimum": 1,
+            "type": "integer"
           },
           "started": {
-            "description": "Whether a workflow run actually started.",
+            "description": "Whether a new workflow run started.",
             "type": "boolean"
           },
           "status": {
-            "description": "Confirmed start outcome.",
+            "description": "Confirmed request outcome.",
             "type": "string"
           },
           "transaction": {
             "additionalProperties": true,
-            "description": "Idempotent start transaction receipt.",
+            "description": "Idempotent start transaction diagnostics.",
             "type": "object"
-          },
-          "workflow_id": {
-            "description": "Resolved workflow id.",
-            "type": "string"
           }
         },
         "required": [
+          "schema_version",
           "status",
-          "started"
+          "ok",
+          "completion",
+          "receipt",
+          "readback"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:aae1fcd630fefb60e772efbc4e54c522a4b16b1e7dd2851f5b85625dc95ec8a3",
+      "output_schema_digest": "sha256:57835909888f3cffe64d0cc68b1bdd8375af3119eaf6e338ebcb909ceffbde5b",
       "title": "Start Confirmed Workflow"
     }
   ]
