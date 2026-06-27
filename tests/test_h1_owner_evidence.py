@@ -339,12 +339,12 @@ def test_hermes_replacement_object_cannot_forge_pinned_head_and_tree(
         fixture, "hermes_cli/plugins.py"
     )
     if custom_replace_base:
-        replacement_base = "refs/adversarial-replacements"
+        replacement_base = "refs/adversarial-replacements/"
         _run_git_fixture(fixture, "replace", "-d", original)
         _run_git_fixture(
             fixture,
             "update-ref",
-            f"{replacement_base}/{original}",
+            f"{replacement_base}{original}",
             replacement,
         )
         monkeypatch.setenv("GIT_REPLACE_REF_BASE", replacement_base)
