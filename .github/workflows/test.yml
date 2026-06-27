@@ -47,3 +47,34 @@ jobs:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
           HERMES_UPSTREAM_REF: ${{ matrix.hermes_ref }}
         run: uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
+
+  h1-owner-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 2bd1977d8fad185c9b4be47884f7e87f1add0ce3
+          path: hermes-agent
+      - uses: astral-sh/setup-uv@v6
+      - name: Run exact H1 owner-evidence contracts
+        env:
+          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          HERMES_UPSTREAM_REF: v2026.6.19
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          mkdir -p artifacts
+          uv run --with pytest --with pyyaml pytest -q \
+            tests/test_h1_owner_evidence.py \
+            --junitxml=artifacts/h1-owner-evidence-v2026.6.19.xml
+      - name: Retain non-admissible H1 test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h1-owner-evidence-v2026.6.19
+          path: artifacts/h1-owner-evidence-v2026.6.19.xml
+          if-no-files-found: error
+          retention-days: 14
