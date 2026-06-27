@@ -90,6 +90,8 @@ four H1 contract groups against immutable upstream Hermes Agent commit
 tracked, untracked, or ignored fixture additions are rejected before execution.
 Actual tracked blobs and executable bits are checked directly against each
 commit tree, independent of `assume-unchanged` or `skip-worktree` index flags.
+All Git identity/plumbing calls disable replacement objects and scrub inherited
+Git configuration, including custom replacement-ref bases and URL rewrites.
 It then consumes NOC's root-custodied final plugin deployment receipt
 and exact relay cutover receipt plus a separate post-cutover semantic
 confirmed-write/readback canary receipt. Every group loads the plugin through

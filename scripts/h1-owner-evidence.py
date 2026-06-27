@@ -218,9 +218,49 @@ def _format_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _sanitized_git_environment() -> dict[str, str]:
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return environment
+
+
+def _git_command(root: Path, *arguments: str) -> list[str]:
+    return [
+        "git",
+        "--no-replace-objects",
+        "-c",
+        f"core.worktree={root}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        f"core.hooksPath={os.devnull}",
+        "-c",
+        f"core.attributesFile={os.devnull}",
+        "-c",
+        f"core.excludesFile={os.devnull}",
+        "-C",
+        str(root),
+        *arguments,
+    ]
+
+
 def _run_git(root: Path, *arguments: str, binary: bool = False) -> str | bytes:
     result = subprocess.run(
-        ["git", "-C", str(root), *arguments],
+        _git_command(root, *arguments),
+        env=_sanitized_git_environment(),
         capture_output=True,
         text=not binary,
         timeout=30,
@@ -368,32 +408,31 @@ def validate_source_checkout(repo_root: Path) -> None:
     if expected != EXPECTED_PLUGIN_REF or not SHA.fullmatch(head):
         raise EvidenceError("source_revision_mismatch")
     ancestor = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
+        _git_command(
+            repo_root,
             "merge-base",
             "--is-ancestor",
             EXPECTED_PLUGIN_REF,
             head,
-        ],
+        ),
+        env=_sanitized_git_environment(),
         capture_output=True,
         timeout=30,
         check=False,
     )
     runtime_diff = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
+        _git_command(
+            repo_root,
             "diff-tree",
             "--quiet",
+            "--no-ext-diff",
             "-r",
             EXPECTED_PLUGIN_REF,
             head,
             "--",
             *PLUGIN_RUNTIME_PATHS,
-        ],
+        ),
+        env=_sanitized_git_environment(),
         capture_output=True,
         timeout=30,
         check=False,
@@ -438,7 +477,10 @@ def validate_hermes_fixture(path: Path) -> str:
     ):
         raise EvidenceError("hermes_fixture_unavailable")
     head = str(_run_git(path, "rev-parse", "HEAD^{commit}")).strip()
-    origin = str(_run_git(path, "remote", "get-url", "origin")).strip()
+    origin_values = str(
+        _run_git(path, "config", "--local", "--get-all", "remote.origin.url")
+    ).splitlines()
+    origin = origin_values[0] if len(origin_values) == 1 else ""
     dirty = str(
         _run_git(
             path,

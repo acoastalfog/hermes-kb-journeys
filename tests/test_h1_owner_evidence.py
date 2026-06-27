@@ -231,6 +231,35 @@ def _run_git_fixture(path: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def _install_commit_replacement(fixture: Path, relative: str) -> tuple[str, str]:
+    _run_git_fixture(fixture, "config", "user.name", "fixture")
+    _run_git_fixture(fixture, "config", "user.email", "fixture@example.invalid")
+    original = _run_git_fixture(fixture, "rev-parse", "HEAD")
+    target = fixture / relative
+    target.write_bytes(target.read_bytes() + b"\n# replacement-object injection\n")
+    _run_git_fixture(fixture, "add", relative)
+    tree = _run_git_fixture(fixture, "write-tree")
+    ancestry = _run_git_fixture(fixture, "rev-list", "--parents", "-1", "HEAD").split()
+    parent_arguments = ["-p", ancestry[1]] if len(ancestry) > 1 else []
+    replacement = subprocess.run(
+        ["git", "-C", str(fixture), "commit-tree", tree, *parent_arguments],
+        input="replacement object\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _run_git_fixture(fixture, "reset", "--hard", original)
+    _run_git_fixture(fixture, "replace", original, replacement)
+    _run_git_fixture(fixture, "read-tree", "--reset", "-u", replacement)
+    assert _run_git_fixture(fixture, "rev-parse", "HEAD") == original
+    assert "replacement-object injection" in target.read_text(encoding="utf-8")
+    assert (
+        _run_git_fixture(fixture, "status", "--porcelain", "--untracked-files=all")
+        == ""
+    )
+    return original, replacement
+
+
 def test_forged_local_tag_and_canonical_origin_cannot_substitute_for_pinned_commit(
     tmp_path: Path,
 ) -> None:
@@ -255,6 +284,104 @@ def test_forged_local_tag_and_canonical_origin_cannot_substitute_for_pinned_comm
         "https://github.com/NousResearch/hermes-agent.git",
     )
     assert _run_git_fixture(fixture, "rev-parse", "HEAD") != EXPECTED_HERMES_REVISION
+
+    with pytest.raises(module.EvidenceError, match="hermes_fixture_mismatch"):
+        module.validate_hermes_fixture(fixture)
+
+
+def test_plugin_source_replacement_object_cannot_forge_pinned_head_and_tree(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    fixture = tmp_path / "replacement-plugin-source"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(fixture)],
+        check=True,
+    )
+    original, replacement = _install_commit_replacement(
+        fixture, "scripts/h1-owner-evidence.py"
+    )
+    assert _run_git_fixture(
+        fixture, "ls-tree", "HEAD", "scripts/h1-owner-evidence.py"
+    ) == _run_git_fixture(
+        fixture, "ls-tree", replacement, "scripts/h1-owner-evidence.py"
+    )
+    assert original != replacement
+
+    with pytest.raises(module.EvidenceError, match="released_plugin_bytes_changed"):
+        module.validate_source_checkout(fixture)
+
+
+@pytest.mark.parametrize("custom_replace_base", [False, True])
+def test_hermes_replacement_object_cannot_forge_pinned_head_and_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom_replace_base: bool,
+) -> None:
+    module = _load_module()
+    source_value = os.environ.get("HERMES_AGENT_REPO")
+    if not source_value:
+        pytest.skip("exact Hermes Agent fixture is supplied by the H1 CI job")
+    fixture = tmp_path / "replacement-hermes-agent"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", source_value, str(fixture)],
+        check=True,
+    )
+    _run_git_fixture(
+        fixture,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/NousResearch/hermes-agent.git",
+    )
+    _run_git_fixture(fixture, "checkout", "--detach", EXPECTED_HERMES_REVISION)
+    original, replacement = _install_commit_replacement(
+        fixture, "hermes_cli/plugins.py"
+    )
+    if custom_replace_base:
+        replacement_base = "refs/adversarial-replacements"
+        _run_git_fixture(fixture, "replace", "-d", original)
+        _run_git_fixture(
+            fixture,
+            "update-ref",
+            f"{replacement_base}/{original}",
+            replacement,
+        )
+        monkeypatch.setenv("GIT_REPLACE_REF_BASE", replacement_base)
+    assert _run_git_fixture(
+        fixture, "ls-tree", "HEAD", "hermes_cli/plugins.py"
+    ) == _run_git_fixture(fixture, "ls-tree", replacement, "hermes_cli/plugins.py")
+    assert original == EXPECTED_HERMES_REVISION
+
+    with pytest.raises(module.EvidenceError, match="hermes_fixture_mismatch"):
+        module.validate_hermes_fixture(fixture)
+
+
+def test_git_config_environment_cannot_forge_canonical_hermes_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    source_value = os.environ.get("HERMES_AGENT_REPO")
+    if not source_value:
+        pytest.skip("exact Hermes Agent fixture is supplied by the H1 CI job")
+    fixture = tmp_path / "config-forged-hermes-agent"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", source_value, str(fixture)],
+        check=True,
+    )
+    _run_git_fixture(
+        fixture, "remote", "set-url", "origin", "https://example.invalid/forged.git"
+    )
+    _run_git_fixture(fixture, "checkout", "--detach", EXPECTED_HERMES_REVISION)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv(
+        "GIT_CONFIG_KEY_0",
+        "url.https://github.com/NousResearch/hermes-agent.git.insteadOf",
+    )
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://example.invalid/forged.git")
+    assert _run_git_fixture(fixture, "remote", "get-url", "origin") == (
+        "https://github.com/NousResearch/hermes-agent.git"
+    )
 
     with pytest.raises(module.EvidenceError, match="hermes_fixture_mismatch"):
         module.validate_hermes_fixture(fixture)

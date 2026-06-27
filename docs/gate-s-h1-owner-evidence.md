@@ -12,7 +12,11 @@ Run from a checkout whose plugin runtime files still equal release commit
 The generator also compares every actual tracked source-checkout file and its
 executable bit with `HEAD`, then compares the committed runtime paths with the
 release tree. These checks use Git tree plumbing and direct file reads rather
-than index status hints.
+than index status hints. Every Git identity and tree command disables
+replacement objects, removes inherited `GIT_*` configuration, ignores
+system/global Git configuration, and applies controlled worktree settings.
+Local or custom-base replacement refs therefore cannot substitute another
+commit tree while retaining a pinned ref name.
 
 1. An exact checkout of canonical origin `NousResearch/hermes-agent` at commit
    `2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (the immutable commit behind
@@ -21,7 +25,9 @@ than index status hints.
    generator rejects all such paths before executing the fixture. It compares
    every actual tracked file's Git blob identity and executable bit directly
    with the immutable commit tree, so `assume-unchanged` and `skip-worktree`
-   index flags cannot conceal modified executed code.
+   index flags cannot conceal modified executed code. Replacement objects,
+   custom `GIT_REPLACE_REF_BASE` values, and environment-injected URL rewrites
+   are disabled before commit and canonical-origin validation.
 2. NOC's final root-custodied `hermes_plugin_deployment_receipt`. Its nested
    install receipt must bind:
    - `current_ref` to `9772526c543cec30ee3aee71be952f95dbaf8301`;
