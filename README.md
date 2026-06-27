@@ -49,7 +49,7 @@ and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
 The committed export is pinned to the kb-engine 0.41.3 safety candidate at
-revision `65259464b7490f927062ee82a9294a00912c2bf2`, which owns the exact
+revision `9d4a5856b2e0412e6edc83451fbb2b47356420d1`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job remains intentionally blocked until that exact revision is
