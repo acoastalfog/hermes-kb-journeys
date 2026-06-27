@@ -1,7 +1,22 @@
 name: kb_journeys
-version: 0.4.0
-description: "Telegram-native /kb status, /kb sync, /kb write, and /kb review cards backed by KB MCP packets and proposal receipts."
+version: 0.5.0
+description: "Telegram-native KB status and review cards backed by generated kb-engine contracts; sync fails closed until canonical prepare/commit exists."
 author: "Hermes Agent"
 provides_hooks:
   - pre_gateway_dispatch
   - post_llm_call
+descriptor_bundle: generated/kb-engine-descriptors.json
+install_receipt:
+  owner: noc
+  schema_version: 1
+  required_fields:
+    - current_ref
+    - previous_ref
+    - installed_digest
+    - descriptor_digest
+    - installed_at
+    - noc_plan_digest
+  rollback_ref_field: previous_ref
+migrations:
+  - version: 0.5.0
+    hard_break: "/kb sync is temporarily unavailable until kb.sync.prepare/commit; /kbsync and update_kb are removed"
