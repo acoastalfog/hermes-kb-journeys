@@ -130,6 +130,18 @@ INSTALL_RECEIPT_FIELDS = {
     "installed_at",
     "noc_plan_digest",
 }
+EVIDENCE_BINDING_FIELDS = {
+    "target",
+    "preview_digest",
+    "preview_lease",
+    "idempotency_key",
+    "evidence_packet_digest",
+}
+EVIDENCE_ENVELOPE_FIELDS = {
+    *EVIDENCE_BINDING_FIELDS,
+    "evidence_packet",
+    "user_confirmation",
+}
 
 
 def _descriptor_digest(value: Any) -> str:
@@ -142,14 +154,85 @@ def _descriptor_digest(value: Any) -> str:
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
-def _schema_is_concrete(schema: Any) -> bool:
+def _parse_aware_timestamp(value: Any) -> _dt.datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("timestamp is required")
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp is not ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a UTC offset")
+    return parsed.astimezone(_dt.UTC)
+
+
+def _validate_schema(schema: Any, *, path: str = "$") -> None:
     if not isinstance(schema, dict) or not schema:
+        raise ValueError(f"{path} must be a non-empty schema object")
+    has_shape = False
+    ref = schema.get("$ref")
+    if "$ref" in schema:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ValueError(f"{path} has an invalid $ref")
+        has_shape = True
+    for keyword in ("oneOf", "anyOf", "allOf"):
+        if keyword not in schema:
+            continue
+        branches = schema[keyword]
+        if not isinstance(branches, list) or not branches:
+            raise ValueError(f"{path}.{keyword} must contain at least one schema")
+        for index, branch in enumerate(branches):
+            _validate_schema(branch, path=f"{path}.{keyword}[{index}]")
+        has_shape = True
+    schema_type = schema.get("type")
+    if schema_type is not None:
+        if schema_type not in {"array", "boolean", "integer", "null", "number", "object", "string"}:
+            raise ValueError(f"{path} has an unsupported type")
+        has_shape = True
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            raise ValueError(f"{path}.properties must be an object")
+        for name, child in properties.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{path}.properties has an invalid name")
+            _validate_schema(child, path=f"{path}.properties.{name}")
+        required = schema.get("required", [])
+        if not isinstance(required, list) or any(not isinstance(item, str) or not item for item in required):
+            raise ValueError(f"{path}.required must contain field names")
+        if len(required) != len(set(required)) or any(item not in properties for item in required):
+            raise ValueError(f"{path}.required must be unique and reference properties")
+        additional = schema.get("additionalProperties", True)
+        if not isinstance(additional, bool):
+            _validate_schema(additional, path=f"{path}.additionalProperties")
+    if schema_type == "array":
+        if "items" not in schema:
+            raise ValueError(f"{path}.items is required for arrays")
+        _validate_schema(schema["items"], path=f"{path}.items")
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
+        raise ValueError(f"{path}.enum must not be empty")
+    if "const" in schema or "enum" in schema:
+        has_shape = True
+    if not has_shape:
+        raise ValueError(f"{path} has no type, reference, composition, enum, or const")
+
+
+def _schema_is_concrete(schema: Any, *, require_required: bool = False) -> bool:
+    try:
+        _validate_schema(schema)
+    except ValueError:
         return False
-    if any(key in schema for key in ("$ref", "oneOf", "anyOf", "allOf")):
+    if any(isinstance(schema.get(key), list) and schema[key] for key in ("$ref", "oneOf", "anyOf", "allOf")):
+        return True
+    if isinstance(schema.get("$ref"), str) and schema["$ref"].strip():
         return True
     properties = schema.get("properties")
     if schema.get("type") == "object":
-        return isinstance(properties, dict) and bool(properties)
+        required = schema.get("required")
+        if not isinstance(properties, dict) or not properties:
+            return False
+        return not require_required or (isinstance(required, list) and bool(required))
     return schema.get("type") in {"array", "boolean", "integer", "number", "string"}
 
 
@@ -166,6 +249,8 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
         raise ValueError("unsupported descriptor bundle schema")
     if body.get("profile") != DESCRIPTOR_PROFILE:
         raise ValueError("descriptor bundle is not the strict journey profile")
+    if body.get("selection") != "primary_chat":
+        raise ValueError("descriptor bundle is not the canonical primary_chat selection")
     if not isinstance(body.get("engine_version"), str) or not body["engine_version"].strip():
         raise ValueError("descriptor bundle has no engine version")
     engine_revision = body.get("engine_source_revision")
@@ -190,14 +275,19 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
         output_schema = descriptor.get("output_schema")
         if not isinstance(input_schema, dict) or not isinstance(output_schema, dict):
             raise ValueError(f"tool descriptor {name} must include concrete schemas")
-        if not _schema_is_concrete(input_schema):
-            raise ValueError(f"tool descriptor {name} has an unconstrained input schema")
-        if not _schema_is_concrete(output_schema):
-            raise ValueError(f"tool descriptor {name} has an unconstrained output schema")
-        for key in ("input_schema_digest", "output_schema_digest"):
-            found = descriptor.get(key)
+        for label, schema in (("input", input_schema), ("output", output_schema)):
+            try:
+                _validate_schema(schema)
+            except ValueError as exc:
+                raise ValueError(f"tool descriptor {name} has an invalid {label} schema: {exc}") from exc
+            if not _schema_is_concrete(schema, require_required=label == "output"):
+                raise ValueError(f"tool descriptor {name} has an unconstrained {label} schema")
+            digest_key = f"{label}_schema_digest"
+            found = descriptor.get(digest_key)
             if not isinstance(found, str) or not DESCRIPTOR_DIGEST_RE.fullmatch(found):
-                raise ValueError(f"tool descriptor {name} has an invalid schema digest")
+                raise ValueError(f"tool descriptor {name} has an invalid {label} schema digest")
+            if found != _descriptor_digest(schema):
+                raise ValueError(f"tool descriptor {name} {label} schema digest does not match")
         tool_map[name] = descriptor
     actions = body.get("actions")
     if not isinstance(actions, list):
@@ -205,6 +295,11 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
     for action in actions:
         if not isinstance(action, dict) or action.get("name") not in tool_map:
             raise ValueError("descriptor bundle action is not selected")
+        selected = tool_map[str(action["name"])]
+        if action.get("input_schema_digest") != selected.get("input_schema_digest"):
+            raise ValueError("descriptor bundle action input schema digest does not match")
+        if action.get("output_schema_digest") != selected.get("output_schema_digest"):
+            raise ValueError("descriptor bundle action output schema digest does not match")
     return {**body, "digest": digest}, tool_map
 
 
@@ -221,14 +316,22 @@ def _load_descriptor_bundle(path: Path = DESCRIPTOR_PATH) -> tuple[dict[str, Any
 _DESCRIPTOR_BUNDLE, _DESCRIPTOR_TOOLS, _DESCRIPTOR_ERROR = _load_descriptor_bundle()
 
 
+def _descriptor_allowlist() -> frozenset[str]:
+    if not 1 <= len(_DESCRIPTOR_TOOLS) <= 12:
+        return frozenset()
+    return frozenset(_DESCRIPTOR_TOOLS)
+
+
 def _descriptor(name: Any) -> dict[str, Any] | None:
     clean = str(name or "").strip()
+    if clean not in _descriptor_allowlist():
+        return None
     descriptor = _DESCRIPTOR_TOOLS.get(clean)
     return dict(descriptor) if isinstance(descriptor, dict) else None
 
 
 def _plugin_readiness() -> dict[str, Any]:
-    descriptor_status = "ready" if _DESCRIPTOR_TOOLS else "blocked"
+    descriptor_status = "ready" if _descriptor_allowlist() else "blocked"
     if not _KB_ACTION_AVAILABLE:
         status = "text_only_degraded" if descriptor_status == "ready" else "blocked"
     else:
@@ -273,6 +376,10 @@ def _parse_install_receipt(value: Any) -> dict[str, str]:
     for key in ("installed_digest", "descriptor_digest", "noc_plan_digest"):
         if not DESCRIPTOR_DIGEST_RE.fullmatch(receipt[key]):
             raise ValueError(f"install receipt {key} is invalid")
+    try:
+        _parse_aware_timestamp(receipt["installed_at"])
+    except ValueError as exc:
+        raise ValueError(f"install receipt installed_at is invalid: {exc}") from exc
     return receipt
 
 
@@ -280,7 +387,7 @@ def _rollback_ref(receipt: dict[str, str]) -> str:
     return _parse_install_receipt(receipt)["previous_ref"]
 
 
-def _render_install_receipt(value: Any) -> dict[str, Any]:
+def _render_install_receipt(value: Any, *, installed_evidence: Any = None) -> dict[str, Any]:
     try:
         receipt = _parse_install_receipt(value)
     except ValueError as exc:
@@ -290,12 +397,35 @@ def _render_install_receipt(value: Any) -> dict[str, Any]:
             "text": f"Hermes KB Plugin Install\nInstall receipt is invalid: {exc}",
             "actions": [],
         }
+    evidence = installed_evidence if isinstance(installed_evidence, dict) else {}
+    evidence_matches = (
+        evidence.get("ref_verified") is True
+        and evidence.get("artifact_verified") is True
+        and str(evidence.get("current_ref") or "") == receipt["current_ref"]
+        and str(evidence.get("installed_digest") or "") == receipt["installed_digest"]
+        and str(evidence.get("descriptor_digest") or "") == receipt["descriptor_digest"]
+    )
+    try:
+        _parse_aware_timestamp(evidence.get("observed_at"))
+    except ValueError:
+        evidence_matches = False
+    descriptor_matches = bool(
+        _DESCRIPTOR_BUNDLE
+        and receipt["descriptor_digest"] == _DESCRIPTOR_BUNDLE.get("digest")
+    )
+    verified = descriptor_matches and evidence_matches
+    posture = (
+        "Verified against the loaded descriptor bundle and NOC artifact/ref evidence."
+        if verified
+        else "Receipt recorded, not live verification of the installed artifact or ref."
+    )
     return {
         "title": "Hermes KB Plugin Install",
-        "status": "observed",
+        "status": "verified" if verified else "recorded",
         "text": "\n".join(
             [
                 "Hermes KB Plugin Install",
+                posture,
                 f"Current ref: {receipt['current_ref']}",
                 f"Previous ref: {receipt['previous_ref']}",
                 f"Installed digest: {receipt['installed_digest']}",
@@ -2010,7 +2140,11 @@ def _dispatch_first(
 ) -> tuple[str | None, Any | None, list[str]]:
     errors: list[str] = []
     for kb_tool, args in candidates:
-        registry_name = _mcp_tool_name(target, kb_tool)
+        capability = str(kb_tool or "").strip()
+        if capability not in _descriptor_allowlist():
+            errors.append(f"{capability}: not present in generated descriptor allowlist")
+            continue
+        registry_name = _mcp_tool_name(target, capability)
         try:
             payload, error = _unwrap_tool_result(ctx.dispatch_tool(registry_name, args))
         except Exception as exc:
@@ -5452,7 +5586,8 @@ def _publication_git_line(git_state: Any) -> str:
 
 
 def _closeout_packet(ctx: Any, target: str) -> Any:
-    return _result_payload(ctx.dispatch_tool(_mcp_tool_name(target, "closeout.packet"), {"limit": 5}))
+    _tool, payload, _errors = _dispatch_first(ctx, target, [("closeout.packet", {"limit": 5})])
+    return payload
 
 
 def _closeout_action_descriptors_from_payload(payload: Any) -> list[dict[str, Any]]:
@@ -6499,16 +6634,18 @@ def _workflow_initial_progress_text(
     *,
     include_run_details: bool = True,
 ) -> str:
-    payload = _result_payload(
-        ctx.dispatch_tool(
-            _mcp_tool_name(target, "run.watch"),
-            {
-                "run_id": run_id,
-                "timeout_seconds": 0,
-                "poll_interval_seconds": 1,
-                "timeline_limit": 5,
-            },
-        )
+    _tool, payload, _errors = _dispatch_first(
+        ctx,
+        target,
+        [
+            (
+                "run.summary",
+                {
+                    "run_id": run_id,
+                    "timeline_limit": 5,
+                },
+            )
+        ],
     )
     if isinstance(payload, dict) and payload.get("error"):
         return "Initial progress: unavailable - " + _short(payload.get("error"))
@@ -7246,16 +7383,24 @@ def _save_capture_states(states: dict[str, Any]) -> None:
         logger.debug("kb_journeys: failed to persist capture preview state", exc_info=True)
 
 
-def _store_capture_preview_state(session_id: str, *, source: Any, target: str, packet: dict[str, Any]) -> None:
+def _store_capture_preview_state(
+    session_id: str,
+    *,
+    source: Any,
+    target: str,
+    packet: dict[str, Any],
+    preview_binding: dict[str, Any],
+) -> None:
     if not session_id:
         return
     states = _load_capture_states()
     states[session_id] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "recorded_at": time.time(),
         "actor_id": _telegram_user_id(source),
         "target": target,
         "packet": packet,
+        "preview_binding": preview_binding,
     }
     _save_capture_states(states)
 
@@ -7274,7 +7419,9 @@ def _get_capture_preview_state(session_id: str, source: Any) -> tuple[dict[str, 
     current_actor = _telegram_user_id(source)
     if actor_id and current_actor and actor_id != current_actor:
         return None, "wrong_actor"
-    if not isinstance(state.get("packet"), dict):
+    if state.get("schema_version") != 2:
+        return None, "invalid"
+    if not isinstance(state.get("packet"), dict) or not isinstance(state.get("preview_binding"), dict):
         return None, "invalid"
     return state, ""
 
@@ -7325,7 +7472,7 @@ def _build_telegram_capture_packet(
         "connector_id": CAPTURE_CONNECTOR_ID,
         "harness_id": harness_id,
         "collected_at": _capture_now(),
-        "requested_journey": "kb_sync",
+        "requested_journey": "evidence_remember",
         "items": [item],
         "provenance": {
             "source_refs": [f"telegram://chat/{chat_id}/message/{message_id}"],
@@ -7337,12 +7484,121 @@ def _build_telegram_capture_packet(
     }
 
 
+def _evidence_contract_ready() -> bool:
+    preview = _descriptor("evidence.remember.preview")
+    confirmed = _descriptor("evidence.remember.confirmed")
+    if preview is None or confirmed is None:
+        return False
+    preview_output = preview.get("output_schema")
+    confirmed_input = confirmed.get("input_schema")
+    if not isinstance(preview_output, dict) or not isinstance(confirmed_input, dict):
+        return False
+    preview_properties = preview_output.get("properties")
+    preview_required = preview_output.get("required")
+    if not isinstance(preview_properties, dict) or not isinstance(preview_required, list):
+        return False
+    if not EVIDENCE_BINDING_FIELDS.issubset(preview_properties) or not EVIDENCE_BINDING_FIELDS.issubset(
+        set(preview_required)
+    ):
+        return False
+    input_properties = confirmed_input.get("properties")
+    input_required = confirmed_input.get("required")
+    if not isinstance(input_properties, dict) or not isinstance(input_required, list) or "envelope" not in input_required:
+        return False
+    envelope = input_properties.get("envelope")
+    if not isinstance(envelope, dict):
+        return False
+    envelope_properties = envelope.get("properties")
+    envelope_required = envelope.get("required")
+    return bool(
+        isinstance(envelope_properties, dict)
+        and isinstance(envelope_required, list)
+        and EVIDENCE_ENVELOPE_FIELDS.issubset(envelope_properties)
+        and EVIDENCE_ENVELOPE_FIELDS.issubset(set(envelope_required))
+    )
+
+
+def _evidence_preview_binding(
+    preview: Any,
+    *,
+    target: str,
+    packet: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(preview, dict) or preview.get("ok") is not True:
+        return None, "preview_not_ready"
+    if str(preview.get("status") or "").strip().lower() not in {"confirmation_required", "preview_ready"}:
+        return None, "preview_not_ready"
+    observed_target = str(preview.get("target") or "").strip()
+    if not observed_target or observed_target != target:
+        return None, "preview_target_mismatch"
+    preview_digest = str(preview.get("preview_digest") or "").strip()
+    packet_digest = str(preview.get("evidence_packet_digest") or "").strip()
+    if not DESCRIPTOR_DIGEST_RE.fullmatch(preview_digest):
+        return None, "invalid_preview_digest"
+    if packet_digest != _descriptor_digest(packet):
+        return None, "evidence_packet_digest_mismatch"
+    idempotency_key = str(preview.get("idempotency_key") or "").strip()
+    if not idempotency_key:
+        return None, "missing_idempotency_key"
+    lease = preview.get("preview_lease")
+    if not isinstance(lease, dict) or not str(lease.get("lease_id") or "").strip():
+        return None, "invalid_preview_lease"
+    try:
+        expires_at = _parse_aware_timestamp(lease.get("expires_at"))
+    except ValueError:
+        return None, "invalid_preview_lease"
+    if expires_at <= _dt.datetime.now(_dt.UTC):
+        return None, "expired_preview_lease"
+    safe_lease = json.loads(json.dumps(lease, ensure_ascii=False, sort_keys=True))
+    return {
+        "target": target,
+        "preview_digest": preview_digest,
+        "preview_lease": safe_lease,
+        "idempotency_key": idempotency_key,
+        "evidence_packet_digest": packet_digest,
+    }, ""
+
+
+def _evidence_confirm_envelope(
+    state: Any,
+    *,
+    target: str,
+    actor_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if not _evidence_contract_ready():
+        return None, "confirmed_envelope_unavailable"
+    if target != _mcp_target():
+        return None, "active_target_mismatch"
+    if not isinstance(state, dict) or str(state.get("target") or "") != target:
+        return None, "stored_target_mismatch"
+    packet = state.get("packet")
+    binding = state.get("preview_binding")
+    if not isinstance(packet, dict) or not isinstance(binding, dict):
+        return None, "invalid_preview_state"
+    rebound, reason = _evidence_preview_binding(
+        {"ok": True, "status": "preview_ready", **binding},
+        target=target,
+        packet=packet,
+    )
+    if rebound is None:
+        return None, reason
+    return {
+        **rebound,
+        "evidence_packet": packet,
+        "user_confirmation": {
+            "confirmed": True,
+            "surface": "telegram",
+            "actor_id": str(actor_id or "").strip(),
+        },
+    }, ""
+
+
 def _render_capture_command(
     ctx: Any, target: str, args: str, *, event: Any = None, source: Any = None, session_store: Any = None
 ) -> dict[str, Any]:
     preview_tool = _descriptor_tool_name(target, "evidence.remember.preview")
     confirmed_tool = _descriptor_tool_name(target, "evidence.remember.confirmed")
-    if not preview_tool or not confirmed_tool:
+    if not preview_tool or not confirmed_tool or not _evidence_contract_ready():
         return _capability_unavailable(
             "KB Capture",
             ("evidence.remember.preview", "evidence.remember.confirmed"),
@@ -7357,9 +7613,21 @@ def _render_capture_command(
         state, reason = _get_capture_preview_state(session_id, source)
         if state is None:
             return {"title": "KB Capture", "text": f"KB Capture\nNothing to confirm ({reason}). Reply /kb capture to a message first.", "actions": []}
+        envelope, reason = _evidence_confirm_envelope(
+            state,
+            target=target,
+            actor_id=_telegram_user_id(source),
+        )
+        if envelope is None:
+            return {
+                "title": "KB Capture",
+                "status": "blocked",
+                "text": f"KB Capture\nConfirmation blocked ({reason}). No KB state changed.",
+                "actions": [],
+            }
         _, data, errors = _dispatch_first(
             ctx, target,
-            [("evidence.remember.confirmed", {"evidence_packet": state.get("packet"), "user_confirmation": {"confirmed": True}})],
+            [("evidence.remember.confirmed", {"envelope": envelope})],
         )
         if data is None:
             return _render_error("KB Capture", target, errors)
@@ -7374,7 +7642,21 @@ def _render_capture_command(
     _, data, errors = _dispatch_first(ctx, target, [("evidence.remember.preview", {"evidence_packet": packet})])
     if data is None:
         return _render_error("KB Capture", target, errors)
-    _store_capture_preview_state(session_id, source=source, target=target, packet=packet)
+    binding, reason = _evidence_preview_binding(data, target=target, packet=packet)
+    if binding is None:
+        return {
+            "title": "KB Capture",
+            "status": "blocked",
+            "text": f"KB Capture\nPreview binding is invalid ({reason}). No KB state changed.",
+            "actions": [],
+        }
+    _store_capture_preview_state(
+        session_id,
+        source=source,
+        target=target,
+        packet=packet,
+        preview_binding=binding,
+    )
     preview = _short(captured_text, "")[:160]
     lines = ["KB Capture - preview", f"Will capture as {CAPTURE_SOURCE_ID} (id {chat_id}:{message_id})."]
     if preview:
@@ -7383,22 +7665,30 @@ def _render_capture_command(
     return {"title": "KB Capture", "text": "\n".join(lines), "actions": []}
 
 
-def _matching_readback_identity(receipt: dict[str, Any], readback: dict[str, Any]) -> tuple[str, str] | None:
+def _matching_readback_identity(receipt: dict[str, Any], readback: dict[str, Any]) -> dict[str, str] | None:
+    shared: dict[str, str] = {}
     for key in ("object_id", "ledger_id", "transaction_id", "receipt_id", "operation_id"):
         expected = str(receipt.get(key) or "").strip()
         observed = str(readback.get(key) or "").strip()
-        if expected and observed and expected == observed:
-            return key, expected
-    return None
+        if not expected or not observed:
+            continue
+        if expected != observed:
+            return None
+        shared[key] = expected
+    return shared or None
 
 
-def _matching_readback_digest(receipt: dict[str, Any], readback: dict[str, Any]) -> tuple[str, str] | None:
+def _matching_readback_digest(receipt: dict[str, Any], readback: dict[str, Any]) -> dict[str, str] | None:
+    shared: dict[str, str] = {}
     for key in ("content_digest", "state_digest", "ledger_digest", "object_digest"):
         expected = str(receipt.get(key) or "").strip()
         observed = str(readback.get(key) or "").strip()
-        if expected and observed and expected == observed and DESCRIPTOR_DIGEST_RE.fullmatch(expected):
-            return key, expected
-    return None
+        if not expected or not observed:
+            continue
+        if expected != observed or not DESCRIPTOR_DIGEST_RE.fullmatch(expected):
+            return None
+        shared[key] = expected
+    return shared or None
 
 
 def _durable_completion(data: Any) -> dict[str, Any]:
@@ -7431,8 +7721,9 @@ def _durable_completion(data: Any) -> dict[str, Any]:
         "complete": True,
         "reason": "verified",
         "status": status,
-        "identity": {identity[0]: identity[1]},
-        "digest": digest[1],
+        "identity": identity,
+        "digest": next(iter(digest.values())),
+        "digests": digest,
     }
 
 
@@ -7450,7 +7741,16 @@ def _evidence_completion(data: Any) -> dict[str, Any]:
     identity = _matching_readback_identity(receipt, readback)
     if identity is None:
         return {"complete": False, "reason": "identity_mismatch"}
-    return {"complete": True, "reason": "verified", "identity": {identity[0]: identity[1]}}
+    digest = _matching_readback_digest(receipt, readback)
+    if digest is None:
+        return {"complete": False, "reason": "digest_mismatch"}
+    return {
+        "complete": True,
+        "reason": "verified",
+        "identity": identity,
+        "digest": next(iter(digest.values())),
+        "digests": digest,
+    }
 
 
 def _render_evidence_completion(data: Any, *, title: str) -> dict[str, Any]:
@@ -7472,13 +7772,10 @@ def _write_landed(data: Any) -> bool:
 def _render_write_command(
     ctx: Any, target: str, args: str, *, event: Any = None, source: Any = None, session_store: Any = None
 ) -> dict[str, Any]:
-    """/kb write [<anchor> | ] <note> — save a freeform durable note into the
-    append-only capture/evidence lane (no synthesis ceremony), with a readback
-    gate on confirm. Mirrors /kb capture's closure pattern; the LLM holds no
-    lease/envelope state."""
+    """Remember a freeform evidence note through a digest-bound preview envelope."""
     preview_tool = _descriptor_tool_name(target, "evidence.remember.preview")
     confirmed_tool = _descriptor_tool_name(target, "evidence.remember.confirmed")
-    if not preview_tool or not confirmed_tool:
+    if not preview_tool or not confirmed_tool or not _evidence_contract_ready():
         return _capability_unavailable(
             "KB Write",
             ("evidence.remember.preview", "evidence.remember.confirmed"),
@@ -7494,9 +7791,21 @@ def _render_write_command(
         state, reason = _get_capture_preview_state(write_session, source)
         if state is None:
             return {"title": "KB Write", "text": f"KB Write\nNothing to confirm ({reason}). Send /kb write <note> first.", "actions": []}
+        envelope, reason = _evidence_confirm_envelope(
+            state,
+            target=target,
+            actor_id=_telegram_user_id(source),
+        )
+        if envelope is None:
+            return {
+                "title": "KB Write",
+                "status": "blocked",
+                "text": f"KB Write\nConfirmation blocked ({reason}). No KB state changed.",
+                "actions": [],
+            }
         _, data, errors = _dispatch_first(
             ctx, target,
-            [("evidence.remember.confirmed", {"evidence_packet": state.get("packet"), "user_confirmation": {"confirmed": True}})],
+            [("evidence.remember.confirmed", {"envelope": envelope})],
         )
         if data is None:
             return _render_error("KB Write", target, errors)
@@ -7521,9 +7830,23 @@ def _render_write_command(
     _, data, errors = _dispatch_first(ctx, target, [("evidence.remember.preview", {"evidence_packet": packet})])
     if data is None:
         return _render_error("KB Write", target, errors)
-    _store_capture_preview_state(write_session, source=source, target=target, packet=packet)
+    binding, reason = _evidence_preview_binding(data, target=target, packet=packet)
+    if binding is None:
+        return {
+            "title": "KB Write",
+            "status": "blocked",
+            "text": f"KB Write\nPreview binding is invalid ({reason}). No KB state changed.",
+            "actions": [],
+        }
+    _store_capture_preview_state(
+        write_session,
+        source=source,
+        target=target,
+        packet=packet,
+        preview_binding=binding,
+    )
     preview = _short(body, "")[:160]
-    lines = ["KB Write - preview", f"Will save as a durable note ({CAPTURE_SOURCE_ID})."]
+    lines = ["KB Write - preview", f"Will remember as evidence ({CAPTURE_SOURCE_ID}); no semantic write is implied."]
     if anchor:
         lines.append(f"Anchor: {anchor}")
     if preview:

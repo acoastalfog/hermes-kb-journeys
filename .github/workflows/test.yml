@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   contract:
+    env:
+      KB_ENGINE_DESCRIPTOR_REF: a4bad91b71c80f242d68cabf7c3adc10f37b632f
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -24,11 +26,17 @@ jobs:
           repository: NousResearch/hermes-agent
           ref: ${{ matrix.hermes_ref }}
           path: hermes-agent
-      - uses: actions/checkout@v4
-        with:
-          repository: acoastalfog/kb-engine
-          ref: 3e39d7fcce7e4c5b195901daf640019069f32fff
-          path: kb-engine
+      - name: Fetch exact pinned kb-engine descriptor source
+        shell: bash
+        run: |
+          git init kb-engine
+          git -C kb-engine remote add origin https://github.com/acoastalfog/kb-engine.git
+          if ! git -C kb-engine fetch --depth=1 origin "$KB_ENGINE_DESCRIPTOR_REF"; then
+            echo "::error::Pinned kb-engine descriptor revision $KB_ENGINE_DESCRIPTOR_REF is not published. H1 CI is intentionally blocked until the coordinated K3 ref is reachable."
+            exit 1
+          fi
+          git -C kb-engine checkout --detach FETCH_HEAD
+          test "$(git -C kb-engine rev-parse HEAD)" = "$KB_ENGINE_DESCRIPTOR_REF"
       - uses: astral-sh/setup-uv@v6
       - name: Verify generated descriptors
         env:

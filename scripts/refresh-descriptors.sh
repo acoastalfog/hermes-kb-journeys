@@ -20,7 +20,10 @@ tmp_dir=$(mktemp -d)
 trap 'rm -rf "${tmp_dir}"' EXIT
 raw=${tmp_dir}/raw.json
 
-python3 "${exporter}" --profile journey_first_strict --output "${raw}"
+python3 "${exporter}" \
+  --profile journey_first_strict \
+  --selection primary_chat \
+  --output "${raw}"
 python3 - "${raw}" "${output}" "${engine_revision}" <<'PY'
 from __future__ import annotations
 
@@ -30,20 +33,6 @@ import sys
 from pathlib import Path
 
 
-selected_names = {
-    "attention.cockpit",
-    "lifecycle.review",
-    "publication.status",
-    "review.batch_decide_confirmed",
-    "review.decision_preview",
-    "review.inbox",
-    "review.restore_confirmed",
-    "review.restore_preview",
-    "run.health",
-    "run.summary",
-    "workflow.plan_request",
-    "workflow.start_confirmed",
-}
 legacy_names = {"kb_sync.preview", "kb_sync.confirmed", "update_kb"}
 
 
@@ -55,32 +44,26 @@ def digest(value: object) -> str:
 
 
 source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-tools = [
-    tool
-    for tool in source.get("tools", [])
-    if tool.get("name") in selected_names and tool.get("name") not in legacy_names
-]
-found = {tool.get("name") for tool in tools}
-missing = sorted(selected_names - found)
-if missing:
-    raise SystemExit("exporter is missing selected Hermes descriptors: " + ", ".join(missing))
-actions = [action for action in source.get("actions", []) if action.get("name") in found]
-journeys = []
-for journey in source.get("journeys", []):
+if source.get("selection") != "primary_chat":
+    raise SystemExit("exporter did not return the primary_chat selection")
+tools = source.get("tools")
+if not isinstance(tools, list) or not 1 <= len(tools) <= 12:
+    raise SystemExit("primary_chat must export between one and twelve tools")
+tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+if tool_names.intersection(legacy_names) or any(str(name).startswith("kb_sync.") for name in tool_names):
+    raise SystemExit("primary_chat export contains a forbidden legacy tool")
+for journey in source.get("journeys") or []:
+    if not isinstance(journey, dict):
+        raise SystemExit("primary_chat export contains an invalid journey row")
     required = set(journey.get("required_tools") or [])
-    if required and required.issubset(found):
-        journeys.append(journey)
+    if journey.get("journey_id") == "kb_sync" or required.intersection(legacy_names):
+        raise SystemExit("primary_chat export contains a forbidden legacy journey")
 
+source_digest = source.pop("digest", None)
 body = {
-    "schema_version": source.get("schema_version"),
-    "engine_version": source.get("engine_version"),
+    **source,
     "engine_source_revision": sys.argv[3],
-    "profile": source.get("profile"),
-    "source_export_digest": source.get("digest"),
-    "selection": "hermes_primary",
-    "journeys": sorted(journeys, key=lambda item: item.get("journey_id", "")),
-    "actions": sorted(actions, key=lambda item: item.get("name", "")),
-    "tools": sorted(tools, key=lambda item: item.get("name", "")),
+    "source_export_digest": source_digest,
 }
 packet = {**body, "digest": digest(body)}
 output = Path(sys.argv[2])

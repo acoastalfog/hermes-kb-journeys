@@ -43,12 +43,13 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-Current integration blocker: kb-engine revision
-`3e39d7fcce7e4c5b195901daf640019069f32fff` still exports unconstrained generic
-object output schemas. The committed export records that upstream truth, but
-the plugin rejects it at load and reports descriptor readiness as blocked.
-Once kb-engine publishes concrete output schemas, regenerate this file; no
-Hermes compatibility schema or hand-written alias is permitted.
+The committed export is pinned to kb-engine revision
+`a4bad91b71c80f242d68cabf7c3adc10f37b632f`, which owns the exact
+`primary_chat` selection and concrete output schemas. No Hermes compatibility
+schema, tool re-selection, or hand-written alias is permitted. The CI
+descriptor job remains intentionally blocked until that exact K3 revision is
+published and remotely reachable; local test results do not count as a green
+GitHub workflow.
 
 ## Gate S migration note
 

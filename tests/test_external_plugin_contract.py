@@ -62,6 +62,15 @@ def _load_plugin_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 def _install_conforming_descriptor_fixture(plugin, monkeypatch: pytest.MonkeyPatch):
+    packet = _conforming_descriptor_packet(plugin)
+    bundle, tools = plugin._validate_descriptor_bundle(packet)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_BUNDLE", bundle)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", tools)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_ERROR", "")
+    return bundle
+
+
+def _conforming_descriptor_packet(plugin):
     packet = json.loads((ROOT / "generated" / "kb-engine-descriptors.json").read_text(encoding="utf-8"))
     body = deepcopy(packet)
     body.pop("digest")
@@ -74,12 +83,92 @@ def _install_conforming_descriptor_fixture(plugin, monkeypatch: pytest.MonkeyPat
         }
         descriptor["output_schema"] = schema
         descriptor["output_schema_digest"] = plugin._descriptor_digest(schema)
-    packet = {**body, "digest": plugin._descriptor_digest(body)}
-    bundle, tools = plugin._validate_descriptor_bundle(packet)
-    monkeypatch.setattr(plugin, "_DESCRIPTOR_BUNDLE", bundle)
-    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", tools)
-    monkeypatch.setattr(plugin, "_DESCRIPTOR_ERROR", "")
-    return bundle
+    tools = {descriptor["name"]: descriptor for descriptor in body["tools"]}
+    for action in body["actions"]:
+        action["input_schema_digest"] = tools[action["name"]]["input_schema_digest"]
+        action["output_schema_digest"] = tools[action["name"]]["output_schema_digest"]
+    return {**body, "digest": plugin._descriptor_digest(body)}
+
+
+def _future_evidence_descriptors():
+    digest = {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    item_schema = {
+        "type": "object",
+        "properties": {"external_id": {"type": "string"}},
+        "required": ["external_id"],
+        "additionalProperties": True,
+    }
+    packet_schema = {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": item_schema}},
+        "required": ["items"],
+        "additionalProperties": True,
+    }
+    lease = {
+        "type": "object",
+        "properties": {
+            "lease_id": {"type": "string"},
+            "expires_at": {"type": "string"},
+        },
+        "required": ["lease_id", "expires_at"],
+        "additionalProperties": False,
+    }
+    binding_properties = {
+        "target": {"type": "string"},
+        "preview_digest": digest,
+        "preview_lease": lease,
+        "idempotency_key": {"type": "string"},
+        "evidence_packet_digest": digest,
+    }
+    binding_required = sorted(binding_properties)
+    return {
+        "evidence.remember.preview": {
+            "name": "evidence.remember.preview",
+            "input_schema": {
+                "type": "object",
+                "properties": {"evidence_packet": packet_schema},
+                "required": ["evidence_packet"],
+                "additionalProperties": False,
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": binding_properties,
+                "required": binding_required,
+                "additionalProperties": True,
+            },
+        },
+        "evidence.remember.confirmed": {
+            "name": "evidence.remember.confirmed",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "envelope": {
+                        "type": "object",
+                        "properties": {
+                            **binding_properties,
+                            "evidence_packet": packet_schema,
+                            "user_confirmation": {
+                                "type": "object",
+                                "properties": {"confirmed": {"type": "boolean"}},
+                                "required": ["confirmed"],
+                                "additionalProperties": True,
+                            },
+                        },
+                        "required": sorted([*binding_required, "evidence_packet", "user_confirmation"]),
+                        "additionalProperties": False,
+                    }
+                },
+                "required": ["envelope"],
+                "additionalProperties": False,
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {"status": {"type": "string"}},
+                "required": ["status"],
+                "additionalProperties": True,
+            },
+        },
+    }
 
 
 class FakeContext:
@@ -323,12 +412,13 @@ def test_kb_capture_fails_closed_until_evidence_contract_is_exported(tmp_path, m
 
 def test_evidence_receipt_uses_evidence_only_wording(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    digest = "sha256:" + "a" * 64
     card = plugin._render_evidence_completion(
         {
             "status": "remembered",
             "ok": True,
-            "receipt": {"confirmed": True, "receipt_id": "ev-1"},
-            "readback": {"status": "verified", "receipt_id": "ev-1"},
+            "receipt": {"confirmed": True, "receipt_id": "ev-1", "content_digest": digest},
+            "readback": {"status": "verified", "receipt_id": "ev-1", "content_digest": digest},
         },
         title="KB Capture",
     )
@@ -396,6 +486,159 @@ def test_durable_completion_requires_identity_and_digest_readback(tmp_path, monk
     }
     assert plugin._durable_completion(payload)["complete"] is True
     assert "Applied" in plugin._confirmed_text("approve", payload, proposal_ids=["p1"])
+
+
+def test_durable_completion_rejects_any_joint_identity_mismatch(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    payload = {
+        "status": "applied",
+        "ok": True,
+        "receipt": {
+            "confirmed": True,
+            "receipt_id": "r-1",
+            "object_id": "todo-1",
+            "content_digest": "sha256:" + "a" * 64,
+        },
+        "readback": {
+            "status": "verified",
+            "receipt_id": "forged-r-2",
+            "object_id": "todo-1",
+            "content_digest": "sha256:" + "a" * 64,
+        },
+    }
+    proof = plugin._durable_completion(payload)
+    assert proof["complete"] is False
+    assert proof["reason"] == "identity_mismatch"
+
+
+def test_evidence_completion_requires_digest_bound_readback(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    receipt_id_only = {
+        "status": "remembered",
+        "ok": True,
+        "receipt": {"confirmed": True, "receipt_id": "ev-1"},
+        "readback": {"status": "verified", "receipt_id": "ev-1"},
+    }
+    assert plugin._evidence_completion(receipt_id_only) == {
+        "complete": False,
+        "reason": "digest_mismatch",
+    }
+
+
+def test_future_evidence_route_requires_confirmed_envelope_schema(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plugin,
+        "_DESCRIPTOR_TOOLS",
+        {
+            "evidence.remember.preview": {"name": "evidence.remember.preview"},
+            "evidence.remember.confirmed": {"name": "evidence.remember.confirmed"},
+        },
+    )
+    assert plugin._evidence_contract_ready() is False
+    ctx = FakeContext({})
+    source = _FakeSource()
+    card = plugin._render_capture_command(
+        ctx,
+        "kb_engine_prod",
+        "note",
+        event=_FakeEvent(source, text="/kb capture note"),
+        source=source,
+        session_store=None,
+    )
+    assert card["status"] == "temporarily_unavailable"
+    assert ctx.calls == []
+
+
+def test_future_evidence_envelope_binds_preview_and_active_target(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", _future_evidence_descriptors())
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    packet = {"items": [{"external_id": "telegram:1"}]}
+    packet_digest = plugin._descriptor_digest(packet)
+    preview = {
+        "status": "preview_ready",
+        "ok": True,
+        "target": "kb_engine_prod",
+        "preview_digest": "sha256:" + "a" * 64,
+        "preview_lease": {"lease_id": "lease-1", "expires_at": "2099-06-27T00:00:00Z"},
+        "idempotency_key": "idem-1",
+        "evidence_packet_digest": packet_digest,
+    }
+    binding, reason = plugin._evidence_preview_binding(preview, target="kb_engine_prod", packet=packet)
+    assert reason == ""
+    state = {"target": "kb_engine_prod", "packet": packet, "preview_binding": binding}
+    envelope, reason = plugin._evidence_confirm_envelope(
+        state,
+        target="kb_engine_prod",
+        actor_id="42",
+    )
+    assert reason == ""
+    assert envelope["target"] == "kb_engine_prod"
+    assert envelope["preview_digest"] == preview["preview_digest"]
+    assert envelope["preview_lease"] == preview["preview_lease"]
+    assert envelope["idempotency_key"] == "idem-1"
+    assert envelope["evidence_packet_digest"] == packet_digest
+    assert envelope["evidence_packet"] == packet
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "other_target")
+    assert plugin._evidence_confirm_envelope(state, target="kb_engine_prod", actor_id="42") == (
+        None,
+        "active_target_mismatch",
+    )
+
+
+def test_future_evidence_confirm_dispatches_only_bound_envelope(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", _future_evidence_descriptors())
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    source = _FakeSource()
+    packet = {"items": [{"external_id": "telegram:1"}]}
+    packet_digest = plugin._descriptor_digest(packet)
+    preview = {
+        "status": "preview_ready",
+        "ok": True,
+        "target": "kb_engine_prod",
+        "preview_digest": "sha256:" + "a" * 64,
+        "preview_lease": {"lease_id": "lease-1", "expires_at": "2099-06-27T00:00:00Z"},
+        "idempotency_key": "idem-1",
+        "evidence_packet_digest": packet_digest,
+    }
+    binding, _reason = plugin._evidence_preview_binding(preview, target="kb_engine_prod", packet=packet)
+    state = {"target": "kb_engine_prod", "packet": packet, "preview_binding": binding}
+    monkeypatch.setattr(plugin, "_get_capture_preview_state", lambda *_args: (state, ""))
+    cleared: list[str] = []
+    monkeypatch.setattr(plugin, "_clear_capture_preview_state", cleared.append)
+    result_digest = "sha256:" + "b" * 64
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_evidence_remember_confirmed": [
+                {
+                    "status": "remembered",
+                    "ok": True,
+                    "receipt": {"confirmed": True, "receipt_id": "ev-1", "content_digest": result_digest},
+                    "readback": {"status": "verified", "receipt_id": "ev-1", "content_digest": result_digest},
+                }
+            ]
+        }
+    )
+    card = plugin._render_capture_command(
+        ctx,
+        "kb_engine_prod",
+        "confirm",
+        event=_FakeEvent(source, text="/kb capture confirm"),
+        source=source,
+        session_store=None,
+    )
+    assert "Evidence remembered" in card["text"]
+    assert len(ctx.calls) == 1
+    tool, args = ctx.calls[0]
+    assert tool == "mcp_kb_engine_prod_evidence_remember_confirmed"
+    assert set(args) == {"envelope"}
+    assert args["envelope"]["preview_digest"] == preview["preview_digest"]
+    assert args["envelope"]["preview_lease"] == preview["preview_lease"]
+    assert args["envelope"]["idempotency_key"] == "idem-1"
+    assert args["envelope"]["target"] == "kb_engine_prod"
+    assert cleared
 
 
 # --- Phase A Task 1: expandable blockquote for long bodies ---
@@ -656,14 +899,17 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     source = json.loads((ROOT / "generated" / "kb-engine-descriptors.json").read_text(encoding="utf-8"))
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
+    assert source["selection"] == "primary_chat"
+    assert source["engine_source_revision"] == "a4bad91b71c80f242d68cabf7c3adc10f37b632f"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
-    assert len(source["tools"]) <= 12
+    assert len(source["tools"]) == 12
     serialized = json.dumps(source, sort_keys=True)
     assert "kb_sync" not in serialized
     assert "update_kb" not in serialized
-    assert plugin._DESCRIPTOR_BUNDLE == {}
-    assert "unconstrained output schema" in plugin._DESCRIPTOR_ERROR
+    assert plugin._DESCRIPTOR_BUNDLE == source
+    assert plugin._DESCRIPTOR_ERROR == ""
+    assert len(plugin._descriptor_allowlist()) == 12
 
 
 def test_conforming_concrete_output_fixture_loads(tmp_path, monkeypatch):
@@ -673,12 +919,102 @@ def test_conforming_concrete_output_fixture_loads(tmp_path, monkeypatch):
     assert plugin._plugin_readiness()["descriptors"] == "ready"
 
 
+def test_descriptor_validation_recomputes_schema_digests(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    packet["tools"][0]["output_schema_digest"] = "sha256:" + "0" * 64
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="output schema digest does not match"):
+        plugin._validate_descriptor_bundle(packet)
+
+
+def test_descriptor_validation_rejects_empty_composition(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    empty_schema = {"anyOf": []}
+    packet["tools"][0]["output_schema"] = empty_schema
+    packet["tools"][0]["output_schema_digest"] = plugin._descriptor_digest(empty_schema)
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="invalid output schema"):
+        plugin._validate_descriptor_bundle(packet)
+
+
 def test_unconstrained_export_blocks_descriptor_dispatch(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    generic = {"type": "object", "additionalProperties": True}
+    packet["tools"][0]["output_schema"] = generic
+    packet["tools"][0]["output_schema_digest"] = plugin._descriptor_digest(generic)
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="unconstrained output schema"):
+        plugin._validate_descriptor_bundle(packet)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_BUNDLE", {})
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", {})
     ctx = FakeContext({})
     card = plugin._card_for_command(ctx, "kb", args="review")
     assert card["status"] == "temporarily_unavailable"
     assert card["actions"] == []
+    assert ctx.calls == []
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("kb", ""),
+        ("kbworkbench", ""),
+        ("kbtoday", ""),
+        ("kbstatus", ""),
+        ("kbruns", ""),
+        ("kbreview", ""),
+        ("kbpublish", ""),
+        ("kbmeeting", ""),
+    ],
+)
+def test_invalid_descriptor_bundle_blocks_every_root_dispatch(command, args, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_BUNDLE", {})
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", {})
+    ctx = FakeContext({})
+    plugin._card_for_command(ctx, command, args=args)
+    assert ctx.calls == []
+
+
+def test_dispatch_first_skips_every_non_allowlisted_tool(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_attention_cockpit": [{"status": "ready"}],
+            "mcp_kb_engine_prod_dashboard_live": [{"status": "should-not-run"}],
+        }
+    )
+    selected, payload, errors = plugin._dispatch_first(
+        ctx,
+        "kb_engine_prod",
+        [("dashboard.live", {}), ("attention.cockpit", {})],
+    )
+    assert selected == "mcp_kb_engine_prod_attention_cockpit"
+    assert payload == {"status": "ready"}
+    assert ctx.calls == [("mcp_kb_engine_prod_attention_cockpit", {})]
+    assert errors == ["dashboard.live: not present in generated descriptor allowlist"]
+
+
+def test_runtime_rejects_more_than_twelve_effective_tools(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plugin,
+        "_DESCRIPTOR_TOOLS",
+        {f"tool.{index}": {"name": f"tool.{index}"} for index in range(13)},
+    )
+    ctx = FakeContext({"mcp_kb_engine_prod_tool_0": [{"status": "must-not-run"}]})
+    assert plugin._descriptor_allowlist() == frozenset()
+    assert plugin._dispatch_first(ctx, "kb_engine_prod", [("tool.0", {})])[1] is None
     assert ctx.calls == []
 
 
@@ -711,8 +1047,61 @@ def test_install_receipt_reports_previous_ref_and_rollback_command(tmp_path, mon
     assert receipt["previous_ref"] == "v0.4.0"
     assert plugin._rollback_ref(receipt) == "v0.4.0"
     rendered = plugin._render_install_receipt(receipt)
-    assert rendered["status"] == "observed"
+    assert rendered["status"] == "recorded"
+    assert "recorded, not live verification" in rendered["text"]
     assert "Previous ref: v0.4.0" in rendered["text"]
+
+
+def test_install_receipt_requires_valid_timezone_timestamp(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="installed_at"):
+        plugin._parse_install_receipt(
+            {
+                "current_ref": "v0.5.0",
+                "previous_ref": "v0.4.0",
+                "installed_digest": "sha256:" + "a" * 64,
+                "descriptor_digest": "sha256:" + "b" * 64,
+                "installed_at": "2026-06-27T00:00:00",
+                "noc_plan_digest": "sha256:" + "c" * 64,
+            }
+        )
+
+
+def test_install_receipt_verified_only_with_matching_loaded_and_artifact_evidence(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    bundle = _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    receipt = {
+        "current_ref": "v0.5.0",
+        "previous_ref": "v0.4.0",
+        "installed_digest": "sha256:" + "a" * 64,
+        "descriptor_digest": bundle["digest"],
+        "installed_at": "2026-06-27T00:00:00Z",
+        "noc_plan_digest": "sha256:" + "b" * 64,
+    }
+    verified = plugin._render_install_receipt(
+        receipt,
+        installed_evidence={
+            "ref_verified": True,
+            "artifact_verified": True,
+            "current_ref": "v0.5.0",
+            "installed_digest": "sha256:" + "a" * 64,
+            "descriptor_digest": bundle["digest"],
+            "observed_at": "2026-06-27T00:01:00Z",
+        },
+    )
+    assert verified["status"] == "verified"
+    mismatch = plugin._render_install_receipt(
+        receipt,
+        installed_evidence={
+            "ref_verified": True,
+            "artifact_verified": True,
+            "current_ref": "different-ref",
+            "installed_digest": "sha256:" + "a" * 64,
+            "descriptor_digest": bundle["digest"],
+            "observed_at": "2026-06-27T00:01:00Z",
+        },
+    )
+    assert mismatch["status"] == "recorded"
 
 
 def test_readme_and_manifest_define_real_rollback_contract():
@@ -738,18 +1127,26 @@ def test_all_sync_entrypoints_fail_closed(args, tmp_path, monkeypatch):
 
 def test_transport_error_keeps_evidence_preview_resumable(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        plugin,
-        "_DESCRIPTOR_TOOLS",
-        {
-            "evidence.remember.preview": {"name": "evidence.remember.preview"},
-            "evidence.remember.confirmed": {"name": "evidence.remember.confirmed"},
-        },
-    )
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", _future_evidence_descriptors())
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    packet = {"items": [{"external_id": "1"}]}
+    preview = {
+        "status": "preview_ready",
+        "ok": True,
+        "target": "kb_engine_prod",
+        "preview_digest": "sha256:" + "a" * 64,
+        "preview_lease": {"lease_id": "lease-1", "expires_at": "2099-06-27T00:00:00Z"},
+        "idempotency_key": "idem-1",
+        "evidence_packet_digest": plugin._descriptor_digest(packet),
+    }
+    binding, _reason = plugin._evidence_preview_binding(preview, target="kb_engine_prod", packet=packet)
     monkeypatch.setattr(
         plugin,
         "_get_capture_preview_state",
-        lambda *_args, **_kwargs: ({"packet": {"items": [{"external_id": "1"}]}}, ""),
+        lambda *_args, **_kwargs: (
+            {"target": "kb_engine_prod", "packet": packet, "preview_binding": binding},
+            "",
+        ),
     )
     cleared: list[str] = []
     monkeypatch.setattr(plugin, "_clear_capture_preview_state", cleared.append)
