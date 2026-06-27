@@ -1863,3 +1863,25 @@ def test_unauthorized_sender_dispatches_no_tool(tmp_path, monkeypatch):
     )()
     assert hook(event=event, gateway=gateway, session_store=None) is None
     assert ctx.calls == []
+
+
+def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
+    workflow_path = ROOT / ".github" / "workflows" / "test.yml"
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+    steps = workflow["jobs"]["contract"]["steps"]
+    engine_checkouts = [
+        step
+        for step in steps
+        if step.get("uses") == "actions/checkout@v4"
+        and step.get("with", {}).get("repository") == "acoastalfog/kb-engine"
+    ]
+
+    assert len(engine_checkouts) == 1
+    checkout = engine_checkouts[0]["with"]
+    assert checkout["ref"] == "${{ env.KB_ENGINE_DESCRIPTOR_REF }}"
+    assert checkout["path"] == "kb-engine"
+    assert checkout["ssh-key"] == "${{ secrets.KB_ENGINE_DEPLOY_KEY }}"
+    assert checkout["persist-credentials"] is False
+    assert "https://github.com/acoastalfog/kb-engine.git" not in workflow_text
+    assert "git -C kb-engine fetch" not in workflow_text

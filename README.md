@@ -52,9 +52,10 @@ The committed export is pinned to the kb-engine 0.41.3 safety candidate at
 revision `47ef70cb7e5986882018a479385b1cafcdedc13b`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
-descriptor job remains intentionally blocked until that exact revision is
-published and remotely reachable; local test results do not count as a green
-GitHub workflow.
+descriptor job checks out that exact private revision with the repository's
+read-only `KB_ENGINE_DEPLOY_KEY` Actions secret and disables persisted Git
+credentials. A missing secret or unreachable revision fails the workflow;
+local test results do not count as a green GitHub workflow.
 
 ## Gate S migration note
 
