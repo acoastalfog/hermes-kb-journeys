@@ -5378,18 +5378,15 @@ def _preview_allows_confirmation(payload: Any, *, capability: str = "") -> bool:
         return False
     if _validate_runtime_output(capability, payload):
         return False
-    if status == "noop" or not (
-        "preview" in status
-        or status
-        in {
-            "ready",
-            "ready_to_confirm",
-            "valid",
-            "validated",
-            "planned",
-            "success",
-        }
-    ):
+    if status not in {
+        "planned",
+        "preview_ready",
+        "ready",
+        "ready_to_confirm",
+        "success",
+        "valid",
+        "validated",
+    }:
         return False
     lease = payload.get("preview_lease") if isinstance(payload.get("preview_lease"), dict) else {}
     preview_digest = _normalized_digest(payload.get("preview_hash"))
