@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
+import subprocess
 import sys
 import json
 import importlib.util
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -50,14 +53,33 @@ def _enable_kb_journeys(hermes_home: Path) -> None:
 
 
 def _load_plugin_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    repo = _hermes_repo()
-    monkeypatch.syspath_prepend(str(repo))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     spec = importlib.util.spec_from_file_location("kb_journeys_external_under_test", ROOT / "__init__.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
     return module
+
+
+def _install_conforming_descriptor_fixture(plugin, monkeypatch: pytest.MonkeyPatch):
+    packet = json.loads((ROOT / "generated" / "kb-engine-descriptors.json").read_text(encoding="utf-8"))
+    body = deepcopy(packet)
+    body.pop("digest")
+    for descriptor in body["tools"]:
+        schema = {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        }
+        descriptor["output_schema"] = schema
+        descriptor["output_schema_digest"] = plugin._descriptor_digest(schema)
+    packet = {**body, "digest": plugin._descriptor_digest(body)}
+    bundle, tools = plugin._validate_descriptor_bundle(packet)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_BUNDLE", bundle)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", tools)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_ERROR", "")
+    return bundle
 
 
 class FakeContext:
@@ -72,7 +94,7 @@ class FakeContext:
         return json.dumps(result)
 
 
-def test_user_install_shadows_bundled_kb_journeys(tmp_path, monkeypatch):
+def test_user_plugin_loads_from_standard_plugin_directory(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     user_plugin = hermes_home / "plugins" / "kb_journeys"
     shutil.copytree(ROOT, user_plugin, ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"))
@@ -88,17 +110,23 @@ def test_user_install_shadows_bundled_kb_journeys(tmp_path, monkeypatch):
     assert "/kb" in [f"/{name}" for name in loaded.commands_registered]
 
 
-def test_bundled_fallback_loads_when_user_plugin_absent(tmp_path, monkeypatch):
-    hermes_home = tmp_path / ".hermes"
-    _enable_kb_journeys(hermes_home)
-
-    mgr = _manager(tmp_path, monkeypatch)
-    mgr.discover_and_load(force=True)
-
-    loaded = mgr._plugins["kb_journeys"]
-    assert loaded.enabled is True
-    assert loaded.manifest.source == "bundled"
-    assert "plugins/kb_journeys" in loaded.manifest.path
+def test_pinned_upstream_has_no_bundled_kb_journeys_fallback():
+    repo = _hermes_repo()
+    requested_ref = os.environ.get("HERMES_UPSTREAM_REF", "")
+    exact_tag = subprocess.run(
+        ["git", "-C", str(repo), "describe", "--tags", "--exact-match"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if requested_ref != "v2026.6.19" and exact_tag != "v2026.6.19":
+        pytest.skip("absence contract is pinned to Hermes Agent v2026.6.19")
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "HEAD", "plugins/kb_journeys"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert tracked == []
 
 
 def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
@@ -114,65 +142,24 @@ def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
     assert "/kb publish" not in text
 
 
-def test_public_sync_preview_hides_executor_vocabulary(tmp_path, monkeypatch):
+def test_kb_sync_is_typed_unavailable_and_dispatches_nothing(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    plan = {
-        "status": "confirmation_required",
-        "workflow": {"workflow_id": "update_kb", "risk": "write_broad"},
-        "request": {"force": False},
-        "effect_plan": {"effects": [{"id": "source_sync"}, {"id": "proposal"}]},
-        "receipt": {"state": "ready_to_confirm", "llm_invoked_by_read_surface": False},
-    }
+    ctx = FakeContext({})
 
-    card = plugin._render_workflow_plan(
-        plan,
-        ctx=FakeContext({}),
-        target="kb_engine_prod",
-        adapter=None,
-        start_hint="/kb sync confirm",
-        title="KB Sync",
-        heading="KB Sync Journey Preview",
-        public_sync=True,
-    )
-    text = card["text"]
+    card = plugin._card_for_command(ctx, "kb", args="sync confirm")
 
-    assert "KB Sync Journey Preview" in text
-    assert "Journey: kb_sync" in text
-    assert "Preview sync:" in text
-    assert "Confirm sync: /kb sync confirm" in text
-    assert "update_kb" not in text
-    assert "Workflow:" not in text
-    assert "workflow." not in text
-
-
-def test_public_sync_start_result_hides_executor_vocabulary(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    payload = {
-        "status": "started",
-        "started": True,
-        "receipt": {
-            "state": "workflow_running",
-            "durable_effect": "workflow_run",
-            "llm_invoked_by_read_surface": False,
-        },
-    }
-
-    text = plugin._workflow_status_text(
-        "KB sync journey result",
-        payload,
-        include_run_details=False,
-    )
-
-    assert "KB sync journey result" in text
-    assert "Receipt: sync_running" in text
-    assert "Effect: sync_started" in text
-    assert "update_kb" not in text
-    assert "Workflow" not in text
-    assert "workflow_" not in text
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert "kb.sync.prepare/commit" in card["text"]
+    assert "No KB state changed." in card["text"]
+    assert "kb_sync" not in json.dumps(card)
+    assert "update_kb" not in json.dumps(card)
+    assert ctx.calls == []
 
 
 def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
     monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb-engine-prod")
     state = {
         "proposal_ids": ["act_crowdstrike"],
@@ -181,7 +168,7 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
     }
     ctx = FakeContext(
         {
-            "mcp_kb_engine_prod_queue_decision_preview": [
+            "mcp_kb_engine_prod_review_decision_preview": [
                 {
                     "result": {
                         "status": "preview",
@@ -201,7 +188,7 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
                     }
                 }
             ],
-            "mcp_kb_engine_prod_queue_batch_decide_confirmed": [
+            "mcp_kb_engine_prod_review_batch_decide_confirmed": [
                 {"result": {"status": "applied", "ok": True}},
             ],
         }
@@ -217,7 +204,7 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
 
     assert "Review reject preview" in card["text"]
     assert "To apply: /kb review reject 1 confirm" in card["text"]
-    assert [call[0] for call in ctx.calls] == ["mcp_kb_engine_prod_queue_decision_preview"]
+    assert [call[0] for call in ctx.calls] == ["mcp_kb_engine_prod_review_decision_preview"]
     preview_args = ctx.calls[-1][1]
     assert preview_args["proposal_ids"] == ["act_crowdstrike"]
     assert preview_args["decision"] == "reject"
@@ -225,6 +212,7 @@ def test_bare_review_reply_previews_with_confirm_hint(tmp_path, monkeypatch):
 
 def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
     monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
 
     lifecycle_ctx = FakeContext(
@@ -290,6 +278,7 @@ def test_kb_review_defaults_to_lifecycle_and_explicit_queue_uses_inbox(tmp_path,
 
 def test_review_queue_refuses_legacy_queue_fallback_without_review_inbox(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
 
     queue_ctx = FakeContext(
         {
@@ -316,52 +305,36 @@ def test_review_queue_refuses_legacy_queue_fallback_without_review_inbox(tmp_pat
 
 # --- Phase 2 #7: Telegram capture command ---
 
-def test_kb_capture_preview_builds_telegram_capture_packet(tmp_path, monkeypatch):
+def test_kb_capture_fails_closed_until_evidence_contract_is_exported(tmp_path, monkeypatch):
     from types import SimpleNamespace
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [
-            {"status": "preview_ready", "ok": True, "source": {"source_id": "telegram.capture", "new_count": 1}}
-        ],
-    })
+    ctx = FakeContext({})
     source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
     event = SimpleNamespace(
         source=source, message_id="100", reply_to_message_id="99",
         reply_to_text="This tweet about a new model is important", raw_message=None, text="/kb capture",
     )
     card = plugin._render_capture_command(ctx, "kb_engine_prod", "", event=event, source=source, session_store=None)
-    assert "Confirm: /kb capture confirm" in card["text"]
-    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
-    packet = ctx.calls[0][1]["evidence_packet"]
-    assert packet["source_id"] == "telegram.capture"
-    assert packet["connector_id"] == "hermes.plugin.telegram_capture"
-    assert packet["harness_id"] == "hermes"
-    # captures the replied-to message (99), not the command message (100)
-    assert packet["items"][0]["external_id"] == "12345678:99"
-    assert packet["provenance"]["external_ids"] == ["12345678:99"]
-    assert "tweet about a new model" in packet["items"][0]["text"]
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert "evidence.remember.preview/confirmed" in card["text"]
+    assert ctx.calls == []
 
 
-def test_kb_capture_confirm_writes_via_kb_sync_confirmed(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+def test_evidence_receipt_uses_evidence_only_wording(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "applied", "ok": True, "receipt": {"new_count": 1}}],
-    })
-    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
-    ev = SimpleNamespace(source=source, message_id="100", reply_to_message_id="99",
-                         reply_to_text="important note", raw_message=None, text="/kb capture")
-    plugin._render_capture_command(ctx, "kb_engine_prod", "", event=ev, source=source, session_store=None)  # preview stores state
-    confirm_ev = SimpleNamespace(source=source, message_id="101", reply_to_message_id=None,
-                                 reply_to_text=None, raw_message=None, text="/kb capture confirm")
-    card = plugin._render_capture_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
-    assert "Captured to the KB" in card["text"]
-    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
-    assert confirmed, ctx.calls
-    args = confirmed[0][1]
-    assert args["user_confirmation"] == {"confirmed": True}
-    assert args["evidence_packet"]["items"][0]["external_id"] == "12345678:99"
+    card = plugin._render_evidence_completion(
+        {
+            "status": "remembered",
+            "ok": True,
+            "receipt": {"confirmed": True, "receipt_id": "ev-1"},
+            "readback": {"status": "verified", "receipt_id": "ev-1"},
+        },
+        title="KB Capture",
+    )
+    assert "Evidence remembered" in card["text"]
+    assert "Captured to the KB" not in card["text"]
+    assert "Saved to the KB" not in card["text"]
 
 
 def test_kb_capture_routes_via_root_command(tmp_path, monkeypatch):
@@ -380,61 +353,49 @@ def test_kb_write_routes_via_root_command(tmp_path, monkeypatch):
     assert plugin._kb_root_command("write confirm") == ("kbwrite", "confirm")
 
 
-def test_kb_write_preview_builds_note_packet_with_anchor(tmp_path, monkeypatch):
+def test_kb_write_fails_closed_without_evidence_descriptors(tmp_path, monkeypatch):
     from types import SimpleNamespace
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-    })
+    ctx = FakeContext({})
     source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
     event = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
                             reply_to_text=None, raw_message=None, text="/kb write events/bio | remember the panel time")
     card = plugin._render_write_command(ctx, "kb_engine_prod", "events/bio | remember the panel time",
                                         event=event, source=source, session_store=None)
-    assert "Confirm: /kb write confirm" in card["text"]
-    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
-    item = ctx.calls[0][1]["evidence_packet"]["items"][0]
-    assert "remember the panel time" in item["text"]
-    assert item.get("anchor") == "events/bio"
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert ctx.calls == []
 
 
-def test_kb_write_confirm_refuses_success_when_not_applied(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+def test_optimistic_confirm_without_readback_never_renders_durable_success(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-        # confirmed dispatch reports NO landed write -> readback gate must refuse success
-        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "noop", "ok": True, "receipt": {"new_count": 0}}],
-    })
-    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
-    ev = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
-                         reply_to_text=None, raw_message=None, text="/kb write a note")
-    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
-    confirm_ev = SimpleNamespace(source=source, message_id="201", reply_to_message_id=None,
-                                 reply_to_text=None, raw_message=None, text="/kb write confirm")
-    card = plugin._render_write_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
-    assert "Saved to the KB" not in card["text"]
-    assert "not" in card["text"].lower()  # surfaces that nothing landed
+    optimistic = {"status": "applied", "ok": True, "receipt": {"new_count": 1}}
+    assert plugin._durable_completion(optimistic)["complete"] is False
+    text = plugin._confirmed_text("approve", optimistic, proposal_ids=["p1"])
+    assert "Applied" not in text
+    assert "saved" not in text.lower()
 
 
-def test_kb_write_confirm_reports_success_when_receipt_landed(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+def test_durable_completion_requires_identity_and_digest_readback(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-        "mcp_kb_engine_prod_kb_sync_confirmed": [{"status": "applied", "ok": True, "receipt": {"new_count": 1}}],
-    })
-    source = SimpleNamespace(chat_id="12345678", platform="telegram", user_id="42", user_name="Anthony")
-    ev = SimpleNamespace(source=source, message_id="200", reply_to_message_id=None,
-                         reply_to_text=None, raw_message=None, text="/kb write a note")
-    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
-    confirm_ev = SimpleNamespace(source=source, message_id="201", reply_to_message_id=None,
-                                 reply_to_text=None, raw_message=None, text="/kb write confirm")
-    card = plugin._render_write_command(ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None)
-    assert "Saved to the KB" in card["text"]
-    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
-    assert confirmed, ctx.calls
-    assert confirmed[0][1]["user_confirmation"] == {"confirmed": True}
+    payload = {
+        "status": "applied",
+        "ok": True,
+        "receipt": {
+            "confirmed": True,
+            "receipt_id": "r-1",
+            "object_id": "todo-1",
+            "content_digest": "sha256:" + "a" * 64,
+        },
+        "readback": {
+            "status": "verified",
+            "receipt_id": "r-1",
+            "object_id": "todo-1",
+            "content_digest": "sha256:" + "a" * 64,
+        },
+    }
+    assert plugin._durable_completion(payload)["complete"] is True
+    assert "Applied" in plugin._confirmed_text("approve", payload, proposal_ids=["p1"])
 
 
 # --- Phase A Task 1: expandable blockquote for long bodies ---
@@ -550,8 +511,6 @@ def _load_plugin_module_upstream(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     module, simulating plain upstream hermes-agent where those packages do not
     exist.  monkeypatch restores sys.modules on teardown.
     """
-    repo = _hermes_repo()
-    monkeypatch.syspath_prepend(str(repo))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
     # Block the two fork-only modules.
@@ -627,58 +586,32 @@ def test_upstream_env_today_renders_plain_text(tmp_path, monkeypatch):
         assert not hasattr(action, "callback_data")
 
 
-def test_upstream_env_write_preview_and_confirm(tmp_path, monkeypatch):
-    """/kb write verb must build its preview packet and gate on READBACK — unaffected by stub."""
+def test_upstream_env_write_fails_closed_without_evidence_contract(tmp_path, monkeypatch):
+    """The text-only path must not revive a removed evidence compatibility route."""
     plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-        "mcp_kb_engine_prod_kb_sync_confirmed": [
-            {"status": "applied", "ok": True, "receipt": {"new_count": 1}}
-        ],
-    })
+    ctx = FakeContext({})
     source = _FakeSource()
     ev = _FakeEvent(source, message_id="200", text="/kb write a note")
-    preview_card = plugin._render_write_command(
+    card = plugin._render_write_command(
         ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None
     )
-    assert "Confirm: /kb write confirm" in preview_card["text"]
-    assert ctx.calls and ctx.calls[0][0] == "mcp_kb_engine_prod_kb_sync_preview"
-
-    confirm_ev = _FakeEvent(source, message_id="201", text="/kb write confirm")
-    confirm_card = plugin._render_write_command(
-        ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None
-    )
-    assert "Saved to the KB" in confirm_card["text"]
-    confirmed = [c for c in ctx.calls if c[0] == "mcp_kb_engine_prod_kb_sync_confirmed"]
-    assert confirmed, f"kb_sync.confirmed was not called; calls={ctx.calls}"
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert ctx.calls == []
 
 
-def test_upstream_env_write_readback_gate_refuses_noop(tmp_path, monkeypatch):
-    """/kb write READBACK gate must still refuse success on noop even with stub."""
+def test_upstream_env_readiness_reports_text_only_degraded(tmp_path, monkeypatch):
     plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-        "mcp_kb_engine_prod_kb_sync_confirmed": [
-            {"status": "noop", "ok": True, "receipt": {"new_count": 0}}
-        ],
-    })
-    source = _FakeSource()
-    ev = _FakeEvent(source, message_id="200", text="/kb write a note")
-    plugin._render_write_command(ctx, "kb_engine_prod", "a note", event=ev, source=source, session_store=None)
-    confirm_ev = _FakeEvent(source, message_id="201", text="/kb write confirm")
-    card = plugin._render_write_command(
-        ctx, "kb_engine_prod", "confirm", event=confirm_ev, source=source, session_store=None
-    )
-    assert "Saved to the KB" not in card["text"]
-    assert "not" in card["text"].lower()
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    readiness = plugin._plugin_readiness()
+    assert readiness["status"] == "text_only_degraded"
+    assert readiness["buttons"] == "unavailable"
 
 
 def test_upstream_env_no_inline_keyboard_in_write_cards(tmp_path, monkeypatch):
     """/kb write cards must carry no inline_keyboard structure when stub is active."""
     plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
-    ctx = FakeContext({
-        "mcp_kb_engine_prod_kb_sync_preview": [{"status": "preview_ready", "ok": True}],
-    })
+    ctx = FakeContext({})
     source = _FakeSource()
     ev = _FakeEvent(source, message_id="200", text="/kb write a note")
     card = plugin._render_write_command(
@@ -688,3 +621,165 @@ def test_upstream_env_no_inline_keyboard_in_write_cards(tmp_path, monkeypatch):
     card_json = json.dumps(card)
     assert "inline_keyboard" not in card_json
     assert "callback_data" not in card_json
+
+
+def test_upstream_env_text_delivery_drops_unavailable_buttons(tmp_path, monkeypatch):
+    plugin = _load_plugin_module_upstream(monkeypatch, tmp_path)
+
+    class Adapter:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+            return type("Result", (), {"success": True})()
+
+        def send_kb_actions(self, *_args, **_kwargs):
+            raise AssertionError("button transport must not be used")
+
+    adapter = Adapter()
+    source = _FakeSource()
+    event = _FakeEvent(source, text="/kb review")
+    action = plugin.KbAction(label="Review", action_id="review", handler=None, metadata={})
+    asyncio.run(
+        plugin._send_card(
+            adapter,
+            event,
+            {"title": "KB Review", "text": "Review remains usable as text.", "actions": [action]},
+        )
+    )
+    assert adapter.sent[0][1] == "Review remains usable as text."
+
+
+def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    source = json.loads((ROOT / "generated" / "kb-engine-descriptors.json").read_text(encoding="utf-8"))
+    assert source["schema_version"] == 1
+    assert source["profile"] == "journey_first_strict"
+    assert source["digest"].startswith("sha256:")
+    assert source["engine_version"]
+    assert len(source["tools"]) <= 12
+    serialized = json.dumps(source, sort_keys=True)
+    assert "kb_sync" not in serialized
+    assert "update_kb" not in serialized
+    assert plugin._DESCRIPTOR_BUNDLE == {}
+    assert "unconstrained output schema" in plugin._DESCRIPTOR_ERROR
+
+
+def test_conforming_concrete_output_fixture_loads(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    bundle = _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    assert bundle["digest"].startswith("sha256:")
+    assert plugin._plugin_readiness()["descriptors"] == "ready"
+
+
+def test_unconstrained_export_blocks_descriptor_dispatch(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    card = plugin._card_for_command(ctx, "kb", args="review")
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert ctx.calls == []
+
+
+def test_missing_generated_descriptor_fails_closed(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "_DESCRIPTOR_TOOLS", {})
+    ctx = FakeContext({})
+    receipt = {
+        "restore_available": True,
+        "receipt_id": "r1",
+        "restore_hint": {"transaction_id": "tx1"},
+    }
+    assert plugin._restore_action_from_receipt(ctx, "kb_engine_prod", receipt) is None
+    assert ctx.calls == []
+
+
+def test_install_receipt_reports_previous_ref_and_rollback_command(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    descriptor_packet = json.loads((ROOT / "generated" / "kb-engine-descriptors.json").read_text(encoding="utf-8"))
+    receipt = plugin._parse_install_receipt(
+        {
+            "current_ref": "v0.5.0",
+            "previous_ref": "v0.4.0",
+            "installed_digest": "sha256:" + "a" * 64,
+            "descriptor_digest": descriptor_packet["digest"],
+            "installed_at": "2026-06-27T00:00:00Z",
+            "noc_plan_digest": "sha256:" + "b" * 64,
+        }
+    )
+    assert receipt["previous_ref"] == "v0.4.0"
+    assert plugin._rollback_ref(receipt) == "v0.4.0"
+    rendered = plugin._render_install_receipt(receipt)
+    assert rendered["status"] == "observed"
+    assert "Previous ref: v0.4.0" in rendered["text"]
+
+
+def test_readme_and_manifest_define_real_rollback_contract():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    manifest = yaml.safe_load((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+    assert "reinstalling that `previous_ref`" in readme
+    assert "Removing or renaming" in readme
+    assert "bundled fallback" not in readme.lower()
+    assert manifest["version"] == "0.5.0"
+    assert manifest["install_receipt"]["owner"] == "noc"
+    assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
+
+
+@pytest.mark.parametrize("args", ["sync", "sync confirm", "run sync", "run update_kb"])
+def test_all_sync_entrypoints_fail_closed(args, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    card = plugin._card_for_command(ctx, "kb", args=args)
+    assert card["status"] == "temporarily_unavailable"
+    assert card["actions"] == []
+    assert ctx.calls == []
+
+
+def test_transport_error_keeps_evidence_preview_resumable(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plugin,
+        "_DESCRIPTOR_TOOLS",
+        {
+            "evidence.remember.preview": {"name": "evidence.remember.preview"},
+            "evidence.remember.confirmed": {"name": "evidence.remember.confirmed"},
+        },
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_get_capture_preview_state",
+        lambda *_args, **_kwargs: ({"packet": {"items": [{"external_id": "1"}]}}, ""),
+    )
+    cleared: list[str] = []
+    monkeypatch.setattr(plugin, "_clear_capture_preview_state", cleared.append)
+    source = _FakeSource()
+    ctx = FakeContext({})
+    card = plugin._render_capture_command(
+        ctx,
+        "kb_engine_prod",
+        "confirm",
+        event=_FakeEvent(source, text="/kb capture confirm"),
+        source=source,
+        session_store=None,
+    )
+    assert "not available" in card["text"]
+    assert cleared == []
+
+
+def test_unauthorized_sender_dispatches_no_tool(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    hook = plugin.build_pre_gateway_dispatch_hook(ctx)
+    source = _FakeSource()
+    event = _FakeEvent(source, text="/kb sync")
+    gateway = type(
+        "Gateway",
+        (),
+        {
+            "_is_user_authorized": staticmethod(lambda _source: False),
+            "adapters": {"telegram": object()},
+        },
+    )()
+    assert hook(event=event, gateway=gateway, session_store=None) is None
+    assert ctx.calls == []

@@ -1,0 +1,867 @@
+{
+  "actions": [
+    {
+      "input_schema_digest": "sha256:fef846e892c68a1d89a1b7e68bdb528241c37f37dff82dd3be5e2de2123e50ef",
+      "name": "review.batch_decide_confirmed",
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+    },
+    {
+      "input_schema_digest": "sha256:d65f11fc39e5397c938c3460827471daf6107df8540bf93ada6321824e934d9e",
+      "name": "review.restore_confirmed",
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+    },
+    {
+      "input_schema_digest": "sha256:1a335c8314f76b934ceec3c15205c320953f5b438392385a16c82c10ac85b4af",
+      "name": "workflow.start_confirmed",
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+    }
+  ],
+  "digest": "sha256:017d068f0096d27071a4599361c90112339dfa4d8ae12fe1338ce86d774068f0",
+  "engine_source_revision": "3e39d7fcce7e4c5b195901daf640019069f32fff",
+  "engine_version": "0.41.2",
+  "journeys": [],
+  "profile": "journey_first_strict",
+  "schema_version": 1,
+  "selection": "hermes_primary",
+  "source_export_digest": "sha256:a0fc5bf35b6406c74c7185070b6432f6967bf713d415f1a9d37d060d0bda286f",
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return one compact journey-first operator cockpit across attention, queue, runs, readiness, and publication state.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "attention_limit": {
+            "description": "Maximum attention and queue items per window (1-50).",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "cursor": {
+            "description": "Zero-based offset into the full attention record lists for paging.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "description": "Full-detail (true) vs compact (false); overrides 'mode' when supplied.",
+            "type": "boolean"
+          },
+          "include_publication": {
+            "description": "Whether to include publication.status summary.",
+            "type": "boolean"
+          },
+          "include_readiness": {
+            "description": "Whether to include workspace.readiness summary.",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "Packet altitude: 'full' (default) or 'compact' (thinned, bounded under the token cap).",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          },
+          "run_limit": {
+            "description": "Maximum recent runs to include (1-25).",
+            "maximum": 25,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sections": {
+            "description": "Optional subset of cockpit sections to emit.",
+            "items": {
+              "description": "Section name.",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:6a3e3844e2f2b79500e70ec1c52d0243c776f33cf8a20c8c540ff9d4323ce91f",
+      "name": "attention.cockpit",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Attention Cockpit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return a read-only KB Stewardship lifecycle review packet for an object family, entity type, entity group, or entity.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "description": "Optional compatibility assertion; lifecycle.review is always read-only and only accepts true.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum candidates to include.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Lifecycle review target, such as situations or accounts.",
+            "type": "string"
+          },
+          "today": {
+            "description": "Optional YYYY-MM-DD evaluation date for deterministic tests.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:1a4b6c4b64c3228ed3a4dda1a9ad3dbb7d5f390eb696f945b038f44293ca771b",
+      "name": "lifecycle.review",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Lifecycle Review"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return workspace Git publication state plus workflow and confirmed-control publication policy.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "paths": {
+            "description": "Optional workspace-relative paths to scope publication status.",
+            "items": {
+              "description": "Workspace-relative path.",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "transaction_id": {
+            "description": "Optional confirmed-control transaction id to echo in the receipt.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:15d09f846d586c434ebdd59853487e1afc026c30f5522d74d262c2c5d0573328",
+      "name": "publication.status",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Publication Status"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": false
+      },
+      "description": "Apply the same confirmed review inbox decision to a batch of proposals through one previewed confirmed-control envelope.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Human or agent actor requesting the confirmed write.",
+            "type": "string"
+          },
+          "cursor_id": {
+            "description": "Guided KB Review Session cursor id from the preview lease.",
+            "type": "string"
+          },
+          "decision": {
+            "description": "Proposal decision to apply.",
+            "enum": [
+              "approve",
+              "reject",
+              "archive",
+              "skip",
+              "complete",
+              "keep",
+              "demote",
+              "duplicate",
+              "supersede",
+              "reroute"
+            ],
+            "type": "string"
+          },
+          "decision_scope": {
+            "description": "Explicit scope confirmed by the preview lease.",
+            "enum": [
+              "explicit_ids",
+              "all_viewed",
+              "all_window",
+              "all_filtered"
+            ],
+            "type": "string"
+          },
+          "episode_id": {
+            "description": "Optional broader conversation or run id.",
+            "type": "string"
+          },
+          "note": {
+            "description": "Optional decision note applied to each proposal.",
+            "type": "string"
+          },
+          "preview_lease": {
+            "additionalProperties": true,
+            "description": "Echo the preview_lease object returned by the immediately-preceding decision_preview here, verbatim, to confirm a guided-review decision. The engine validates it against the live preview; you may instead nest it as user_confirmation.preview_lease. session_id / review_session_id / cursor_id alone are not sufficient.",
+            "type": "object"
+          },
+          "proposal_ids": {
+            "description": "Action proposal ids to decide.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "review_session_id": {
+            "description": "Guided KB Review Session id from the preview lease.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Stable harness session id for idempotency provenance.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Harness or channel provenance, such as Hermes / Telegram.",
+            "type": "string"
+          },
+          "stop_on_error": {
+            "description": "Stop confirmed execution after the first error.",
+            "type": "boolean"
+          },
+          "user_confirmation": {
+            "additionalProperties": true,
+            "description": "Explicit confirmation payload with confirmed=true.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "proposal_ids",
+          "decision",
+          "actor",
+          "source",
+          "session_id",
+          "user_confirmation"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:fef846e892c68a1d89a1b7e68bdb528241c37f37dff82dd3be5e2de2123e50ef",
+      "name": "review.batch_decide_confirmed",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Decide Review Batch Confirmed"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Preview one or more review inbox decisions through deterministic control validation without applying changes.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Optional actor label for preview provenance.",
+            "type": "string"
+          },
+          "candidate_count": {
+            "description": "Total candidate count visible to the review session.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cursor_id": {
+            "description": "Optional Guided KB Review Session cursor id.",
+            "type": "string"
+          },
+          "decision": {
+            "description": "Proposal decision to preview.",
+            "enum": [
+              "approve",
+              "reject",
+              "archive",
+              "skip",
+              "complete",
+              "keep",
+              "demote",
+              "duplicate",
+              "supersede",
+              "reroute"
+            ],
+            "type": "string"
+          },
+          "decision_scope": {
+            "description": "Explicit scope for ambiguous batch language.",
+            "enum": [
+              "explicit_ids",
+              "all_viewed",
+              "all_window",
+              "all_filtered"
+            ],
+            "type": "string"
+          },
+          "displayed_count": {
+            "description": "Displayed/viewed item count for the current cursor window.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "note": {
+            "description": "Optional decision note.",
+            "type": "string"
+          },
+          "proposal_id": {
+            "description": "Optional single proposal id to decide.",
+            "type": "string"
+          },
+          "proposal_ids": {
+            "description": "Proposal ids to decide as a batch.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "review_session_id": {
+            "description": "Optional Guided KB Review Session id.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional review session id to bind the preview lease.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Optional source label for preview provenance.",
+            "type": "string"
+          },
+          "stop_on_error": {
+            "description": "Stop preview execution after the first error.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:e25004c05a795e71f2e9940ff04ee4c7f15962cf679616dd80e8fe7ed028e718",
+      "name": "review.decision_preview",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Preview Review Decision"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return the canonical review inbox read model for proposal decisions, tasks, learning, stale, delegated, or done work.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum number of queue items to return.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Zero-based result offset.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Optional text filter for queue items.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Queue scope to return.",
+            "enum": [
+              "proposals",
+              "tasks",
+              "learning",
+              "stale",
+              "delegated",
+              "done"
+            ],
+            "type": "string"
+          },
+          "selected_id": {
+            "description": "Optional queue item id to hydrate with detail context.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:768a684a65ff62fcefe864be7295c86efdb3dfb76d303d22155efd3e5ac195f0",
+      "name": "review.inbox",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Review Inbox"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": false
+      },
+      "description": "Apply a confirmed restore for proposal-only review inbox decisions through a previewed confirmed-control envelope.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Human or agent actor requesting the confirmed restore.",
+            "type": "string"
+          },
+          "cursor_id": {
+            "description": "Guided KB Review Session cursor id from the restore preview lease.",
+            "type": "string"
+          },
+          "episode_id": {
+            "description": "Optional broader conversation or run id.",
+            "type": "string"
+          },
+          "note": {
+            "description": "Optional restore note.",
+            "type": "string"
+          },
+          "proposal_ids": {
+            "description": "Optional proposal ids to restore from the source transaction.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "receipt_id": {
+            "description": "Prior queue review receipt id.",
+            "type": "string"
+          },
+          "review_session_id": {
+            "description": "Guided KB Review Session id from the restore preview lease.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Stable harness session id for idempotency provenance.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Harness or channel provenance, such as Hermes / Telegram.",
+            "type": "string"
+          },
+          "source_review_session_id": {
+            "description": "Prior harness/session id when no transaction id is available.",
+            "type": "string"
+          },
+          "stop_on_error": {
+            "description": "Stop confirmed execution after the first error.",
+            "type": "boolean"
+          },
+          "target_status": {
+            "description": "Restore target status.",
+            "enum": [
+              "pending_approval"
+            ],
+            "type": "string"
+          },
+          "transaction_id": {
+            "description": "Prior queue review transaction id / idempotency key.",
+            "type": "string"
+          },
+          "user_confirmation": {
+            "additionalProperties": true,
+            "description": "Explicit confirmation payload with confirmed=true.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "actor",
+          "source",
+          "session_id",
+          "user_confirmation"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:d65f11fc39e5397c938c3460827471daf6107df8540bf93ada6321824e934d9e",
+      "name": "review.restore_confirmed",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Restore Review Decision Confirmed"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Preview restoring proposal-only review inbox decisions from a prior receipt or control transaction without mutating state.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Optional actor label for preview provenance.",
+            "type": "string"
+          },
+          "cursor_id": {
+            "description": "Optional Guided KB Review Session cursor id for restore.",
+            "type": "string"
+          },
+          "note": {
+            "description": "Optional restore note.",
+            "type": "string"
+          },
+          "proposal_ids": {
+            "description": "Optional proposal ids to restore from the source transaction.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "receipt_id": {
+            "description": "Prior queue review receipt id.",
+            "type": "string"
+          },
+          "review_session_id": {
+            "description": "Optional Guided KB Review Session id for restore.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Optional restore session id to bind the preview lease.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Optional source label for preview provenance.",
+            "type": "string"
+          },
+          "source_review_session_id": {
+            "description": "Prior harness/session id when no transaction id is available.",
+            "type": "string"
+          },
+          "stop_on_error": {
+            "description": "Stop preview execution after the first error.",
+            "type": "boolean"
+          },
+          "target_status": {
+            "description": "Restore target status.",
+            "enum": [
+              "pending_approval"
+            ],
+            "type": "string"
+          },
+          "transaction_id": {
+            "description": "Prior queue review transaction id / idempotency key.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:926c0ecb4165aa8e101259b160ee73a08fbc53360781b81ac3152bb158133688",
+      "name": "review.restore_preview",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Preview Review Restore"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return a compact aggregate workflow health packet across recent runs, degradations, timing, and publication posture.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum recent runs to include.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since_hours": {
+            "description": "Trace stats lookback window in hours.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:8957cf504904607bb3cab2acc018b94e2bbd34ca41c9d4256545798aa9372fba",
+      "name": "run.health",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Run Health"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Return one harness-friendly workflow run packet with outcome, availability, timeline, artifacts, publication metadata, sync report, action list, and recommended next action.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "description": "Workflow run id to summarize.",
+            "type": "string"
+          },
+          "timeline_limit": {
+            "description": "Maximum timeline events to include.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:53cd6e92bef600f15d4364f83750b0cc6dff71155b012c026f0134711acb586d",
+      "name": "run.summary",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Run Summary"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Plan a confirmed workflow start request, including readiness, provenance, idempotency, and preconditions, without starting the workflow.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Human or operator identity requesting the plan.",
+            "type": "string"
+          },
+          "args": {
+            "additionalProperties": true,
+            "description": "Workflow arguments to validate and include in the request.",
+            "type": "object"
+          },
+          "deployment_declarations": {
+            "description": "Runtime capability declarations supplied by deployment config or an orchestrator.",
+            "items": {
+              "additionalProperties": true,
+              "description": "Runtime capability declaration packet.",
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "force": {
+            "description": "Whether a future confirmed start may bypass queue pressure.",
+            "type": "boolean"
+          },
+          "harness_offers": {
+            "description": "Ephemeral runtime capability offers supplied by the calling harness.",
+            "items": {
+              "additionalProperties": true,
+              "description": "Runtime capability offer packet.",
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "intent": {
+            "description": "Natural-language workflow intent to plan.",
+            "type": "string"
+          },
+          "queue_gate_limit": {
+            "description": "Pending-review queue threshold that would skip execution.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "readiness_mode": {
+            "description": "Readiness probe depth for the request plan.",
+            "enum": [
+              "cheap",
+              "deep"
+            ],
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Harness session id for provenance.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Harness or client generating the plan.",
+            "type": "string"
+          },
+          "workflow_id": {
+            "description": "Explicit workflow id or alias to plan.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:015fa46396038b123ea68ed44c48e56d2e1836f1544630f4bfe7ed896c9383fb",
+      "name": "workflow.plan_request",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Plan Workflow Request"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": false
+      },
+      "description": "Start an allowlisted workflow from a versioned confirmed workflow envelope.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "envelope": {
+            "additionalProperties": true,
+            "description": "Versioned confirmed workflow-start envelope built from workflow.plan_request.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "envelope"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:1a335c8314f76b934ceec3c15205c320953f5b438392385a16c82c10ac85b4af",
+      "name": "workflow.start_confirmed",
+      "output_schema": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+      "title": "Start Confirmed Workflow"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes_ref:
+          - v2026.6.19
+          - main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.hermes_ref }}
+          path: hermes-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: acoastalfog/kb-engine
+          ref: 3e39d7fcce7e4c5b195901daf640019069f32fff
+          path: kb-engine
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify generated descriptors
+        env:
+          KB_ENGINE_SOURCE: ${{ github.workspace }}/kb-engine
+        run: |
+          cp generated/kb-engine-descriptors.json /tmp/committed-kb-engine-descriptors.json
+          scripts/refresh-descriptors.sh
+          diff -u /tmp/committed-kb-engine-descriptors.json generated/kb-engine-descriptors.json
+      - name: Test against Hermes ${{ matrix.hermes_ref }}
+        env:
+          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          HERMES_UPSTREAM_REF: ${{ matrix.hermes_ref }}
+        run: uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
