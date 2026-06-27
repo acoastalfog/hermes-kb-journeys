@@ -16,8 +16,8 @@
       "output_schema_digest": "sha256:57835909888f3cffe64d0cc68b1bdd8375af3119eaf6e338ebcb909ceffbde5b"
     }
   ],
-  "digest": "sha256:2c80c147ab83079089e56301fe3055ae8c49caed77a0f5bd9530aabc8f0e6b28",
-  "engine_source_revision": "c4ab76cd97b4dea356dff2e5c70b026fcc80bb13",
+  "digest": "sha256:24f07da962b10b8dc39a8fdcde8344b23b819e958ecea357c2b8d475b40ff3d5",
+  "engine_source_revision": "f6de2f79eb3759bc0c7158783a3d975bc55f8eac",
   "engine_version": "0.41.3",
   "journeys": [],
   "profile": "journey_first_strict",
