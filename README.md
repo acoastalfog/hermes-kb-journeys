@@ -88,6 +88,8 @@ released plugin at `9772526c543cec30ee3aee71be952f95dbaf8301`. It runs the
 four H1 contract groups against immutable upstream Hermes Agent commit
 `2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (`v2026.6.19`). Local tags and
 tracked, untracked, or ignored fixture additions are rejected before execution.
+Actual tracked blobs and executable bits are checked directly against each
+commit tree, independent of `assume-unchanged` or `skip-worktree` index flags.
 It then consumes NOC's root-custodied final plugin deployment receipt
 and exact relay cutover receipt plus a separate post-cutover semantic
 confirmed-write/readback canary receipt. Every group loads the plugin through

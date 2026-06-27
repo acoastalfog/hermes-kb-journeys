@@ -9,12 +9,19 @@ admission.
 
 Run from a checkout whose plugin runtime files still equal release commit
 `9772526c543cec30ee3aee71be952f95dbaf8301`.
+The generator also compares every actual tracked source-checkout file and its
+executable bit with `HEAD`, then compares the committed runtime paths with the
+release tree. These checks use Git tree plumbing and direct file reads rather
+than index status hints.
 
 1. An exact checkout of canonical origin `NousResearch/hermes-agent` at commit
    `2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (the immutable commit behind
    `v2026.6.19`). A local tag is not identity evidence. The tracked tree and
    every untracked or ignored path must be empty of local additions; the
-   generator rejects all such paths before executing the fixture.
+   generator rejects all such paths before executing the fixture. It compares
+   every actual tracked file's Git blob identity and executable bit directly
+   with the immutable commit tree, so `assume-unchanged` and `skip-worktree`
+   index flags cannot conceal modified executed code.
 2. NOC's final root-custodied `hermes_plugin_deployment_receipt`. Its nested
    install receipt must bind:
    - `current_ref` to `9772526c543cec30ee3aee71be952f95dbaf8301`;

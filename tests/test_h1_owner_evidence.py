@@ -297,6 +297,99 @@ def test_untracked_or_ignored_execution_injection_invalidates_exact_fixture(
         module.validate_hermes_fixture(fixture)
 
 
+def test_clean_committed_plugin_source_tree_is_accepted(tmp_path: Path) -> None:
+    module = _load_module()
+    fixture = tmp_path / "plugin-source"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(fixture)],
+        check=True,
+    )
+
+    module.validate_source_checkout(fixture)
+
+
+@pytest.mark.parametrize(
+    ("index_flag", "relative", "mutation"),
+    [
+        ("--assume-unchanged", "scripts/h1-owner-evidence.py", "content"),
+        ("--skip-worktree", "tests/test_external_plugin_contract.py", "content"),
+        ("--assume-unchanged", "scripts/h1-owner-evidence.py", "mode"),
+        ("--skip-worktree", "tests/test_external_plugin_contract.py", "mode"),
+    ],
+)
+def test_plugin_source_tree_validation_ignores_index_suppression_flags(
+    tmp_path: Path, index_flag: str, relative: str, mutation: str
+) -> None:
+    module = _load_module()
+    fixture = tmp_path / "plugin-source"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(fixture)],
+        check=True,
+    )
+    _run_git_fixture(fixture, "update-index", index_flag, relative)
+    target = fixture / relative
+    if mutation == "content":
+        target.write_bytes(target.read_bytes() + b"\n# hidden executed injection\n")
+    else:
+        mode = target.stat().st_mode
+        target.chmod(mode & ~0o111 if mode & 0o111 else mode | 0o111)
+    assert relative not in _run_git_fixture(
+        fixture, "status", "--porcelain", "--untracked-files=all"
+    )
+
+    with pytest.raises(module.EvidenceError, match="released_plugin_bytes_changed"):
+        module.validate_source_checkout(fixture)
+
+
+@pytest.mark.parametrize(
+    ("index_flag", "mutation"),
+    [
+        ("--assume-unchanged", "content"),
+        ("--skip-worktree", "content"),
+        ("--assume-unchanged", "mode"),
+        ("--skip-worktree", "mode"),
+    ],
+)
+def test_hermes_tree_validation_ignores_index_suppression_flags(
+    tmp_path: Path, index_flag: str, mutation: str
+) -> None:
+    module = _load_module()
+    source_value = os.environ.get("HERMES_AGENT_REPO")
+    if not source_value:
+        pytest.skip("exact Hermes Agent fixture is supplied by the H1 CI job")
+    fixture = tmp_path / "hidden-hermes-agent"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", source_value, str(fixture)],
+        check=True,
+    )
+    _run_git_fixture(
+        fixture,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/NousResearch/hermes-agent.git",
+    )
+    _run_git_fixture(fixture, "checkout", "--detach", EXPECTED_HERMES_REVISION)
+    relative = "hermes_cli/plugins.py"
+    _run_git_fixture(fixture, "update-index", index_flag, relative)
+    target = fixture / relative
+    if mutation == "content":
+        target.write_bytes(target.read_bytes() + b"\n# hidden executed injection\n")
+    else:
+        mode = target.stat().st_mode
+        target.chmod(mode & ~0o111 if mode & 0o111 else mode | 0o111)
+    assert relative not in _run_git_fixture(
+        fixture,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
+
+    with pytest.raises(module.EvidenceError, match="hermes_fixture_mismatch"):
+        module.validate_hermes_fixture(fixture)
+
+
 @pytest.mark.parametrize(
     "check_name",
     [

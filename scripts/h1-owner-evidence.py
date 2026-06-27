@@ -278,6 +278,88 @@ def expected_plugin_artifact_digest(repo_root: Path) -> str:
     return f"sha256:{artifact.hexdigest()}"
 
 
+def _validate_tracked_worktree(root: Path, revision: str, *, code: str) -> None:
+    """Compare actual tracked bytes and executable bits to an immutable tree."""
+
+    object_format = str(_run_git(root, "rev-parse", "--show-object-format")).strip()
+    if object_format != "sha1":
+        raise EvidenceError(code)
+    listing = _run_git(root, "ls-tree", "-r", "-z", revision, binary=True)
+    assert isinstance(listing, bytes)
+    entries = [entry for entry in listing.split(b"\0") if entry]
+    if not entries:
+        raise EvidenceError(code)
+    seen: set[str] = set()
+    for entry in entries:
+        try:
+            metadata, raw_name = entry.split(b"\t", 1)
+            raw_mode, object_type, raw_object_id = metadata.split(b" ", 2)
+            relative = raw_name.decode("utf-8", errors="strict")
+            object_id = raw_object_id.decode("ascii", errors="strict")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise EvidenceError(code) from error
+        pure = Path(relative)
+        if (
+            object_type != b"blob"
+            or raw_mode not in {b"100644", b"100755"}
+            or SHA.fullmatch(object_id) is None
+            or pure.is_absolute()
+            or not pure.parts
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or relative in seen
+        ):
+            raise EvidenceError(code)
+        seen.add(relative)
+        target = root / pure
+        try:
+            metadata_before = target.lstat()
+            descriptor = os.open(
+                target,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+        except OSError as error:
+            raise EvidenceError(code) from error
+        try:
+            opened = os.fstat(descriptor)
+            expected_executable = raw_mode == b"100755"
+            actual_executable = bool(stat.S_IMODE(opened.st_mode) & 0o111)
+            if (
+                not stat.S_ISREG(metadata_before.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                != (metadata_before.st_dev, metadata_before.st_ino)
+                or actual_executable != expected_executable
+            ):
+                raise EvidenceError(code)
+            digest = hashlib.sha1(usedforsecurity=False)
+            digest.update(f"blob {opened.st_size}\0".encode("ascii"))
+            observed_size = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                observed_size += len(chunk)
+                digest.update(chunk)
+            final = os.fstat(descriptor)
+            if (
+                observed_size != opened.st_size
+                or digest.hexdigest() != object_id
+                or (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
+                != (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                )
+                or stat.S_IMODE(final.st_mode) != stat.S_IMODE(opened.st_mode)
+            ):
+                raise EvidenceError(code)
+        finally:
+            os.close(descriptor)
+
+
 def validate_source_checkout(repo_root: Path) -> None:
     expected = str(
         _run_git(repo_root, "rev-parse", f"{EXPECTED_PLUGIN_REF}^{{commit}}")
@@ -304,9 +386,11 @@ def validate_source_checkout(repo_root: Path) -> None:
             "git",
             "-C",
             str(repo_root),
-            "diff",
+            "diff-tree",
             "--quiet",
+            "-r",
             EXPECTED_PLUGIN_REF,
+            head,
             "--",
             *PLUGIN_RUNTIME_PATHS,
         ],
@@ -317,7 +401,15 @@ def validate_source_checkout(repo_root: Path) -> None:
     changed = {
         item
         for item in str(
-            _run_git(repo_root, "diff", "--name-only", EXPECTED_PLUGIN_REF, "HEAD")
+            _run_git(
+                repo_root,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                EXPECTED_PLUGIN_REF,
+                head,
+            )
         ).splitlines()
         if item
     }
@@ -331,6 +423,7 @@ def validate_source_checkout(repo_root: Path) -> None:
         or worktree
     ):
         raise EvidenceError("released_plugin_bytes_changed")
+    _validate_tracked_worktree(repo_root, head, code="released_plugin_bytes_changed")
 
 
 def validate_hermes_fixture(path: Path) -> str:
@@ -362,6 +455,7 @@ def validate_hermes_fixture(path: Path) -> str:
     }
     if head != EXPECTED_HERMES_REVISION or origin not in canonical_origins or dirty:
         raise EvidenceError("hermes_fixture_mismatch")
+    _validate_tracked_worktree(path, head, code="hermes_fixture_mismatch")
     return head
 
 
