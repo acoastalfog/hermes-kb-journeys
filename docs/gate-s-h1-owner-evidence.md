@@ -8,7 +8,7 @@ admission.
 ## Required inputs
 
 Run from a checkout whose plugin runtime files still equal release commit
-`9772526c543cec30ee3aee71be952f95dbaf8301`.
+`e8bc5f536a61dafaf45f884dbb50177781437992`.
 The generator also compares every actual tracked source-checkout file and its
 executable bit with `HEAD`, then compares the committed runtime paths with the
 release tree. These checks use Git tree plumbing and direct file reads rather
@@ -30,10 +30,10 @@ commit tree while retaining a pinned ref name.
    are disabled before commit and canonical-origin validation.
 2. NOC's final root-custodied `hermes_plugin_deployment_receipt`. Its nested
    install receipt must bind:
-   - `current_ref` to `9772526c543cec30ee3aee71be952f95dbaf8301`;
+   - `current_ref` to `e8bc5f536a61dafaf45f884dbb50177781437992`;
    - `previous_ref` and `rollback_ref` to the same different 40-character ref;
    - the NOC builder tracked-tree digest to
-     `sha256:2efb67ed1c201e7e95b64e9868fa5feee06d75cfb9499c6fbd9ca7e267e3436c`;
+     `sha256:f05120f7a04180bfdd059aff1cc04f2ee77ebcbaba1d24accf73bb5b11d4923d`;
    - the descriptor digest to the committed generated descriptor bundle;
    - an aware install timestamp and non-placeholder NOC plan digest.
 3. The separate root-custodied NOC `hermes_relay_deployment_receipt` produced
@@ -72,7 +72,7 @@ digest excludes only `receipt_digest`.
   "observer_host": "helix",
   "observed_at": "<aware UTC timestamp after plugin installed_at>",
   "ttl_seconds": 86400,
-  "source_revision": "9772526c543cec30ee3aee71be952f95dbaf8301",
+  "source_revision": "e8bc5f536a61dafaf45f884dbb50177781437992",
   "producer": {
     "source_repository": "acoastalfog/noc",
     "source_revision": "<40 lowercase hex NOC revision>"

@@ -13,10 +13,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "h1-owner-evidence.py"
-EXPECTED_REF = "9772526c543cec30ee3aee71be952f95dbaf8301"
+EXPECTED_REF = "e8bc5f536a61dafaf45f884dbb50177781437992"
 EXPECTED_HERMES_REVISION = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
 EXPECTED_NOC_PLUGIN_DIGEST = (
-    "sha256:2efb67ed1c201e7e95b64e9868fa5feee06d75cfb9499c6fbd9ca7e267e3436c"
+    "sha256:f05120f7a04180bfdd059aff1cc04f2ee77ebcbaba1d24accf73bb5b11d4923d"
 )
 NOW = datetime(2026, 6, 27, 20, 0, tzinfo=UTC)
 
