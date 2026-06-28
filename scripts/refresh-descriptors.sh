@@ -34,6 +34,7 @@ from pathlib import Path
 
 
 legacy_names = {"kb_sync.preview", "kb_sync.confirmed", "update_kb"}
+canonical_sync_tools = {"kb.sync.prepare", "kb.sync.status", "kb.sync.resume"}
 
 
 def digest(value: object) -> str:
@@ -52,12 +53,16 @@ if not isinstance(tools, list) or not 1 <= len(tools) <= 12:
 tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
 if tool_names.intersection(legacy_names) or any(str(name).startswith("kb_sync.") for name in tool_names):
     raise SystemExit("primary_chat export contains a forbidden legacy tool")
+if not canonical_sync_tools.issubset(tool_names):
+    raise SystemExit("primary_chat export is missing the canonical kb.sync prepare/status/resume tools")
 for journey in source.get("journeys") or []:
     if not isinstance(journey, dict):
         raise SystemExit("primary_chat export contains an invalid journey row")
     required = set(journey.get("required_tools") or [])
-    if journey.get("journey_id") == "kb_sync" or required.intersection(legacy_names):
+    if required.intersection(legacy_names):
         raise SystemExit("primary_chat export contains a forbidden legacy journey")
+    if journey.get("journey_id") == "kb_sync" and not canonical_sync_tools.issubset(required):
+        raise SystemExit("kb_sync journey does not require canonical prepare/status/resume")
 
 source_digest = source.pop("digest", None)
 body = {

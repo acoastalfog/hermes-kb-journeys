@@ -48,8 +48,8 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to the kb-engine 0.41.3 safety candidate at
-revision `47ef70cb7e5986882018a479385b1cafcdedc13b`, which owns the exact
+The committed export is pinned to the canonical-sync kb-engine candidate at
+revision `d76d2ea0420a37ce588496b500aa529694caa5c0`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -57,20 +57,18 @@ read-only `KB_ENGINE_DEPLOY_KEY` Actions secret and disables persisted Git
 credentials. A missing secret or unreachable revision fails the workflow;
 local test results do not count as a green GitHub workflow.
 
-## Gate S migration note
+## Canonical sync
 
-Version 0.5.0 deliberately makes `/kb sync` return
-`status: temporarily_unavailable` plus the explicit
-`generated_kb_sync_contract_missing` integration blocker, without dispatching
-an MCP tool. The target remains one canonical `/kb sync` journey, but the
-generated primary profile does not yet expose `kb.sync.prepare` and
-`kb.sync.commit`; Hermes will not fabricate those semantics. The old `/kbsync`
-and `update_kb` entrypoints are
-removed and return migration guidance only. Evidence capture/write likewise remains unavailable
-until `evidence.remember.preview/confirmed` is exported. A confirmed evidence
-receipt is rendered as “Evidence remembered”; it never implies a semantic
-object update or publication. Durable wording requires confirmed identity and
-digest readback and a generated completion binding to the selected request.
+Version 0.6.0 makes `/kb sync` call the generated `kb.sync.prepare` contract.
+Hermes records only the run id and renders the engine's next harness action;
+the harness gathers evidence and exercises judgment. `/kb sync status` reads
+the same durable run, and `/kb sync confirm` calls `kb.sync.resume` only for
+the current exact digest. Hermes claims success only after a separate
+`kb.sync.status` readback reports the same run terminally completed.
+Publication remains a separate action and is never implied by sync.
+
+The old `/kbsync`, `update_kb`, and `/kb run sync` entrypoints remain hard
+breaks with migration guidance. Missing canonical descriptors fail closed.
 
 ## Local Test
 
