@@ -1,6 +1,6 @@
 name: kb_journeys
-version: 0.5.0
-description: "Telegram-native KB status and review cards backed by generated kb-engine contracts; sync fails closed until canonical prepare/commit exists."
+version: 0.6.0
+description: "Telegram-native KB status, sync, and review cards backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
   - pre_gateway_dispatch
@@ -20,3 +20,5 @@ install_receipt:
 migrations:
   - version: 0.5.0
     hard_break: "/kb sync is temporarily unavailable until kb.sync.prepare/commit; /kbsync and update_kb are removed"
+  - version: 0.6.0
+    hard_break: "/kb sync uses kb.sync.prepare/status/resume; /kbsync, update_kb, and /kb run sync remain removed"

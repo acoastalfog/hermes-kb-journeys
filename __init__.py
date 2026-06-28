@@ -2,8 +2,8 @@
 
 Intercepts a small set of Telegram slash commands and renders concise KB
 status, review, and confirmed-receipt cards from a generated strict kb-engine
-descriptor bundle. Sync fails closed until its canonical prepare/commit
-contract exists.
+descriptor bundle. Sync uses the canonical prepare/status/resume contract;
+Hermes transports and renders the engine-owned run without inventing semantics.
 """
 
 from __future__ import annotations
@@ -78,6 +78,7 @@ QUEUE_REPLY_STATE_TTL_SECONDS = 15 * 60
 QUEUE_SCOPE_STATE_TTL_SECONDS = 15 * 60
 MEETING_HANDOFF_STATE_TTL_SECONDS = 15 * 60
 SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
+SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
@@ -701,10 +702,10 @@ def _capability_unavailable(title: str, required: Iterable[str], *, message: str
 def _sync_temporarily_unavailable() -> dict[str, Any]:
     card = _capability_unavailable(
         "KB Sync",
-        ("kb.sync.prepare", "kb.sync.commit"),
+        ("kb.sync.prepare", "kb.sync.status", "kb.sync.resume"),
         message=(
-            "KB sync is an explicit integration blocker on Hermes until the generated "
-            "primary_chat profile exposes canonical kb.sync.prepare/commit."
+            "The generated primary_chat profile does not expose the canonical "
+            "kb.sync prepare/status/resume contract."
         ),
     )
     card["integration_blocker"] = "generated_kb_sync_contract_missing"
@@ -712,7 +713,10 @@ def _sync_temporarily_unavailable() -> dict[str, Any]:
 
 
 def _canonical_sync_contract_ready() -> bool:
-    return all(_descriptor(name) is not None for name in ("kb.sync.prepare", "kb.sync.commit"))
+    return all(
+        _descriptor(name) is not None
+        for name in ("kb.sync.prepare", "kb.sync.status", "kb.sync.resume")
+    )
 
 
 def _parse_install_receipt(value: Any) -> dict[str, str]:
@@ -820,28 +824,30 @@ def _mcp_tool_name(target: str, tool_name: str) -> str:
     return f"mcp_{_sanitize_component(target)}_{_sanitize_component(tool_name)}"
 
 
-def _queue_reply_state_path():
-    from hermes_constants import get_hermes_home
+def _hermes_state_path(filename: str) -> Path:
+    try:
+        from hermes_constants import get_hermes_home
 
-    return get_hermes_home() / "state" / "kb_queue_reply_state.json"
+        home = Path(get_hermes_home())
+    except (ImportError, ModuleNotFoundError):
+        home = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+    return home / "state" / filename
+
+
+def _queue_reply_state_path():
+    return _hermes_state_path("kb_queue_reply_state.json")
 
 
 def _queue_scope_state_path():
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "state" / "kb_queue_scope_state.json"
+    return _hermes_state_path("kb_queue_scope_state.json")
 
 
 def _meeting_handoff_state_path():
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "state" / "kb_meeting_handoff_state.json"
+    return _hermes_state_path("kb_meeting_handoff_state.json")
 
 
 def _sync_preview_state_path():
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "state" / "kb_sync_preview_state.json"
+    return _hermes_state_path("kb_sync_preview_state.json")
 
 
 def _load_queue_reply_states() -> dict[str, Any]:
@@ -912,6 +918,7 @@ def _save_sync_preview_states(states: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(states, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        path.chmod(0o600)
     except OSError:
         logger.debug("kb_journeys: failed to persist sync preview state", exc_info=True)
 
@@ -923,15 +930,6 @@ def _clear_meeting_handoff_state(session_id: str) -> None:
     if session_id in states:
         states.pop(session_id, None)
         _save_meeting_handoff_states(states)
-
-
-def _clear_sync_preview_state(session_id: str) -> None:
-    if not session_id:
-        return
-    states = _load_sync_preview_states()
-    if session_id in states:
-        states.pop(session_id, None)
-        _save_sync_preview_states(states)
 
 
 def _clear_iterative_queue_reply_state(session_id: str) -> None:
@@ -1150,7 +1148,7 @@ def _object_reference_lines(*packets: dict[str, Any], include_report_ref: bool =
     return lines
 
 
-def _receipt_lines(payload: Any, *, include_request: bool = False, public_sync: bool = False) -> list[str]:
+def _receipt_lines(payload: Any, *, include_request: bool = False) -> list[str]:
     receipt = _request_receipt(payload)
     outcome = _request_outcome(payload)
     request = _request_envelope(payload)
@@ -1160,13 +1158,9 @@ def _receipt_lines(payload: Any, *, include_request: bool = False, public_sync: 
     if receipt:
         state = _short(receipt.get("state") or receipt.get("status"), "")
         if state:
-            if public_sync and state == "workflow_running":
-                state = "sync_running"
             lines.append(f"Receipt: {state}")
         effect = _short(receipt.get("durable_effect"), "")
         if effect:
-            if public_sync and effect == "workflow_run":
-                effect = "sync_started"
             lines.append(f"Effect: {effect}")
         if receipt.get("llm_invoked_by_read_surface") is not None:
             lines.append(
@@ -5786,15 +5780,16 @@ def _sync_preview_lease(plan: dict[str, Any], *, recorded_at: float | None = Non
     }
 
 
-def _get_sync_preview_state(session_id: str, source: Any) -> tuple[dict[str, Any] | None, str]:
+def _get_sync_run_state(session_id: str, source: Any) -> tuple[dict[str, Any] | None, str]:
+    """Return the conversation-bound canonical sync run, if still current."""
     if not session_id:
         return None, "missing_session"
     states = _load_sync_preview_states()
     state = states.get(session_id)
-    if not isinstance(state, dict):
+    if not isinstance(state, dict) or state.get("kind") != "kb_sync_run_state":
         return None, "missing"
     recorded_at = float(state.get("recorded_at") or 0.0)
-    if not recorded_at or time.time() - recorded_at > SYNC_PREVIEW_STATE_TTL_SECONDS:
+    if not recorded_at or time.time() - recorded_at > SYNC_RUN_STATE_TTL_SECONDS:
         states.pop(session_id, None)
         _save_sync_preview_states(states)
         return None, "stale"
@@ -5802,38 +5797,30 @@ def _get_sync_preview_state(session_id: str, source: Any) -> tuple[dict[str, Any
     current_actor = _telegram_user_id(source)
     if actor_id and current_actor and actor_id != current_actor:
         return None, "wrong_actor"
-    plan = state.get("plan")
-    if not isinstance(plan, dict):
+    if not _short(state.get("run_id"), ""):
         return None, "invalid"
     return state, ""
 
 
-def _store_sync_preview_state(
+def _store_sync_run_state(
     session_id: str,
     *,
     source: Any,
     target: str,
-    workflow_id: str,
-    intent: str,
-    plan: dict[str, Any],
+    packet: dict[str, Any],
 ) -> None:
-    if not session_id:
+    if not session_id or not _short(packet.get("run_id"), ""):
         return
-    recorded_at = time.time()
-    preview_lease = _sync_preview_lease(plan, recorded_at=recorded_at)
-    stored_plan = dict(plan)
-    stored_plan.setdefault("preview_lease", preview_lease)
     states = _load_sync_preview_states()
     states[session_id] = {
-        "schema_version": 1,
-        "recorded_at": recorded_at,
+        "schema_version": 2,
+        "kind": "kb_sync_run_state",
+        "recorded_at": time.time(),
         "actor_id": _telegram_user_id(source),
-        "actor_name": _short(getattr(source, "user_name", ""), ""),
         "target": target,
-        "workflow_id": workflow_id,
-        "intent": intent,
-        "preview_lease": preview_lease,
-        "plan": stored_plan,
+        "run_id": _short(packet.get("run_id"), ""),
+        "status": _short(packet.get("status"), ""),
+        "confirmation": dict(packet.get("confirmation") or {}),
     }
     _save_sync_preview_states(states)
 
@@ -7320,7 +7307,7 @@ def _workflow_status_text(prefix: str, payload: Any, *, include_run_details: boo
         prefix,
         f"Status: {_short(payload.get('status'))}",
     ]
-    lines.extend(_receipt_lines(payload, public_sync=prefix.startswith("KB sync")))
+    lines.extend(_receipt_lines(payload))
     run_id = _workflow_run_id(payload)
     if run_id and include_run_details:
         lines.append(f"Run: {run_id}")
@@ -7334,21 +7321,6 @@ def _workflow_status_text(prefix: str, payload: Any, *, include_run_details: boo
     return "\n".join(lines)
 
 
-def _sync_public_receipt_lines(payload: Any) -> list[str]:
-    receipt = _request_receipt(payload)
-    lines: list[str] = []
-    if isinstance(receipt, dict):
-        state = _short(receipt.get("state") or receipt.get("status"), "")
-        if state:
-            lines.append(f"Receipt: {state}")
-        if receipt.get("llm_invoked_by_read_surface") is not None:
-            lines.append(
-                "Read-surface LLM: "
-                + ("yes" if receipt.get("llm_invoked_by_read_surface") else "no")
-            )
-    return lines
-
-
 def _render_workflow_plan(
     data: Any,
     *,
@@ -7358,7 +7330,6 @@ def _render_workflow_plan(
     start_hint: str = "/kb run sync confirm",
     title: str = "Workflow",
     heading: str = "Workflow Preview",
-    public_sync: bool = False,
 ) -> dict[str, Any]:
     if isinstance(data, dict) and data.get("error"):
         return {"title": title, "text": f"{heading} failed\n{data['error']}", "actions": []}
@@ -7368,24 +7339,6 @@ def _render_workflow_plan(
     request = data.get("request") if isinstance(data.get("request"), dict) else {}
     effect_plan = data.get("effect_plan") if isinstance(data.get("effect_plan"), dict) else {}
     effects = effect_plan.get("effects") if isinstance(effect_plan.get("effects"), list) else []
-    if public_sync:
-        request_hint = start_hint.removesuffix(" confirm") if start_hint.endswith(" confirm") else start_hint
-        lines = [
-            heading,
-            f"Request: {request_hint}",
-            "Journey: kb_sync",
-            f"Status: {_short(data.get('status'))}",
-            "Preview sync: source evidence refresh, factual KB updates, and reviewable work.",
-            "Judgment authority: kb review",
-        ]
-        lines.extend(_sync_public_receipt_lines(data))
-        if isinstance(data.get("readiness"), dict):
-            lines.append("Readiness: " + _short(data["readiness"].get("status")))
-        if effects:
-            lines.append("Planned work: source evidence, factual updates, lifecycle signals, and proposals")
-        if data.get("status") == "confirmation_required":
-            lines.append(f"Confirm sync: {start_hint}")
-        return {"title": title, "text": "\n".join(lines), "actions": []}
     lines = [
         heading,
         f"Request: {start_hint.removesuffix(' confirm') if start_hint.endswith(' confirm') else start_hint}",
@@ -7409,20 +7362,193 @@ def _render_workflow_plan(
     return {"title": title, "text": "\n".join(lines), "actions": []}
 
 
-def _sync_confirm_blocked_text(reason: str) -> str:
-    messages = {
-        "stale": "The pending /kb sync preview is stale. Run /kb sync again, then confirm from that fresh preview.",
-        "wrong_actor": "The pending /kb sync preview belongs to another Telegram user. Run /kb sync yourself, then confirm.",
-        "invalid": "The pending /kb sync preview is invalid. Run /kb sync again before confirming.",
-        "missing_session": "Hermes could not identify this chat session. Run /kb sync again before confirming.",
-    }
-    return "\n".join(
-        [
-            "KB Sync",
-            messages.get(reason, "No fresh /kb sync preview is pending for this chat. Run /kb sync first."),
-            "No KB state changed.",
-        ]
+def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict[str, Any]:
+    """Render engine-owned sync truth without inferring completion."""
+    if not isinstance(packet, dict):
+        return _render_error("KB Sync", _mcp_target(), ["sync returned no structured packet"])
+    status = _short(packet.get("status"), "unknown")
+    run_id = _short(packet.get("run_id"), "")
+    if packet.get("error"):
+        return {
+            "title": "KB Sync",
+            "status": "failed",
+            "text": f"KB Sync\n{_short(packet.get('error'))}\nNo KB completion is claimed.",
+            "actions": [],
+        }
+    lines = ["KB Sync", f"Status: {status}"]
+    if run_id:
+        lines.append(f"Run: {run_id}")
+    reason = _short(packet.get("reason"), "")
+    if reason:
+        lines.append(f"Reason: {reason}")
+    action = packet.get("next_action") if isinstance(packet.get("next_action"), dict) else {}
+    if action:
+        lines.append(f"Next: {_short(action.get('kind'), 'harness action')}")
+        source_id = _short(action.get("source_id"), "")
+        if source_id:
+            lines.append(f"Source: {source_id}")
+        window = action.get("requested_window") if isinstance(action.get("requested_window"), dict) else {}
+        if window:
+            lines.append(
+                "Window: "
+                + _short(window.get("start"), "unknown")
+                + " to "
+                + _short(window.get("end"), "unknown")
+            )
+        lines.append(_short(action.get("instruction"), "Continue the run in Hermes chat."))
+    confirmation = packet.get("confirmation") if isinstance(packet.get("confirmation"), dict) else {}
+    if status == "awaiting_confirmation" and run_id:
+        summary = _short(_get_path(packet, "preview", "semantic_summary"), "")
+        if summary:
+            lines.append(f"Preview: {summary}")
+        digest = _short(confirmation.get("digest"), "")
+        expiry = _short(confirmation.get("expires_at"), "")
+        if expiry:
+            lines.append(f"Expires: {expiry}")
+        if digest:
+            lines.append("Confirm this exact preview: /kb sync confirm")
+    publication = packet.get("publication") if isinstance(packet.get("publication"), dict) else {}
+    if publication:
+        lines.append(f"Publication: {_short(publication.get('status'), 'not attempted')} (separate)")
+    terminal = _short(packet.get("terminal_state"), "")
+    if status == "completed" or terminal == "completed":
+        if readback_verified and run_id:
+            lines[1] = "Status: completed (engine readback verified)"
+            lines.append("Knowledge changes landed. Publication was not attempted.")
+        else:
+            lines[1] = "Status: completion unverified"
+            lines.append("The engine did not provide a verified terminal readback; no completion is claimed.")
+    elif terminal in {"failed", "cancelled", "stalled_unobserved"}:
+        lines.append(f"Terminal: {terminal}")
+        lines.append("No successful completion is claimed.")
+    return {"title": "KB Sync", "status": status, "text": "\n".join(lines), "actions": []}
+
+
+def _sync_tool_call(
+    ctx: Any,
+    target: str,
+    capability: str,
+    args: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    _tool, data, errors = _dispatch_first(ctx, target, [(capability, args)])
+    return (data if isinstance(data, dict) else None), errors
+
+
+def _render_sync_command(
+    ctx: Any,
+    target: str,
+    args: str,
+    *,
+    source: Any,
+    session_store: Any,
+) -> dict[str, Any]:
+    """Run the canonical prepare/status/resume protocol from Telegram."""
+    if not _canonical_sync_contract_ready():
+        return _sync_temporarily_unavailable()
+    session_id = _conversation_state_id(session_store, source)
+    if not session_id:
+        return {
+            "title": "KB Sync",
+            "status": "blocked",
+            "text": "KB Sync\nA stable Hermes conversation id is required. No KB state changed.",
+            "actions": [],
+        }
+    state, _state_reason = _get_sync_run_state(session_id, source)
+    tokens = (args or "").strip().split()
+    verb = tokens[0].lower() if tokens else ""
+
+    if verb in {"status", "confirm"} or (not tokens and state):
+        run_id = ""
+        if verb in {"status", "confirm"} and len(tokens) > 1 and not re.fullmatch(r"[0-9a-f]{64}", tokens[1]):
+            run_id = tokens[1]
+        if not run_id and state:
+            run_id = _short(state.get("run_id"), "")
+        if not run_id:
+            return {
+                "title": "KB Sync",
+                "status": "not_found",
+                "text": "KB Sync\nNo current run is recorded. Start one with /kb sync.",
+                "actions": [],
+            }
+        current, errors = _sync_tool_call(ctx, target, "kb.sync.status", {"run_id": run_id})
+        if current is None:
+            return _render_error("KB Sync", target, errors)
+        _store_sync_run_state(session_id, source=source, target=target, packet=current)
+        if verb != "confirm":
+            terminal = _short(current.get("terminal_state"), "")
+            if not tokens and terminal in {"completed", "failed", "cancelled"}:
+                state = None
+            else:
+                return _render_sync_packet(
+                    current,
+                    readback_verified=terminal == "completed" and current.get("status") == "completed",
+                )
+        else:
+            if current.get("status") != "awaiting_confirmation":
+                return _render_sync_packet(current, readback_verified=False)
+            confirmation = current.get("confirmation") if isinstance(current.get("confirmation"), dict) else {}
+            expected_actor = f"telegram:{_telegram_user_id(source) or 'operator'}"
+            if (
+                _short(confirmation.get("bound_actor"), "") != expected_actor
+                or _short(confirmation.get("bound_session_id"), "") != session_id
+            ):
+                return {
+                    "title": "KB Sync",
+                    "status": "confirmation_owner_mismatch",
+                    "text": (
+                        "KB Sync\nThis preview is not bound to the current Hermes actor and "
+                        "conversation. No KB state changed."
+                    ),
+                    "actions": [],
+                }
+            current_digest = _short(confirmation.get("digest"), "")
+            supplied = next((token for token in tokens[1:] if re.fullmatch(r"[0-9a-f]{64}", token)), "")
+            digest = supplied or current_digest
+            if not digest or digest != current_digest:
+                return {
+                    "title": "KB Sync",
+                    "status": "confirmation_mismatch",
+                    "text": "KB Sync\nThe confirmation does not match the current preview. No KB state changed.",
+                    "actions": [],
+                }
+            resumed, errors = _sync_tool_call(
+                ctx,
+                target,
+                "kb.sync.resume",
+                {"run_id": run_id, "confirm": digest},
+            )
+            if resumed is None:
+                return _render_error("KB Sync", target, errors)
+            readback, errors = _sync_tool_call(ctx, target, "kb.sync.status", {"run_id": run_id})
+            if readback is None:
+                return _render_sync_packet(resumed, readback_verified=False)
+            _store_sync_run_state(session_id, source=source, target=target, packet=readback)
+            verified = (
+                resumed.get("status") == "completed"
+                and readback.get("status") == "completed"
+                and readback.get("terminal_state") == "completed"
+                and readback.get("run_id") == run_id
+            )
+            return _render_sync_packet(readback, readback_verified=verified)
+
+    if tokens and verb not in {"prepare"}:
+        return {
+            "title": "KB Sync",
+            "status": "invalid_request",
+            "text": "KB Sync\nUse /kb sync, /kb sync status, or /kb sync confirm.",
+            "actions": [],
+        }
+    actor_id = _telegram_user_id(source) or "operator"
+    prepared, errors = _sync_tool_call(
+        ctx,
+        target,
+        "kb.sync.prepare",
+        {"actor": f"telegram:{actor_id}", "session_id": session_id},
     )
+    if prepared is None:
+        return _render_error("KB Sync", target, errors)
+    _store_sync_run_state(session_id, source=source, target=target, packet=prepared)
+    return _render_sync_packet(prepared, readback_verified=False)
 
 
 def _render_queue(
@@ -7474,7 +7600,30 @@ def _lifecycle_review_args(args: str) -> dict[str, Any]:
 
 def _render_lifecycle_review_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
     if _descriptor("lifecycle.review") is None:
-        return _capability_unavailable("Lifecycle Review", ("lifecycle.review",))
+        if _descriptor("attention.cockpit") is None:
+            return _capability_unavailable("KB Review", ("attention.cockpit",))
+        _, data, errors = _dispatch_first(
+            ctx,
+            target,
+            [
+                (
+                    "attention.cockpit",
+                    {
+                        "attention_limit": 5,
+                        "run_limit": 1,
+                        "include_publication": False,
+                        "include_readiness": False,
+                        "mode": "compact",
+                        "sections": ["situations", "queue"],
+                    },
+                )
+            ],
+        )
+        if data is None:
+            return _render_error("KB Review", target, errors)
+        card = _render_dashboard(data, ctx=ctx, target=target)
+        card["title"] = "KB Review"
+        return card
     _, data, errors = _dispatch_first(
         ctx,
         target,
@@ -7542,7 +7691,7 @@ def _kb_root_command(args: str) -> tuple[str, str]:
     if key in {"meeting", "meetings", "notes"}:
         return "kbmeeting", rest
     if key == "sync":
-        return "sync_unavailable", rest
+        return "kbsync_run", rest
     if key in {"capture", "save", "keep"}:
         return "kbcapture", rest
     if key in {"write", "note", "jot"}:
@@ -7557,7 +7706,7 @@ def _kb_command_help() -> dict[str, Any]:
             [
                 "KB Commands",
                 "/kb status - prove lane, runtime, transport, publication, review, sync, dirtiness, and next action",
-                "/kb sync - temporarily unavailable pending kb.sync.prepare/commit",
+                "/kb sync - start or resume the canonical harness-driven knowledge update",
                 "/kb review - lifecycle and proposal judgment inbox",
                 "Retired sync aliases return migration guidance only; they never dispatch a tool.",
             ]
@@ -7667,7 +7816,7 @@ def _card_for_command(
         return _render_lifecycle_review_command(ctx, target, "")
     if command in {"kbqueue", "kbreview"}:
         if _descriptor("review.inbox") is None:
-            return _capability_unavailable("KB Review", ("review.inbox",))
+            return _render_lifecycle_review_command(ctx, target, args)
         queue_scope, queue_args = _queue_scope_and_args(args)
         mode, indices, decision, confirm = _parse_queue_command_args(queue_args, command=command)
         if mode == "help":
@@ -7695,6 +7844,14 @@ def _card_for_command(
         return _render_lifecycle_review_command(ctx, target, args)
     if command == "kbpublish":
         return _render_publish_command(ctx, target, args)
+    if command == "kbsync_run":
+        return _render_sync_command(
+            ctx,
+            target,
+            args,
+            source=source,
+            session_store=session_store,
+        )
     if command == "kbmeeting":
         return _render_meeting_handoff_command(
             ctx,
@@ -7718,7 +7875,6 @@ def _card_for_command(
             "status": "migration_required",
             "text": (
                 "KB Sync Migration\nThis legacy sync command was removed. Use /kb sync. "
-                "Hermes sync is temporarily unavailable until kb.sync.prepare/commit is released. "
                 "No KB state changed."
             ),
             "actions": [],
@@ -7730,7 +7886,16 @@ def _card_for_command(
             return _card_for_command(ctx, "kbmigration", args=args)
         workflow_id, intent, confirm = _workflow_args_from_text(args)
         if workflow_id in {"sync", "kb_sync"}:
-            return _sync_temporarily_unavailable()
+            return _card_for_command(
+                ctx,
+                "kbmigration",
+                args="/kb run sync",
+                adapter=adapter,
+                gateway=gateway,
+                source=source,
+                session_store=session_store,
+                event=event,
+            )
         required = ("workflow.plan_request", "workflow.start_confirmed")
         if any(_descriptor(name) is None for name in required):
             return _capability_unavailable("Workflow", required)
@@ -7781,7 +7946,6 @@ def _card_for_command(
             start_hint=f"/kb run {hint_args or 'sync'} confirm",
             title="Workflow",
             heading="Workflow Preview",
-            public_sync=False,
         )
     return {"title": "KB", "text": "Unsupported KB command.", "actions": []}
 

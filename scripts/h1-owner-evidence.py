@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_PLUGIN_REF = "9772526c543cec30ee3aee71be952f95dbaf8301"
+EXPECTED_PLUGIN_REF = "e8bc5f536a61dafaf45f884dbb50177781437992"
 EXPECTED_HERMES_REF = "v2026.6.19"
 EXPECTED_HERMES_REVISION = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
 EXPECTED_SOURCE_REPOSITORY = "acoastalfog/hermes-kb-journeys"
@@ -61,13 +61,14 @@ CHECK_TESTS: dict[str, tuple[str, ...]] = {
         "test_user_plugin_loads_from_standard_plugin_directory",
         "test_optimistic_confirm_without_readback_never_renders_durable_success",
         "test_durable_completion_requires_generated_request_binding_in_addition_to_readback",
-        "test_generated_completion_binding_proves_only_the_exact_selected_request",
+        "test_sync_renderer_claims_completion_only_after_engine_readback",
         "test_evidence_completion_requires_digest_bound_readback",
     ),
     "strict_profile_compatible": (
         "test_user_plugin_loads_from_standard_plugin_directory",
         "test_generated_descriptor_bundle_is_strict_and_legacy_free",
-        "test_kb_sync_is_typed_unavailable_and_dispatches_nothing",
+        "test_kb_sync_starts_canonical_prepare_and_renders_next_action",
+        "test_kb_sync_confirmation_rejects_another_actor_or_conversation",
         "test_dispatch_first_skips_every_non_allowlisted_tool",
         "test_runtime_rejects_more_than_twelve_effective_tools",
     ),
