@@ -125,6 +125,9 @@ DESCRIPTOR_PROFILE = "journey_first_strict"
 DESCRIPTOR_PATH = Path(__file__).resolve().parent / "generated" / "kb-engine-descriptors.json"
 DESCRIPTOR_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 LEGACY_DESCRIPTOR_NAMES = {"kb_sync.preview", "kb_sync.confirmed", "update_kb"}
+UNTYPED_JSON_VALUE_DESCRIPTION = (
+    "JSON/YAML-compatible value to assign at the field path."
+)
 INSTALL_RECEIPT_FIELDS = {
     "current_ref",
     "previous_ref",
@@ -380,6 +383,24 @@ def _schema_shape_is_concrete(schema: Any, *, require_required: bool) -> bool:
     return schema.get("type") in {"array", "boolean", "integer", "number", "string"}
 
 
+def _required_branch_is_concrete(parent: Any, branch: Any) -> bool:
+    if (
+        not isinstance(parent, dict)
+        or parent.get("type") != "object"
+        or not isinstance(branch, dict)
+        or set(branch) != {"required"}
+    ):
+        return False
+    properties = parent.get("properties")
+    required = branch.get("required")
+    return bool(
+        isinstance(properties, dict)
+        and isinstance(required, list)
+        and required
+        and all(isinstance(name, str) and name in properties for name in required)
+    )
+
+
 def _validate_schema(schema: Any, *, path: str = "$") -> None:
     if not isinstance(schema, dict) or not schema:
         raise ValueError(f"{path} must be a non-empty schema object")
@@ -397,8 +418,10 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
             raise ValueError(f"{path}.{keyword} must contain at least one schema")
         for index, branch in enumerate(branches):
             _validate_schema(branch, path=f"{path}.{keyword}[{index}]")
-            if keyword in {"oneOf", "anyOf"} and not _schema_shape_is_concrete(
-                branch, require_required=False
+            if (
+                keyword in {"oneOf", "anyOf"}
+                and not _schema_shape_is_concrete(branch, require_required=False)
+                and not _required_branch_is_concrete(schema, branch)
             ):
                 raise ValueError(f"{path}.{keyword}[{index}] is unconstrained")
         if keyword == "oneOf":
@@ -476,6 +499,12 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
     if _schema_declared_types(schema).intersection(_schema_forbidden_types(schema)):
         raise ValueError(f"{path} contains impossible type/not constraints")
     _validate_schema_ranges(schema, path=path)
+    if (
+        not has_shape
+        and path.endswith(".properties.value")
+        and schema == {"description": UNTYPED_JSON_VALUE_DESCRIPTION}
+    ):
+        return
     if not has_shape:
         raise ValueError(f"{path} has no type, reference, composition, enum, or const")
 
@@ -512,6 +541,12 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
     schema_type = schema.get("type")
     if schema_type and not _value_matches_schema_type(value, schema_type):
         return f"{path}: expected {schema_type}"
+    if "required" in schema:
+        if not isinstance(value, dict):
+            return f"{path}: expected object for required properties"
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{path}.{name}: required property is missing"
     if "const" in schema and _json_value_key(value) != _json_value_key(schema["const"]):
         return f"{path}: does not match const"
     if "enum" in schema and _json_value_key(value) not in {
@@ -520,9 +555,6 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
         return f"{path}: is not in enum"
     if schema_type == "object" and isinstance(value, dict):
         properties = schema.get("properties") or {}
-        for name in schema.get("required") or []:
-            if name not in value:
-                return f"{path}.{name}: required property is missing"
         for name, child_value in value.items():
             if name in properties:
                 error = _runtime_schema_error(child_value, properties[name], path=f"{path}.{name}")
@@ -621,13 +653,16 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
                 raise ValueError(f"tool descriptor {name} {label} schema digest does not match")
         annotations = descriptor.get("annotations") if isinstance(descriptor.get("annotations"), dict) else {}
         input_properties = input_schema.get("properties") if isinstance(input_schema.get("properties"), dict) else {}
-        executable_envelope = input_properties.get("envelope")
-        if (
-            annotations.get("readOnlyHint") is False
-            and executable_envelope is not None
-            and not _schema_is_concrete(executable_envelope, require_required=True)
-        ):
-            raise ValueError(f"tool descriptor {name} has an unconstrained executable envelope")
+        for executable_field in ("envelope", "preview"):
+            executable_envelope = input_properties.get(executable_field)
+            if (
+                annotations.get("readOnlyHint") is False
+                and executable_envelope is not None
+                and not _schema_is_concrete(executable_envelope, require_required=True)
+            ):
+                raise ValueError(
+                    f"tool descriptor {name} has an unconstrained executable envelope"
+                )
         tool_map[name] = descriptor
     actions = body.get("actions")
     if not isinstance(actions, list):
