@@ -86,7 +86,7 @@ uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py
 ## Gate S H1 owner evidence
 
 `scripts/h1-owner-evidence.py` is a non-packaged evidence generator for the
-release candidate at `e8bc5f536a61dafaf45f884dbb50177781437992`. It runs the
+release candidate at `84f714952fcd0c5c5747f9e599b3a9c3dd83d817`. It runs the
 four H1 contract groups against immutable upstream Hermes Agent commit
 `2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (`v2026.6.19`). Local tags and
 tracked, untracked, or ignored fixture additions are rejected before execution.
