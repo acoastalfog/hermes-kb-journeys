@@ -1285,10 +1285,10 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_source_revision"] == "a96efb5871db962ba2a26c0f930af87c4bb07a9f"
+    assert source["engine_source_revision"] == "c63736c46b31f340e68ef61d1bf582b74c0a4bcc"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
-    assert len(source["tools"]) == 11
+    assert len(source["tools"]) == 10
     serialized = json.dumps(source, sort_keys=True)
     assert "kb_sync.preview" not in serialized
     assert "kb_sync.confirmed" not in serialized
@@ -1298,7 +1298,39 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     }
     assert plugin._DESCRIPTOR_BUNDLE == source
     assert plugin._DESCRIPTOR_ERROR == ""
-    assert len(plugin._descriptor_allowlist()) == 11
+    assert len(plugin._descriptor_allowlist()) == 10
+
+
+def test_descriptor_validation_rejects_arbitrary_untyped_leaf(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = _conforming_descriptor_packet(plugin)
+    schema = {
+        "type": "object",
+        "properties": {"value": {"description": "Unbounded caller payload."}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    packet["tools"][0]["output_schema"] = schema
+    packet["tools"][0]["output_schema_digest"] = plugin._descriptor_digest(schema)
+    body = dict(packet)
+    body.pop("digest")
+    packet["digest"] = plugin._descriptor_digest(body)
+    with pytest.raises(ValueError, match="invalid output schema"):
+        plugin._validate_descriptor_bundle(packet)
+
+
+def test_required_only_anyof_branches_remain_enforced(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "anyOf": [{"required": ["a"]}, {"required": ["b"]}],
+        "additionalProperties": False,
+    }
+    plugin._validate_schema(schema)
+    assert plugin._runtime_schema_error({}, schema) is not None
+    assert plugin._runtime_schema_error({"a": "ready"}, schema) is None
+    assert plugin._runtime_schema_error({"b": "ready"}, schema) is None
 
 
 def test_conforming_concrete_output_fixture_loads(tmp_path, monkeypatch):
@@ -1384,8 +1416,8 @@ def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp
 def test_descriptor_validation_rejects_unconstrained_executable_envelope(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     packet = _conforming_descriptor_packet(plugin)
-    workflow = next(tool for tool in packet["tools"] if tool["name"] == "control.apply_confirmed")
-    workflow["input_schema"]["properties"]["envelope"] = {
+    workflow = next(tool for tool in packet["tools"] if tool["name"] == "change.apply_confirmed")
+    workflow["input_schema"]["properties"]["preview"] = {
         "type": "object",
         "additionalProperties": True,
     }
@@ -1559,8 +1591,8 @@ def test_empty_preview_never_enables_confirmation(tmp_path, monkeypatch):
 def test_generated_primary_action_contracts_are_concrete(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     for capability in (
-        "control.apply_preview",
-        "control.apply_confirmed",
+        "change.preview",
+        "change.apply_confirmed",
         "kb.sync.prepare",
         "kb.sync.status",
         "kb.sync.resume",

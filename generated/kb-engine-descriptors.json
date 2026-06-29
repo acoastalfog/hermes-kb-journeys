@@ -1,9 +1,9 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:0f66329b8c6d373bf8082e3f1054bdc27c391d72f0232066cddb0383073c7bb6",
-      "name": "control.apply_confirmed",
-      "output_schema_digest": "sha256:54ae9b365ca450847740b9f232db7464e11c64a5755224e8f79d3f0bc8b135c6"
+      "input_schema_digest": "sha256:f6fb787b5188a564f1652263b8a62c3029fa18de9ceb583c28b81679e2589167",
+      "name": "change.apply_confirmed",
+      "output_schema_digest": "sha256:056be62410688a5aef64e55ae74e30d1fc81ff2fc7aa753d60308a446873b941"
     },
     {
       "input_schema_digest": "sha256:8fe85fcbb65993851f869d32f69faea854aa13f75f64f420ec9c2e2c23190af1",
@@ -16,9 +16,9 @@
       "output_schema_digest": "sha256:1bf3ee47d00f8ab850dad05bb0a0e94e70e7133a131c11cd188dbdb4be92cbaa"
     }
   ],
-  "digest": "sha256:5ed458fc95f791d95d17d7c34b130036e0b7f2c69aa171fd3d090645af0b3df1",
-  "engine_source_revision": "a96efb5871db962ba2a26c0f930af87c4bb07a9f",
-  "engine_version": "0.41.5",
+  "digest": "sha256:a900fb877a175f155854f855c59f9f66c6af2ce308e99c4fd0cc731ed326360f",
+  "engine_source_revision": "c63736c46b31f340e68ef61d1bf582b74c0a4bcc",
+  "engine_version": "0.42.0",
   "journeys": [
     {
       "confirmation_required": true,
@@ -63,7 +63,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:3c46b51dd88784aaa3926a88fadbc7e59e72e55c6ea5279f8650bdfa3bfc8fed",
+  "source_export_digest": "sha256:cf686ee83fbe07ea7c0b6b213c2735d309863956fd06b72ec51fd800a95e9d22",
   "tools": [
     {
       "annotations": {
@@ -137,38 +137,53 @@
         "additionalProperties": true,
         "properties": {
           "front_door": {
-            "description": "Stable cockpit front-door id.",
             "type": "string"
           },
           "mode": {
-            "description": "Full or compact projection mode.",
             "type": "string"
           },
           "next_actions": {
-            "description": "Operator next actions.",
             "items": {
-              "description": "Next action.",
               "type": "string"
             },
             "type": "array"
           },
           "schema_version": {
-            "description": "Cockpit schema version.",
-            "minimum": 1,
             "type": "integer"
           },
           "sections": {
-            "additionalProperties": true,
-            "description": "Selected cockpit sections.",
+            "additionalProperties": {
+              "additionalProperties": true,
+              "properties": {
+                "surface": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
             "type": "object"
           },
           "status": {
-            "description": "Aggregate attention status.",
             "type": "string"
           },
           "summary": {
             "additionalProperties": true,
-            "description": "Bounded attention counts and readiness summary.",
+            "properties": {
+              "active_todo_count": {
+                "type": "integer"
+              },
+              "publication_status": {
+                "type": "string"
+              },
+              "readiness_status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "active_todo_count",
+              "readiness_status",
+              "publication_status"
+            ],
             "type": "object"
           }
         },
@@ -176,12 +191,14 @@
           "schema_version",
           "front_door",
           "status",
+          "mode",
           "summary",
-          "sections"
+          "sections",
+          "next_actions"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:844e7784117561c8df0b13ccf2b5d11155abdfef971c65e6b90811d6bc2ed05d",
+      "output_schema_digest": "sha256:c2ff7e124acb78184bb9a4edcc0650c65ca428efbd3a247436f23758712c54f6",
       "title": "Attention Cockpit"
     },
     {
@@ -198,218 +215,615 @@
         },
         "readOnlyHint": false
       },
-      "description": "Apply an allowlisted control plan from a versioned confirmed-write envelope after rechecking preconditions, idempotency, provenance, confirmation, and MCP write policy.",
+      "description": "Apply only the unexpired previewed bytes when the exact digest is confirmed; fail closed on tampering, stale baselines, or expiry. Publication stays separate.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
-          "envelope": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "additionalProperties": false,
+          "confirm": {
+            "description": "Exact unexpired digest returned by change.preview.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "preview": {
+            "additionalProperties": true,
             "properties": {
-              "packet": {
-                "additionalProperties": true,
-                "description": "Control context packet used for preview and stale-precondition derivation.",
-                "type": "object"
-              },
-              "plan": {
-                "additionalProperties": true,
-                "description": "Operation plan returned by control.plan or control.apply_preview.",
+              "artifact": {
+                "additionalProperties": false,
                 "properties": {
-                  "idempotency_key": {
-                    "minLength": 1,
+                  "artifact_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
-                  "operations": {
+                  "changed_paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "changes": {
                     "items": {
                       "additionalProperties": false,
                       "properties": {
-                        "arguments": {
-                          "additionalProperties": true,
-                          "minProperties": 1,
-                          "type": "object"
-                        },
-                        "client_id": {
+                        "after_digest": {
+                          "pattern": "^[0-9a-f]{64}$",
                           "type": "string"
                         },
-                        "operation_id": {
-                          "minLength": 1,
+                        "after_text": {
                           "type": "string"
                         },
-                        "reason": {
+                        "before_digest": {
+                          "type": "string"
+                        },
+                        "before_exists": {
+                          "type": "boolean"
+                        },
+                        "diff": {
+                          "type": "string"
+                        },
+                        "path": {
                           "type": "string"
                         }
                       },
                       "required": [
-                        "operation_id",
-                        "arguments"
+                        "path",
+                        "before_exists",
+                        "before_digest",
+                        "after_digest",
+                        "after_text",
+                        "diff"
                       ],
                       "type": "object"
                     },
-                    "minItems": 1,
                     "type": "array"
                   },
-                  "plan_id": {
-                    "minLength": 1,
-                    "type": "string"
+                  "kind": {
+                    "const": "kb.exact_changes"
                   },
-                  "preconditions": {
+                  "operations": {
                     "items": {
-                      "additionalProperties": true,
-                      "type": "object"
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "content": {
+                                  "description": "Complete Markdown file content, including YAML frontmatter when needed.",
+                                  "type": "string"
+                                },
+                                "file_path": {
+                                  "description": "Safe object-local Markdown file path such as INSTRUCTIONS.md or skills/name/SKILL.md.",
+                                  "type": "string"
+                                },
+                                "object_path": {
+                                  "description": "Directory-backed durable KB object path that owns the file.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "object_path",
+                                "file_path",
+                                "content"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "object.file.markdown.write"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "body": {
+                                  "description": "Complete Markdown body for the section.",
+                                  "type": "string"
+                                },
+                                "heading": {
+                                  "description": "Markdown section heading text without leading # characters.",
+                                  "type": "string"
+                                },
+                                "level": {
+                                  "description": "Markdown heading level, defaults to 2.",
+                                  "maximum": 6,
+                                  "minimum": 2,
+                                  "type": "integer"
+                                },
+                                "object_path": {
+                                  "description": "Durable KB object path whose Markdown surface should be updated.",
+                                  "type": "string"
+                                },
+                                "surface": {
+                                  "description": "Allowed Markdown surface: state or links.",
+                                  "enum": [
+                                    "state",
+                                    "links"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "object_path",
+                                "surface",
+                                "heading",
+                                "body"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "object.markdown_section.upsert"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field_path": {
+                                  "description": "Dotted YAML field path such as status.current or profile.stage.",
+                                  "type": "string"
+                                },
+                                "object_path": {
+                                  "description": "Durable KB object path whose YAML surface should be updated.",
+                                  "type": "string"
+                                },
+                                "surface": {
+                                  "description": "Allowed YAML surface: metadata, publication, or artifacts.",
+                                  "enum": [
+                                    "metadata",
+                                    "publication",
+                                    "artifacts"
+                                  ],
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "description": "JSON/YAML-compatible value to assign at the field path."
+                                }
+                              },
+                              "required": [
+                                "object_path",
+                                "surface",
+                                "field_path",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "object.yaml.set"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "object_path": {
+                                  "description": "Durable KB object path whose log.md should receive the entry.",
+                                  "type": "string"
+                                },
+                                "text": {
+                                  "description": "Complete Markdown log entry to prepend to the object log.md.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "object_path",
+                                "text"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "object.log.append"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "anyOf": [
+                                {
+                                  "required": [
+                                    "child_slug"
+                                  ]
+                                },
+                                {
+                                  "required": [
+                                    "child_path"
+                                  ]
+                                }
+                              ],
+                              "properties": {
+                                "child_path": {
+                                  "description": "Optional full child object path; must be a direct child under parent_path.",
+                                  "type": "string"
+                                },
+                                "child_slug": {
+                                  "description": "Direct child slug to create under parent_path.",
+                                  "type": "string"
+                                },
+                                "log_entry": {
+                                  "description": "Optional initial Markdown log entry.",
+                                  "type": "string"
+                                },
+                                "object_kind": {
+                                  "description": "Semantic object kind such as manuscript, report, or object.",
+                                  "type": "string"
+                                },
+                                "parent_path": {
+                                  "description": "Existing directory-backed object or tracker path that should own the child.",
+                                  "type": "string"
+                                },
+                                "state_markdown": {
+                                  "description": "Optional complete state.md body. Defaults to a title-only state.",
+                                  "type": "string"
+                                },
+                                "title": {
+                                  "description": "Human-readable child object title.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "parent_path",
+                                "title"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "object.create_child"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        }
+                      ]
                     },
                     "type": "array"
                   },
-                  "summary": {
-                    "type": "string"
+                  "schema_version": {
+                    "const": 1
+                  },
+                  "status": {
+                    "const": "preview_ready"
                   }
                 },
                 "required": [
-                  "plan_id",
-                  "idempotency_key",
-                  "preconditions",
-                  "operations"
+                  "schema_version",
+                  "kind",
+                  "status",
+                  "operations",
+                  "changes",
+                  "changed_paths",
+                  "artifact_digest"
                 ],
                 "type": "object"
               },
-              "provenance": {
+              "confirmation": {
                 "additionalProperties": false,
                 "properties": {
-                  "actor": {
+                  "bound_actor": {
                     "type": "string"
                   },
-                  "episode_id": {
+                  "bound_session_id": {
                     "type": "string"
                   },
-                  "session_id": {
+                  "bound_source": {
                     "type": "string"
                   },
-                  "source": {
+                  "digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "expires_at": {
                     "type": "string"
                   }
                 },
                 "required": [
-                  "actor",
-                  "source",
-                  "session_id"
+                  "digest",
+                  "expires_at",
+                  "bound_actor",
+                  "bound_source",
+                  "bound_session_id"
                 ],
                 "type": "object"
               },
-              "schema_version": {
-                "const": 1,
-                "description": "Confirmed-write envelope schema version.",
-                "type": "integer"
+              "kind": {
+                "const": "kb.change_preview"
               },
-              "tool": {
-                "const": "control.apply",
-                "description": "Only the engine control apply route is eligible for this envelope.",
+              "mode": {
+                "enum": [
+                  "normal",
+                  "break_glass"
+                ]
+              },
+              "ok": {
+                "const": true
+              },
+              "publication": {
+                "additionalProperties": false,
+                "properties": {
+                  "change_tool_publishes": {
+                    "const": false
+                  },
+                  "separate_confirmation_required": {
+                    "const": true
+                  },
+                  "status": {
+                    "const": "not_attempted"
+                  }
+                },
+                "required": [
+                  "status",
+                  "separate_confirmation_required",
+                  "change_tool_publishes"
+                ],
+                "type": "object"
+              },
+              "reason": {
                 "type": "string"
               },
-              "user_confirmation": {
-                "additionalProperties": true,
-                "properties": {
-                  "confirmation_text": {
-                    "type": "string"
-                  },
-                  "confirmed": {
-                    "const": true,
-                    "type": "boolean"
-                  },
-                  "confirmed_at": {
-                    "type": "string"
-                  },
-                  "confirmed_by": {
-                    "type": "string"
-                  },
-                  "preview_status": {
-                    "type": "string"
-                  }
+              "schema_version": {
+                "const": 1
+              },
+              "scope": {
+                "items": {
+                  "type": "string"
                 },
-                "required": [
-                  "confirmed"
-                ],
-                "type": "object"
+                "type": "array",
+                "uniqueItems": true
+              },
+              "status": {
+                "const": "awaiting_confirmation"
               }
             },
             "required": [
               "schema_version",
-              "tool",
-              "packet",
-              "plan",
-              "provenance",
-              "user_confirmation"
+              "kind",
+              "status",
+              "ok",
+              "mode",
+              "reason",
+              "scope",
+              "artifact",
+              "confirmation",
+              "publication"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "preview",
+          "confirm"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:f6fb787b5188a564f1652263b8a62c3029fa18de9ceb583c28b81679e2589167",
+      "name": "change.apply_confirmed",
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "exact_changes": {
+            "additionalProperties": true,
+            "properties": {
+              "changed_paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "schema_version": {
+                "type": "integer"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "kind",
+              "status",
+              "ok",
+              "changed_paths"
             ],
             "type": "object"
           },
-          "stop_on_error": {
-            "description": "Stop confirmed execution after the first error.",
+          "idempotent_replay": {
             "type": "boolean"
-          }
-        },
-        "required": [
-          "envelope"
-        ],
-        "type": "object"
-      },
-      "input_schema_digest": "sha256:0f66329b8c6d373bf8082e3f1054bdc27c391d72f0232066cddb0383073c7bb6",
-      "name": "control.apply_confirmed",
-      "output_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "dry_run": {
-            "description": "Always false for confirmed apply.",
-            "type": "boolean"
+          },
+          "kind": {
+            "const": "kb.change_receipt"
           },
           "ok": {
-            "description": "Whether the exact confirmed apply succeeded.",
             "type": "boolean"
           },
-          "plan": {
-            "additionalProperties": true,
-            "description": "Applied operation plan.",
+          "publication": {
+            "additionalProperties": false,
+            "properties": {
+              "change_tool_publishes": {
+                "const": false
+              },
+              "separate_confirmation_required": {
+                "const": true
+              },
+              "status": {
+                "const": "not_attempted"
+              }
+            },
+            "required": [
+              "status",
+              "separate_confirmation_required",
+              "change_tool_publishes"
+            ],
             "type": "object"
           },
-          "results": {
-            "description": "Per-operation apply results.",
-            "items": {
-              "additionalProperties": true,
-              "description": "Operation apply result.",
-              "type": "object"
+          "readback": {
+            "additionalProperties": true,
+            "properties": {
+              "changed_paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "schema_version": {
+                "type": "integer"
+              },
+              "status": {
+                "type": "string"
+              }
             },
-            "type": "array"
+            "required": [
+              "schema_version",
+              "kind",
+              "status",
+              "ok",
+              "changed_paths"
+            ],
+            "type": "object"
+          },
+          "receipt": {
+            "additionalProperties": true,
+            "properties": {
+              "actor": {
+                "type": "string"
+              },
+              "artifact_digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "changed_paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "enum": [
+                  "normal",
+                  "break_glass"
+                ]
+              },
+              "ok": {
+                "const": true
+              },
+              "packet_type": {
+                "const": "request.receipt"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "receipt_id": {
+                "type": "string"
+              },
+              "route": {
+                "const": "change.apply_confirmed"
+              },
+              "saved": {
+                "const": true
+              },
+              "scope": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "state": {
+                "const": "applied"
+              }
+            },
+            "required": [
+              "packet_type",
+              "receipt_id",
+              "route",
+              "state",
+              "ok",
+              "saved",
+              "artifact_digest",
+              "actor",
+              "source",
+              "session_id",
+              "mode",
+              "reason",
+              "scope",
+              "changed_paths"
+            ],
+            "type": "object"
+          },
+          "schema_version": {
+            "const": 1
           },
           "status": {
-            "description": "Confirmed apply status.",
             "type": "string"
-          },
-          "transaction": {
-            "additionalProperties": true,
-            "description": "Committed transaction receipt.",
-            "type": "object"
-          },
-          "validation": {
-            "additionalProperties": true,
-            "description": "Final validation result.",
-            "type": "object"
           }
         },
         "required": [
+          "schema_version",
+          "kind",
           "status",
           "ok",
-          "dry_run",
-          "plan",
-          "validation",
-          "results",
-          "transaction"
+          "receipt",
+          "publication"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:54ae9b365ca450847740b9f232db7464e11c64a5755224e8f79d3f0bc8b135c6",
-      "title": "Apply Confirmed Control Plan"
+      "output_schema_digest": "sha256:056be62410688a5aef64e55ae74e30d1fc81ff2fc7aa753d60308a446873b941",
+      "title": "Apply Confirmed Exact KB Changes"
     },
     {
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": false,
+        "idempotentHint": true,
         "kbSurface": {
           "replacement": "",
           "surface": "primary",
@@ -420,199 +834,379 @@
         },
         "readOnlyHint": true
       },
-      "description": "Dry-run a harness-authored or fallback-planned control plan through deterministic executors without applying durable changes.",
+      "description": "Compile one bounded set of typed object changes into exact reviewed bytes, baselines, diffs, and an expiring confirmation digest without writing.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "actor": {
-            "description": "Optional actor label for preview provenance.",
+            "description": "Operator or harness actor.",
+            "minLength": 1,
             "type": "string"
           },
-          "packet": {
-            "additionalProperties": true,
-            "description": "Optional control packet returned by control.context.",
-            "type": "object"
-          },
-          "plan": {
-            "additionalProperties": true,
-            "description": "Control plan payload to preview.",
-            "type": "object"
-          },
-          "source": {
-            "description": "Optional source label for preview provenance.",
+          "mode": {
+            "description": "Normal or explicitly reasoned break-glass operation.",
+            "enum": [
+              "normal",
+              "break_glass"
+            ],
             "type": "string"
           },
-          "stop_on_error": {
-            "description": "Stop preview execution after the first error.",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "plan"
-        ],
-        "type": "object"
-      },
-      "input_schema_digest": "sha256:881ddc09d5730d1f11480a03d12d61a3522c48ec1cbd8f36de720b2ae5d8cc97",
-      "name": "control.apply_preview",
-      "output_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "dry_run": {
-            "description": "Always true for this route.",
-            "type": "boolean"
-          },
-          "ok": {
-            "description": "Whether validation and dry-run succeeded.",
-            "type": "boolean"
-          },
-          "plan": {
-            "additionalProperties": true,
-            "description": "Validated operation plan.",
-            "type": "object"
-          },
-          "results": {
-            "description": "Per-operation preview results.",
+          "operations": {
+            "description": "One or more of the five universal typed KB changes.",
             "items": {
-              "additionalProperties": true,
-              "description": "Operation preview result.",
-              "type": "object"
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "content": {
+                          "description": "Complete Markdown file content, including YAML frontmatter when needed.",
+                          "type": "string"
+                        },
+                        "file_path": {
+                          "description": "Safe object-local Markdown file path such as INSTRUCTIONS.md or skills/name/SKILL.md.",
+                          "type": "string"
+                        },
+                        "object_path": {
+                          "description": "Directory-backed durable KB object path that owns the file.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "object_path",
+                        "file_path",
+                        "content"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "object.file.markdown.write"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "body": {
+                          "description": "Complete Markdown body for the section.",
+                          "type": "string"
+                        },
+                        "heading": {
+                          "description": "Markdown section heading text without leading # characters.",
+                          "type": "string"
+                        },
+                        "level": {
+                          "description": "Markdown heading level, defaults to 2.",
+                          "maximum": 6,
+                          "minimum": 2,
+                          "type": "integer"
+                        },
+                        "object_path": {
+                          "description": "Durable KB object path whose Markdown surface should be updated.",
+                          "type": "string"
+                        },
+                        "surface": {
+                          "description": "Allowed Markdown surface: state or links.",
+                          "enum": [
+                            "state",
+                            "links"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "object_path",
+                        "surface",
+                        "heading",
+                        "body"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "object.markdown_section.upsert"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field_path": {
+                          "description": "Dotted YAML field path such as status.current or profile.stage.",
+                          "type": "string"
+                        },
+                        "object_path": {
+                          "description": "Durable KB object path whose YAML surface should be updated.",
+                          "type": "string"
+                        },
+                        "surface": {
+                          "description": "Allowed YAML surface: metadata, publication, or artifacts.",
+                          "enum": [
+                            "metadata",
+                            "publication",
+                            "artifacts"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {
+                          "description": "JSON/YAML-compatible value to assign at the field path."
+                        }
+                      },
+                      "required": [
+                        "object_path",
+                        "surface",
+                        "field_path",
+                        "value"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "object.yaml.set"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "object_path": {
+                          "description": "Durable KB object path whose log.md should receive the entry.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Complete Markdown log entry to prepend to the object log.md.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "object_path",
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "object.log.append"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "anyOf": [
+                        {
+                          "required": [
+                            "child_slug"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "child_path"
+                          ]
+                        }
+                      ],
+                      "properties": {
+                        "child_path": {
+                          "description": "Optional full child object path; must be a direct child under parent_path.",
+                          "type": "string"
+                        },
+                        "child_slug": {
+                          "description": "Direct child slug to create under parent_path.",
+                          "type": "string"
+                        },
+                        "log_entry": {
+                          "description": "Optional initial Markdown log entry.",
+                          "type": "string"
+                        },
+                        "object_kind": {
+                          "description": "Semantic object kind such as manuscript, report, or object.",
+                          "type": "string"
+                        },
+                        "parent_path": {
+                          "description": "Existing directory-backed object or tracker path that should own the child.",
+                          "type": "string"
+                        },
+                        "state_markdown": {
+                          "description": "Optional complete state.md body. Defaults to a title-only state.",
+                          "type": "string"
+                        },
+                        "title": {
+                          "description": "Human-readable child object title.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "parent_path",
+                        "title"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "object.create_child"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                }
+              ]
             },
+            "minItems": 1,
             "type": "array"
           },
-          "status": {
-            "description": "Preview status.",
+          "reason": {
+            "description": "Required rationale when mode is break_glass.",
             "type": "string"
           },
-          "transaction": {
-            "additionalProperties": true,
-            "description": "Dry-run transaction preview.",
-            "type": "object"
-          },
-          "validation": {
-            "additionalProperties": true,
-            "description": "Plan validation result.",
-            "type": "object"
-          }
-        },
-        "required": [
-          "status",
-          "ok",
-          "dry_run",
-          "plan",
-          "validation",
-          "results",
-          "transaction"
-        ],
-        "type": "object"
-      },
-      "output_schema_digest": "sha256:a56ba222e773dfd5a1d81bb7bccb10b07a6647323ea4e08077c1852a82f122f1",
-      "title": "Preview Control Apply"
-    },
-    {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "kbSurface": {
-          "replacement": "",
-          "surface": "primary",
-          "visibleIn": {
-            "compat": true,
-            "journey_first_strict": true
-          }
-        },
-        "readOnlyHint": true
-      },
-      "description": "Build and validate a versioned confirmed-write envelope without applying the plan.",
-      "input_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "description": "Human or agent actor requesting the confirmed write.",
-            "type": "string"
-          },
-          "episode_id": {
-            "description": "Optional broader conversation or run id.",
-            "type": "string"
-          },
-          "packet": {
-            "additionalProperties": true,
-            "description": "Control packet returned by control.context.",
-            "type": "object"
-          },
-          "plan": {
-            "additionalProperties": true,
-            "description": "Previewed control plan returned by control.apply_preview.",
-            "type": "object"
+          "scope": {
+            "description": "Required object-path prefixes when mode is break_glass.",
+            "items": {
+              "description": "Object path prefix.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           },
           "session_id": {
-            "description": "Stable harness session id for idempotency provenance.",
+            "description": "Stable harness session id.",
+            "minLength": 1,
             "type": "string"
           },
           "source": {
-            "description": "Harness or channel provenance, such as Hermes / Telegram.",
+            "description": "Harness or channel provenance.",
+            "minLength": 1,
             "type": "string"
-          },
-          "user_confirmation": {
-            "additionalProperties": true,
-            "description": "Explicit confirmation payload with confirmed=true.",
-            "type": "object"
           }
         },
         "required": [
-          "packet",
-          "plan",
+          "operations",
           "actor",
           "source",
-          "session_id",
-          "user_confirmation"
+          "session_id"
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:51c35d2462770b2bb76cf569ff472e7285d60c80d409bc9135a3218bff057bb0",
-      "name": "control.build_confirmed_envelope",
+      "input_schema_digest": "sha256:b6aac80461a5b6a902c9fce559e49356ab07cb6dfc1fb27330b3833814ad3f52",
+      "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
-          "confirmed_write_envelope": {
-            "additionalProperties": true,
-            "description": "Secret-safe envelope summary.",
-            "type": "object"
-          },
-          "envelope": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "artifact": {
             "additionalProperties": false,
             "properties": {
-              "packet": {
-                "additionalProperties": true,
-                "description": "Control context packet used for preview and stale-precondition derivation.",
-                "type": "object"
+              "artifact_digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
               },
-              "plan": {
-                "additionalProperties": true,
-                "description": "Operation plan returned by control.plan or control.apply_preview.",
-                "properties": {
-                  "idempotency_key": {
-                    "minLength": 1,
-                    "type": "string"
+              "changed_paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "after_digest": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "after_text": {
+                      "type": "string"
+                    },
+                    "before_digest": {
+                      "type": "string"
+                    },
+                    "before_exists": {
+                      "type": "boolean"
+                    },
+                    "diff": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
                   },
-                  "operations": {
-                    "items": {
+                  "required": [
+                    "path",
+                    "before_exists",
+                    "before_digest",
+                    "after_digest",
+                    "after_text",
+                    "diff"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "kb.exact_changes"
+              },
+              "operations": {
+                "items": {
+                  "oneOf": [
+                    {
                       "additionalProperties": false,
                       "properties": {
                         "arguments": {
-                          "additionalProperties": true,
-                          "minProperties": 1,
+                          "additionalProperties": false,
+                          "properties": {
+                            "content": {
+                              "description": "Complete Markdown file content, including YAML frontmatter when needed.",
+                              "type": "string"
+                            },
+                            "file_path": {
+                              "description": "Safe object-local Markdown file path such as INSTRUCTIONS.md or skills/name/SKILL.md.",
+                              "type": "string"
+                            },
+                            "object_path": {
+                              "description": "Directory-backed durable KB object path that owns the file.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "object_path",
+                            "file_path",
+                            "content"
+                          ],
                           "type": "object"
                         },
-                        "client_id": {
-                          "type": "string"
-                        },
                         "operation_id": {
-                          "minLength": 1,
-                          "type": "string"
-                        },
-                        "reason": {
-                          "type": "string"
+                          "const": "object.file.markdown.write"
                         }
                       },
                       "required": [
@@ -621,126 +1215,312 @@
                       ],
                       "type": "object"
                     },
-                    "minItems": 1,
-                    "type": "array"
-                  },
-                  "plan_id": {
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "preconditions": {
-                    "items": {
-                      "additionalProperties": true,
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "body": {
+                              "description": "Complete Markdown body for the section.",
+                              "type": "string"
+                            },
+                            "heading": {
+                              "description": "Markdown section heading text without leading # characters.",
+                              "type": "string"
+                            },
+                            "level": {
+                              "description": "Markdown heading level, defaults to 2.",
+                              "maximum": 6,
+                              "minimum": 2,
+                              "type": "integer"
+                            },
+                            "object_path": {
+                              "description": "Durable KB object path whose Markdown surface should be updated.",
+                              "type": "string"
+                            },
+                            "surface": {
+                              "description": "Allowed Markdown surface: state or links.",
+                              "enum": [
+                                "state",
+                                "links"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "object_path",
+                            "surface",
+                            "heading",
+                            "body"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "object.markdown_section.upsert"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
                       "type": "object"
                     },
-                    "type": "array"
-                  },
-                  "summary": {
-                    "type": "string"
-                  }
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "field_path": {
+                              "description": "Dotted YAML field path such as status.current or profile.stage.",
+                              "type": "string"
+                            },
+                            "object_path": {
+                              "description": "Durable KB object path whose YAML surface should be updated.",
+                              "type": "string"
+                            },
+                            "surface": {
+                              "description": "Allowed YAML surface: metadata, publication, or artifacts.",
+                              "enum": [
+                                "metadata",
+                                "publication",
+                                "artifacts"
+                              ],
+                              "type": "string"
+                            },
+                            "value": {
+                              "description": "JSON/YAML-compatible value to assign at the field path."
+                            }
+                          },
+                          "required": [
+                            "object_path",
+                            "surface",
+                            "field_path",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "object.yaml.set"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "object_path": {
+                              "description": "Durable KB object path whose log.md should receive the entry.",
+                              "type": "string"
+                            },
+                            "text": {
+                              "description": "Complete Markdown log entry to prepend to the object log.md.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "object_path",
+                            "text"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "object.log.append"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "anyOf": [
+                            {
+                              "required": [
+                                "child_slug"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "child_path"
+                              ]
+                            }
+                          ],
+                          "properties": {
+                            "child_path": {
+                              "description": "Optional full child object path; must be a direct child under parent_path.",
+                              "type": "string"
+                            },
+                            "child_slug": {
+                              "description": "Direct child slug to create under parent_path.",
+                              "type": "string"
+                            },
+                            "log_entry": {
+                              "description": "Optional initial Markdown log entry.",
+                              "type": "string"
+                            },
+                            "object_kind": {
+                              "description": "Semantic object kind such as manuscript, report, or object.",
+                              "type": "string"
+                            },
+                            "parent_path": {
+                              "description": "Existing directory-backed object or tracker path that should own the child.",
+                              "type": "string"
+                            },
+                            "state_markdown": {
+                              "description": "Optional complete state.md body. Defaults to a title-only state.",
+                              "type": "string"
+                            },
+                            "title": {
+                              "description": "Human-readable child object title.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "parent_path",
+                            "title"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "object.create_child"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 },
-                "required": [
-                  "plan_id",
-                  "idempotency_key",
-                  "preconditions",
-                  "operations"
-                ],
-                "type": "object"
-              },
-              "provenance": {
-                "additionalProperties": false,
-                "properties": {
-                  "actor": {
-                    "type": "string"
-                  },
-                  "episode_id": {
-                    "type": "string"
-                  },
-                  "session_id": {
-                    "type": "string"
-                  },
-                  "source": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "actor",
-                  "source",
-                  "session_id"
-                ],
-                "type": "object"
+                "type": "array"
               },
               "schema_version": {
-                "const": 1,
-                "description": "Confirmed-write envelope schema version.",
-                "type": "integer"
+                "const": 1
               },
-              "tool": {
-                "const": "control.apply",
-                "description": "Only the engine control apply route is eligible for this envelope.",
-                "type": "string"
-              },
-              "user_confirmation": {
-                "additionalProperties": true,
-                "properties": {
-                  "confirmation_text": {
-                    "type": "string"
-                  },
-                  "confirmed": {
-                    "const": true,
-                    "type": "boolean"
-                  },
-                  "confirmed_at": {
-                    "type": "string"
-                  },
-                  "confirmed_by": {
-                    "type": "string"
-                  },
-                  "preview_status": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "confirmed"
-                ],
-                "type": "object"
+              "status": {
+                "const": "preview_ready"
               }
             },
             "required": [
               "schema_version",
-              "tool",
-              "packet",
-              "plan",
-              "provenance",
-              "user_confirmation"
+              "kind",
+              "status",
+              "operations",
+              "changes",
+              "changed_paths",
+              "artifact_digest"
             ],
             "type": "object"
           },
-          "ok": {
-            "description": "Whether the envelope is valid.",
-            "type": "boolean"
+          "confirmation": {
+            "additionalProperties": false,
+            "properties": {
+              "bound_actor": {
+                "type": "string"
+              },
+              "bound_session_id": {
+                "type": "string"
+              },
+              "bound_source": {
+                "type": "string"
+              },
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "digest",
+              "expires_at",
+              "bound_actor",
+              "bound_source",
+              "bound_session_id"
+            ],
+            "type": "object"
           },
-          "status": {
-            "description": "Envelope validation status.",
+          "kind": {
+            "const": "kb.change_preview"
+          },
+          "mode": {
+            "enum": [
+              "normal",
+              "break_glass"
+            ]
+          },
+          "ok": {
+            "const": true
+          },
+          "publication": {
+            "additionalProperties": false,
+            "properties": {
+              "change_tool_publishes": {
+                "const": false
+              },
+              "separate_confirmation_required": {
+                "const": true
+              },
+              "status": {
+                "const": "not_attempted"
+              }
+            },
+            "required": [
+              "status",
+              "separate_confirmation_required",
+              "change_tool_publishes"
+            ],
+            "type": "object"
+          },
+          "reason": {
             "type": "string"
           },
-          "validation": {
-            "additionalProperties": true,
-            "description": "Envelope validation result.",
-            "type": "object"
+          "schema_version": {
+            "const": 1
+          },
+          "scope": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "status": {
+            "const": "awaiting_confirmation"
           }
         },
         "required": [
+          "schema_version",
+          "kind",
           "status",
           "ok",
-          "envelope",
-          "validation",
-          "confirmed_write_envelope"
+          "mode",
+          "reason",
+          "scope",
+          "artifact",
+          "confirmation",
+          "publication"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:8508f4bad7f5de11d86600bebdcb4922452121e1309a37b64a52187bc5ca1ad1",
-      "title": "Build Confirmed Control Envelope"
+      "output_schema_digest": "sha256:728fa59ccdbe272feb814e22838cc5313a719da4c7aa1e8a8652fe99aeca6e87",
+      "title": "Preview Exact KB Changes"
     },
     {
       "annotations": {
@@ -1038,24 +1818,102 @@
             "description": "Ranked route candidates.",
             "items": {
               "additionalProperties": true,
-              "description": "Route candidate.",
+              "properties": {
+                "call_sequence": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "confidence": {
+                  "type": "number"
+                },
+                "confirmation_required": {
+                  "type": "boolean"
+                },
+                "journey_id": {
+                  "type": "string"
+                },
+                "mcp_policy": {
+                  "type": "string"
+                },
+                "template_or_tool": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "template_or_tool",
+                "mcp_policy",
+                "journey_id",
+                "confidence",
+                "confirmation_required",
+                "call_sequence"
+              ],
               "type": "object"
             },
             "type": "array"
           },
           "intent": {
             "additionalProperties": true,
-            "description": "Resolved intent.",
+            "properties": {
+              "confidence": {
+                "type": "number"
+              },
+              "id": {
+                "type": "string"
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "confidence",
+              "rationale"
+            ],
             "type": "object"
           },
           "journey": {
             "additionalProperties": true,
-            "description": "Canonical journey route.",
+            "properties": {
+              "conformance_resource": {
+                "type": "string"
+              },
+              "journey_id": {
+                "type": "string"
+              },
+              "resource": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "journey_id",
+              "resource",
+              "conformance_resource"
+            ],
             "type": "object"
           },
           "route_packet": {
             "additionalProperties": true,
-            "description": "Harness route guidance.",
+            "properties": {
+              "preview_path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "recommended_journey_id": {
+                "type": "string"
+              },
+              "schema_version": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "schema_version",
+              "recommended_journey_id",
+              "preview_path"
+            ],
             "type": "object"
           }
         },
@@ -1067,7 +1925,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:db91f37df8dd16983a2ac59280804f93ce5f7516f64495b5133d5e34bb7b7085",
+      "output_schema_digest": "sha256:8ac16ac9d11ba64d52475c41bf6aad349f60efee9295ba7e1236eeefde32cfe1",
       "title": "Policy Route Explain"
     },
     {
@@ -1110,44 +1968,56 @@
         "properties": {
           "git": {
             "additionalProperties": true,
-            "description": "Secret-safe Git publication observation.",
+            "properties": {
+              "clean": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "clean"
+            ],
             "type": "object"
           },
           "ok": {
-            "description": "Whether publication state is currently acceptable.",
             "type": "boolean"
           },
-          "receipt_status": {
-            "description": "Publication receipt alignment status.",
-            "type": "string"
-          },
-          "recommended_next_action": {
-            "description": "Operator next action.",
-            "type": "string"
-          },
           "schema_version": {
-            "description": "Publication status schema version.",
-            "minimum": 1,
             "type": "integer"
           },
           "scope": {
             "additionalProperties": true,
-            "description": "Requested path or transaction scope.",
+            "properties": {
+              "publication_state": {
+                "type": "string"
+              },
+              "unrelated_workspace_dirty": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "publication_state",
+              "unrelated_workspace_dirty"
+            ],
             "type": "object"
           },
           "status": {
-            "description": "Observed publication status.",
             "type": "string"
           }
         },
         "required": [
           "schema_version",
           "status",
-          "ok"
+          "ok",
+          "git",
+          "scope"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:cb8fd3dbc399f3d1c30afa88ce49381a0941a250ccdd966cc4c3b009bcf4ab15",
+      "output_schema_digest": "sha256:1758b3ff246439cb09d5d717cbe40a97e55d529dbddbf4f73493bb5e5bca2fe0",
       "title": "Publication Status"
     },
     {
@@ -1179,6 +2049,10 @@
             },
             "type": "array"
           },
+          "include_archive": {
+            "description": "Include archived objects in search results.",
+            "type": "boolean"
+          },
           "limit": {
             "description": "Maximum search results to return.",
             "minimum": 0,
@@ -1198,38 +2072,53 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:17353ce6a11c2dfd34a3eee4527957ae497cc11d57b1648d3fe9d9280780e6a5",
+      "input_schema_digest": "sha256:35a0df9a15871d5f302732915ce60a261f9cb2f7e0b530f1a1c9fa090fbc0b05",
       "name": "search.query",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
           "count": {
-            "description": "Number of returned matches.",
-            "minimum": 0,
             "type": "integer"
           },
-          "query": {
-            "description": "Executed search query.",
-            "type": "string"
-          },
-          "results": {
-            "description": "Matching file snippets and metadata.",
+          "items": {
             "items": {
-              "additionalProperties": true,
-              "description": "Search result.",
+              "additionalProperties": false,
+              "properties": {
+                "entity_path": {
+                  "type": "string"
+                },
+                "file_path": {
+                  "type": "string"
+                },
+                "file_type": {
+                  "type": "string"
+                },
+                "rank": {
+                  "type": "number"
+                },
+                "snippet": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entity_path",
+                "file_type",
+                "file_path",
+                "snippet",
+                "rank"
+              ],
               "type": "object"
             },
             "type": "array"
           }
         },
         "required": [
-          "query",
-          "count",
-          "results"
+          "items",
+          "count"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:82531fd67b91b10cc32c91680805bcf1a6065d4be49b8af40e8ab98e96367bce",
+      "output_schema_digest": "sha256:87a4a453eddc8a2d5c119cf1064dcee1b80c2d879f5f451e7dc7e759db733d98",
       "title": "Search KB"
     },
     {
@@ -1266,27 +2155,88 @@
       "output_schema": {
         "additionalProperties": true,
         "properties": {
+          "graph_validation": {
+            "additionalProperties": true,
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
           "resources": {
-            "description": "Resource readiness observations.",
             "items": {
               "additionalProperties": true,
-              "description": "Resource readiness row.",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "resource_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "resource_id",
+                "owner",
+                "kind",
+                "status"
+              ],
               "type": "object"
             },
             "type": "array"
           },
+          "runtime_readiness": {
+            "additionalProperties": true,
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "source_coverage": {
+            "additionalProperties": true,
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
           "status": {
-            "description": "Aggregate workspace readiness.",
             "type": "string"
           }
         },
         "required": [
           "status",
+          "ready",
+          "mode",
           "resources"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:a4c08f5bace651ff37d85b67b13e2f1a559628f982a48957e32b9f6d154741f6",
+      "output_schema_digest": "sha256:e1baa6671cbf5c71df97d16cad3b73fdfba2af3b188c0b56a92cc95f021048ef",
       "title": "Workspace Readiness"
     }
   ]

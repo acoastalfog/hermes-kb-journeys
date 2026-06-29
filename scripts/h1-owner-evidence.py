@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_PLUGIN_REF = "e8bc5f536a61dafaf45f884dbb50177781437992"
+EXPECTED_PLUGIN_REF = "84f714952fcd0c5c5747f9e599b3a9c3dd83d817"
 EXPECTED_HERMES_REF = "v2026.6.19"
 EXPECTED_HERMES_REVISION = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
 EXPECTED_SOURCE_REPOSITORY = "acoastalfog/hermes-kb-journeys"
