@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_PLUGIN_REF = "84f714952fcd0c5c5747f9e599b3a9c3dd83d817"
+EXPECTED_PLUGIN_REF = "1448178d99c078c259e8b8def5bca990a4440a44"
 EXPECTED_HERMES_REF = "v2026.6.19"
 EXPECTED_HERMES_REVISION = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3"
 EXPECTED_SOURCE_REPOSITORY = "acoastalfog/hermes-kb-journeys"
@@ -68,7 +68,7 @@ CHECK_TESTS: dict[str, tuple[str, ...]] = {
         "test_user_plugin_loads_from_standard_plugin_directory",
         "test_generated_descriptor_bundle_is_strict_and_legacy_free",
         "test_kb_sync_starts_canonical_prepare_and_renders_next_action",
-        "test_kb_sync_confirmation_rejects_another_actor_or_conversation",
+        "test_kb_sync_apply_rejects_another_actor_or_conversation",
         "test_dispatch_first_skips_every_non_allowlisted_tool",
         "test_runtime_rejects_more_than_twelve_effective_tools",
     ),
