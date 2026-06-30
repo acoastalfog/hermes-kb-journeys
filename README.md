@@ -59,16 +59,16 @@ local test results do not count as a green GitHub workflow.
 
 ## Canonical sync and change surface
 
-Version 0.6.0 makes `/kb sync` call the generated `kb.sync.prepare` contract.
+Version 0.7.0 makes `/kb sync` call the generated `kb.sync.prepare` contract.
 Hermes records only the run id and renders the engine's next harness action;
 the harness gathers evidence and exercises judgment. `/kb sync status` reads
-the same durable run, and `/kb sync confirm` calls `kb.sync.resume` only for
-the current exact digest. Hermes claims success only after a separate
+the same durable run, and `/kb sync apply` calls `kb.sync.resume` with standing
+safe-write authorization—no digest-copy ceremony. Hermes claims success only after a separate
 `kb.sync.status` readback reports the same run terminally completed.
 Publication remains a separate action and is never implied by sync.
 
 The same generated primary profile exposes only the two-step
-`change.preview` and `change.apply_confirmed` write surface. Hermes does not
+`change.preview` and `change.apply` write surface. Hermes does not
 restore the retired overloaded `control.*` wrappers.
 
 The old `/kbsync`, `update_kb`, and `/kb run sync` entrypoints remain hard

@@ -1,27 +1,27 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:f6fb787b5188a564f1652263b8a62c3029fa18de9ceb583c28b81679e2589167",
-      "name": "change.apply_confirmed",
-      "output_schema_digest": "sha256:056be62410688a5aef64e55ae74e30d1fc81ff2fc7aa753d60308a446873b941"
+      "input_schema_digest": "sha256:859f4165998b739931b17bc35def6291c9c095114823289fd7c706eb12f22d65",
+      "name": "change.apply",
+      "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
     {
-      "input_schema_digest": "sha256:8fe85fcbb65993851f869d32f69faea854aa13f75f64f420ec9c2e2c23190af1",
+      "input_schema_digest": "sha256:ac191ee0490868b467b708c4063d8ba00a7659fac863972b8f166cb3d4c00978",
       "name": "kb.sync.prepare",
       "output_schema_digest": "sha256:a1d49c64a799ce3502af7c999fbdb480abf5783b50db2e2163748cdc55834caf"
     },
     {
-      "input_schema_digest": "sha256:ce47d97c1034423229ac4dafa6a23c7583aa5a30e6e19912c2882468f5a62111",
+      "input_schema_digest": "sha256:04e89c9cea30f2b7beb99567e3ad675d64a01c02d753f2b616e64cc214ea338c",
       "name": "kb.sync.resume",
-      "output_schema_digest": "sha256:1bf3ee47d00f8ab850dad05bb0a0e94e70e7133a131c11cd188dbdb4be92cbaa"
+      "output_schema_digest": "sha256:ee8b3da71d7fdf8abec97df89d4b3b50db4e209af49fe04c9ef37948da2910a1"
     }
   ],
-  "digest": "sha256:a900fb877a175f155854f855c59f9f66c6af2ce308e99c4fd0cc731ed326360f",
-  "engine_source_revision": "c63736c46b31f340e68ef61d1bf582b74c0a4bcc",
-  "engine_version": "0.42.0",
+  "digest": "sha256:feb4961c0d1f0bef2e723c3a97dfca9a64a3c8bbbef7dc326d2df2313e15c598",
+  "engine_source_revision": "8540499a715e0aada1a5738e829dae8bdfe26755",
+  "engine_version": "0.45.0",
   "journeys": [
     {
-      "confirmation_required": true,
+      "confirmation_required": false,
       "journey_id": "kb_sync",
       "required_resources": [],
       "required_tools": [
@@ -63,7 +63,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:cf686ee83fbe07ea7c0b6b213c2735d309863956fd06b72ec51fd800a95e9d22",
+  "source_export_digest": "sha256:9e0e997b8998d1e3636d0e95da08e111b4649e06c459bee005b7fd5d59655f83",
   "tools": [
     {
       "annotations": {
@@ -215,12 +215,12 @@
         },
         "readOnlyHint": false
       },
-      "description": "Apply only the unexpired previewed bytes when the exact digest is confirmed; fail closed on tampering, stale baselines, or expiry. Publication stays separate.",
+      "description": "Apply normal bounded previews under standing safe-write authorization; break-glass previews still require human confirmation. Fail closed on tampering, stale baselines, or expiry. Publication stays separate.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "confirm": {
-            "description": "Exact unexpired digest returned by change.preview.",
+            "description": "Required only when the preview authorization mode is human_confirmation.",
             "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
@@ -282,6 +282,51 @@
                   "operations": {
                     "items": {
                       "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "captured_at": {
+                                  "format": "date-time",
+                                  "type": "string"
+                                },
+                                "meeting_file": {
+                                  "pattern": "^[^/]+/[^/]+/meetings/[^/]+\\.md$",
+                                  "type": "string"
+                                },
+                                "reason": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "run_id": {
+                                  "type": "string"
+                                },
+                                "synthesis_version": {
+                                  "maxLength": 160,
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "meeting_file",
+                                "synthesis_version",
+                                "captured_at",
+                                "reason"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "meeting.synthesis.reconcile"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
                         {
                           "additionalProperties": false,
                           "properties": {
@@ -507,6 +552,722 @@
                             "arguments"
                           ],
                           "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "before_hash": {
+                                      "pattern": "^[0-9a-f]{64}$",
+                                      "type": "string"
+                                    },
+                                    "log_entry": {
+                                      "type": "string"
+                                    },
+                                    "operation": {
+                                      "const": "update"
+                                    },
+                                    "situation_yaml": {
+                                      "additionalProperties": false,
+                                      "minProperties": 1,
+                                      "properties": {
+                                        "attention": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_required_now": {
+                                              "type": "boolean"
+                                            },
+                                            "evidence_gaps": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "reason": {
+                                              "type": "string"
+                                            },
+                                            "required": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_response_now": {
+                                              "type": "boolean"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "components": {
+                                          "items": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "action_descriptors": {
+                                                "items": {
+                                                  "additionalProperties": false,
+                                                  "properties": {
+                                                    "action_id": {
+                                                      "minLength": 1,
+                                                      "type": "string"
+                                                    },
+                                                    "confirm_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "dashboard_owned_write": {
+                                                      "const": false
+                                                    },
+                                                    "disabled_reason": {
+                                                      "type": "string"
+                                                    },
+                                                    "display": {
+                                                      "type": "string"
+                                                    },
+                                                    "effect_class": {
+                                                      "type": "string"
+                                                    },
+                                                    "label": {
+                                                      "type": "string"
+                                                    },
+                                                    "mutation": {
+                                                      "enum": [
+                                                        "confirmed_route",
+                                                        "read_only"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "operation": {
+                                                      "enum": [
+                                                        "read",
+                                                        "canonical_confirmed_route"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "owner": {
+                                                      "type": "string"
+                                                    },
+                                                    "packet_type": {
+                                                      "const": "dashboard_action_descriptor"
+                                                    },
+                                                    "preview_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "requires_canonical_tool": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "requires_confirmation": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "surface": {
+                                                      "type": "string"
+                                                    },
+                                                    "target_ref": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "required": [],
+                                                  "type": "object"
+                                                },
+                                                "type": "array"
+                                              },
+                                              "completed_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "component_id": {
+                                                "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                                "type": "string"
+                                              },
+                                              "created_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "entity_refs": {
+                                                "items": {
+                                                  "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_gaps": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "kind": {
+                                                "enum": [
+                                                  "blocker",
+                                                  "child_commitment",
+                                                  "completed_commitment",
+                                                  "decision",
+                                                  "evidence",
+                                                  "handoff",
+                                                  "note",
+                                                  "watch"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "provenance": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                  "run_id": {
+                                                    "type": "string"
+                                                  },
+                                                  "source": {
+                                                    "type": "string"
+                                                  },
+                                                  "source_ref": {
+                                                    "type": "string"
+                                                  },
+                                                  "workflow_id": {
+                                                    "type": "string"
+                                                  }
+                                                },
+                                                "required": [],
+                                                "type": "object"
+                                              },
+                                              "status": {
+                                                "enum": [
+                                                  "active",
+                                                  "archived",
+                                                  "blocked",
+                                                  "completed",
+                                                  "superseded",
+                                                  "waiting"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "summary": {
+                                                "type": "string"
+                                              },
+                                              "superseded_by": {
+                                                "type": "string"
+                                              },
+                                              "title": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "todo_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "updated_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [
+                                              "component_id",
+                                              "kind",
+                                              "status",
+                                              "title"
+                                            ],
+                                            "type": "object"
+                                          },
+                                          "type": "array"
+                                        },
+                                        "due_date": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "evidence_refs": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "last_evidence_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "linked_todos": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "next_check": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "opened_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "owner_role": {
+                                          "enum": [
+                                            "approver",
+                                            "contributor",
+                                            "delegated_tracker",
+                                            "informed",
+                                            "monitor",
+                                            "monitor_and_unblock",
+                                            "owner"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "primary_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_objects": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "resolved_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "schema_version": {
+                                          "enum": [
+                                            1,
+                                            2
+                                          ],
+                                          "type": "integer"
+                                        },
+                                        "slug": {
+                                          "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                          "type": "string"
+                                        },
+                                        "status": {
+                                          "enum": [
+                                            "active",
+                                            "blocked",
+                                            "emerging",
+                                            "resolving",
+                                            "waiting"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "title": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "urgency": {
+                                          "enum": [
+                                            "blocked",
+                                            "monitor",
+                                            "none",
+                                            "time_bound",
+                                            "urgent"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "state_md": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "operation",
+                                    "slug",
+                                    "situation_yaml"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "before_hash": {
+                                      "pattern": "^[0-9a-f]{64}$",
+                                      "type": "string"
+                                    },
+                                    "log_entry": {
+                                      "type": "string"
+                                    },
+                                    "operation": {
+                                      "const": "resolve"
+                                    },
+                                    "situation_yaml": {
+                                      "additionalProperties": false,
+                                      "minProperties": 1,
+                                      "properties": {
+                                        "attention": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_required_now": {
+                                              "type": "boolean"
+                                            },
+                                            "evidence_gaps": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "reason": {
+                                              "type": "string"
+                                            },
+                                            "required": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_response_now": {
+                                              "type": "boolean"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "components": {
+                                          "items": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "action_descriptors": {
+                                                "items": {
+                                                  "additionalProperties": false,
+                                                  "properties": {
+                                                    "action_id": {
+                                                      "minLength": 1,
+                                                      "type": "string"
+                                                    },
+                                                    "confirm_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "dashboard_owned_write": {
+                                                      "const": false
+                                                    },
+                                                    "disabled_reason": {
+                                                      "type": "string"
+                                                    },
+                                                    "display": {
+                                                      "type": "string"
+                                                    },
+                                                    "effect_class": {
+                                                      "type": "string"
+                                                    },
+                                                    "label": {
+                                                      "type": "string"
+                                                    },
+                                                    "mutation": {
+                                                      "enum": [
+                                                        "confirmed_route",
+                                                        "read_only"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "operation": {
+                                                      "enum": [
+                                                        "read",
+                                                        "canonical_confirmed_route"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "owner": {
+                                                      "type": "string"
+                                                    },
+                                                    "packet_type": {
+                                                      "const": "dashboard_action_descriptor"
+                                                    },
+                                                    "preview_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "requires_canonical_tool": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "requires_confirmation": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "surface": {
+                                                      "type": "string"
+                                                    },
+                                                    "target_ref": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "required": [],
+                                                  "type": "object"
+                                                },
+                                                "type": "array"
+                                              },
+                                              "completed_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "component_id": {
+                                                "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                                "type": "string"
+                                              },
+                                              "created_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "entity_refs": {
+                                                "items": {
+                                                  "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_gaps": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "kind": {
+                                                "enum": [
+                                                  "blocker",
+                                                  "child_commitment",
+                                                  "completed_commitment",
+                                                  "decision",
+                                                  "evidence",
+                                                  "handoff",
+                                                  "note",
+                                                  "watch"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "provenance": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                  "run_id": {
+                                                    "type": "string"
+                                                  },
+                                                  "source": {
+                                                    "type": "string"
+                                                  },
+                                                  "source_ref": {
+                                                    "type": "string"
+                                                  },
+                                                  "workflow_id": {
+                                                    "type": "string"
+                                                  }
+                                                },
+                                                "required": [],
+                                                "type": "object"
+                                              },
+                                              "status": {
+                                                "enum": [
+                                                  "active",
+                                                  "archived",
+                                                  "blocked",
+                                                  "completed",
+                                                  "superseded",
+                                                  "waiting"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "summary": {
+                                                "type": "string"
+                                              },
+                                              "superseded_by": {
+                                                "type": "string"
+                                              },
+                                              "title": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "todo_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "updated_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [
+                                              "component_id",
+                                              "kind",
+                                              "status",
+                                              "title"
+                                            ],
+                                            "type": "object"
+                                          },
+                                          "type": "array"
+                                        },
+                                        "due_date": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "evidence_refs": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "last_evidence_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "linked_todos": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "next_check": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "opened_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "owner_role": {
+                                          "enum": [
+                                            "approver",
+                                            "contributor",
+                                            "delegated_tracker",
+                                            "informed",
+                                            "monitor",
+                                            "monitor_and_unblock",
+                                            "owner"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "primary_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_objects": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "resolved_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "schema_version": {
+                                          "enum": [
+                                            1,
+                                            2
+                                          ],
+                                          "type": "integer"
+                                        },
+                                        "slug": {
+                                          "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                          "type": "string"
+                                        },
+                                        "status": {
+                                          "const": "resolved"
+                                        },
+                                        "title": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "urgency": {
+                                          "enum": [
+                                            "blocked",
+                                            "monitor",
+                                            "none",
+                                            "time_bound",
+                                            "urgent"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "state_md": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "operation",
+                                    "slug",
+                                    "situation_yaml"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            "operation_id": {
+                              "const": "situation.change"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
                         }
                       ]
                     },
@@ -530,7 +1291,7 @@
                 ],
                 "type": "object"
               },
-              "confirmation": {
+              "authorization": {
                 "additionalProperties": false,
                 "properties": {
                   "bound_actor": {
@@ -548,6 +1309,15 @@
                   },
                   "expires_at": {
                     "type": "string"
+                  },
+                  "human_confirmation_required": {
+                    "type": "boolean"
+                  },
+                  "mode": {
+                    "enum": [
+                      "standing_safe_write",
+                      "human_confirmation"
+                    ]
                   }
                 },
                 "required": [
@@ -555,7 +1325,9 @@
                   "expires_at",
                   "bound_actor",
                   "bound_source",
-                  "bound_session_id"
+                  "bound_session_id",
+                  "mode",
+                  "human_confirmation_required"
                 ],
                 "type": "object"
               },
@@ -605,7 +1377,10 @@
                 "uniqueItems": true
               },
               "status": {
-                "const": "awaiting_confirmation"
+                "enum": [
+                  "ready_to_apply",
+                  "awaiting_confirmation"
+                ]
               }
             },
             "required": [
@@ -617,20 +1392,19 @@
               "reason",
               "scope",
               "artifact",
-              "confirmation",
+              "authorization",
               "publication"
             ],
             "type": "object"
           }
         },
         "required": [
-          "preview",
-          "confirm"
+          "preview"
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:f6fb787b5188a564f1652263b8a62c3029fa18de9ceb583c28b81679e2589167",
-      "name": "change.apply_confirmed",
+      "input_schema_digest": "sha256:859f4165998b739931b17bc35def6291c9c095114823289fd7c706eb12f22d65",
+      "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
@@ -735,6 +1509,12 @@
                 "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
+              "authorization_mode": {
+                "enum": [
+                  "standing_safe_write",
+                  "human_confirmation"
+                ]
+              },
               "changed_paths": {
                 "items": {
                   "type": "string"
@@ -760,7 +1540,7 @@
                 "type": "string"
               },
               "route": {
-                "const": "change.apply_confirmed"
+                "const": "change.apply"
               },
               "saved": {
                 "const": true
@@ -793,6 +1573,7 @@
               "actor",
               "source",
               "session_id",
+              "authorization_mode",
               "mode",
               "reason",
               "scope",
@@ -817,8 +1598,8 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:056be62410688a5aef64e55ae74e30d1fc81ff2fc7aa753d60308a446873b941",
-      "title": "Apply Confirmed Exact KB Changes"
+      "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc",
+      "title": "Apply Exact KB Changes"
     },
     {
       "annotations": {
@@ -834,7 +1615,7 @@
         },
         "readOnlyHint": true
       },
-      "description": "Compile one bounded set of typed object changes into exact reviewed bytes, baselines, diffs, and an expiring confirmation digest without writing.",
+      "description": "Compile one bounded set of typed object changes into exact reviewed bytes, baselines, diffs, and an expiring integrity digest without writing.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -852,9 +1633,54 @@
             "type": "string"
           },
           "operations": {
-            "description": "One or more of the five universal typed KB changes.",
+            "description": "One or more typed exact KB changes.",
             "items": {
               "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "captured_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "meeting_file": {
+                          "pattern": "^[^/]+/[^/]+/meetings/[^/]+\\.md$",
+                          "type": "string"
+                        },
+                        "reason": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "run_id": {
+                          "type": "string"
+                        },
+                        "synthesis_version": {
+                          "maxLength": 160,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "meeting_file",
+                        "synthesis_version",
+                        "captured_at",
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "meeting.synthesis.reconcile"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
                 {
                   "additionalProperties": false,
                   "properties": {
@@ -1080,6 +1906,722 @@
                     "arguments"
                   ],
                   "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "before_hash": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "log_entry": {
+                              "type": "string"
+                            },
+                            "operation": {
+                              "const": "update"
+                            },
+                            "situation_yaml": {
+                              "additionalProperties": false,
+                              "minProperties": 1,
+                              "properties": {
+                                "attention": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "action_required_now": {
+                                      "type": "boolean"
+                                    },
+                                    "evidence_gaps": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "reason": {
+                                      "type": "string"
+                                    },
+                                    "required": {
+                                      "type": "boolean"
+                                    },
+                                    "requires_response_now": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "components": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "action_descriptors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "confirm_tool": {
+                                              "type": "string"
+                                            },
+                                            "dashboard_owned_write": {
+                                              "const": false
+                                            },
+                                            "disabled_reason": {
+                                              "type": "string"
+                                            },
+                                            "display": {
+                                              "type": "string"
+                                            },
+                                            "effect_class": {
+                                              "type": "string"
+                                            },
+                                            "label": {
+                                              "type": "string"
+                                            },
+                                            "mutation": {
+                                              "enum": [
+                                                "confirmed_route",
+                                                "read_only"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "operation": {
+                                              "enum": [
+                                                "read",
+                                                "canonical_confirmed_route"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "owner": {
+                                              "type": "string"
+                                            },
+                                            "packet_type": {
+                                              "const": "dashboard_action_descriptor"
+                                            },
+                                            "preview_tool": {
+                                              "type": "string"
+                                            },
+                                            "requires_canonical_tool": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_confirmation": {
+                                              "type": "boolean"
+                                            },
+                                            "surface": {
+                                              "type": "string"
+                                            },
+                                            "target_ref": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "type": "array"
+                                      },
+                                      "completed_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "component_id": {
+                                        "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                        "type": "string"
+                                      },
+                                      "created_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "entity_refs": {
+                                        "items": {
+                                          "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_gaps": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "blocker",
+                                          "child_commitment",
+                                          "completed_commitment",
+                                          "decision",
+                                          "evidence",
+                                          "handoff",
+                                          "note",
+                                          "watch"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "provenance": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "run_id": {
+                                            "type": "string"
+                                          },
+                                          "source": {
+                                            "type": "string"
+                                          },
+                                          "source_ref": {
+                                            "type": "string"
+                                          },
+                                          "workflow_id": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [],
+                                        "type": "object"
+                                      },
+                                      "status": {
+                                        "enum": [
+                                          "active",
+                                          "archived",
+                                          "blocked",
+                                          "completed",
+                                          "superseded",
+                                          "waiting"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "summary": {
+                                        "type": "string"
+                                      },
+                                      "superseded_by": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "todo_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "updated_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "component_id",
+                                      "kind",
+                                      "status",
+                                      "title"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                },
+                                "due_date": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "evidence_refs": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "last_evidence_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "linked_todos": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "next_check": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "opened_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "owner_role": {
+                                  "enum": [
+                                    "approver",
+                                    "contributor",
+                                    "delegated_tracker",
+                                    "informed",
+                                    "monitor",
+                                    "monitor_and_unblock",
+                                    "owner"
+                                  ],
+                                  "type": "string"
+                                },
+                                "primary_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_objects": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "resolved_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "schema_version": {
+                                  "enum": [
+                                    1,
+                                    2
+                                  ],
+                                  "type": "integer"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "status": {
+                                  "enum": [
+                                    "active",
+                                    "blocked",
+                                    "emerging",
+                                    "resolving",
+                                    "waiting"
+                                  ],
+                                  "type": "string"
+                                },
+                                "title": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "urgency": {
+                                  "enum": [
+                                    "blocked",
+                                    "monitor",
+                                    "none",
+                                    "time_bound",
+                                    "urgent"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            },
+                            "slug": {
+                              "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                              "type": "string"
+                            },
+                            "state_md": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "operation",
+                            "slug",
+                            "situation_yaml"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "before_hash": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "log_entry": {
+                              "type": "string"
+                            },
+                            "operation": {
+                              "const": "resolve"
+                            },
+                            "situation_yaml": {
+                              "additionalProperties": false,
+                              "minProperties": 1,
+                              "properties": {
+                                "attention": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "action_required_now": {
+                                      "type": "boolean"
+                                    },
+                                    "evidence_gaps": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "reason": {
+                                      "type": "string"
+                                    },
+                                    "required": {
+                                      "type": "boolean"
+                                    },
+                                    "requires_response_now": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "components": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "action_descriptors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "confirm_tool": {
+                                              "type": "string"
+                                            },
+                                            "dashboard_owned_write": {
+                                              "const": false
+                                            },
+                                            "disabled_reason": {
+                                              "type": "string"
+                                            },
+                                            "display": {
+                                              "type": "string"
+                                            },
+                                            "effect_class": {
+                                              "type": "string"
+                                            },
+                                            "label": {
+                                              "type": "string"
+                                            },
+                                            "mutation": {
+                                              "enum": [
+                                                "confirmed_route",
+                                                "read_only"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "operation": {
+                                              "enum": [
+                                                "read",
+                                                "canonical_confirmed_route"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "owner": {
+                                              "type": "string"
+                                            },
+                                            "packet_type": {
+                                              "const": "dashboard_action_descriptor"
+                                            },
+                                            "preview_tool": {
+                                              "type": "string"
+                                            },
+                                            "requires_canonical_tool": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_confirmation": {
+                                              "type": "boolean"
+                                            },
+                                            "surface": {
+                                              "type": "string"
+                                            },
+                                            "target_ref": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "type": "array"
+                                      },
+                                      "completed_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "component_id": {
+                                        "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                        "type": "string"
+                                      },
+                                      "created_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "entity_refs": {
+                                        "items": {
+                                          "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_gaps": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "blocker",
+                                          "child_commitment",
+                                          "completed_commitment",
+                                          "decision",
+                                          "evidence",
+                                          "handoff",
+                                          "note",
+                                          "watch"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "provenance": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "run_id": {
+                                            "type": "string"
+                                          },
+                                          "source": {
+                                            "type": "string"
+                                          },
+                                          "source_ref": {
+                                            "type": "string"
+                                          },
+                                          "workflow_id": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [],
+                                        "type": "object"
+                                      },
+                                      "status": {
+                                        "enum": [
+                                          "active",
+                                          "archived",
+                                          "blocked",
+                                          "completed",
+                                          "superseded",
+                                          "waiting"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "summary": {
+                                        "type": "string"
+                                      },
+                                      "superseded_by": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "todo_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "updated_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "component_id",
+                                      "kind",
+                                      "status",
+                                      "title"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                },
+                                "due_date": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "evidence_refs": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "last_evidence_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "linked_todos": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "next_check": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "opened_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "owner_role": {
+                                  "enum": [
+                                    "approver",
+                                    "contributor",
+                                    "delegated_tracker",
+                                    "informed",
+                                    "monitor",
+                                    "monitor_and_unblock",
+                                    "owner"
+                                  ],
+                                  "type": "string"
+                                },
+                                "primary_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_objects": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "resolved_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "schema_version": {
+                                  "enum": [
+                                    1,
+                                    2
+                                  ],
+                                  "type": "integer"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "status": {
+                                  "const": "resolved"
+                                },
+                                "title": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "urgency": {
+                                  "enum": [
+                                    "blocked",
+                                    "monitor",
+                                    "none",
+                                    "time_bound",
+                                    "urgent"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            },
+                            "slug": {
+                              "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                              "type": "string"
+                            },
+                            "state_md": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "operation",
+                            "slug",
+                            "situation_yaml"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "operation_id": {
+                      "const": "situation.change"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
                 }
               ]
             },
@@ -1119,7 +2661,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:b6aac80461a5b6a902c9fce559e49356ab07cb6dfc1fb27330b3833814ad3f52",
+      "input_schema_digest": "sha256:0c3f7524878d6385763f6aa51f1c40d32da76699197ef600161d881b076249f3",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -1179,6 +2721,51 @@
               "operations": {
                 "items": {
                   "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "captured_at": {
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "meeting_file": {
+                              "pattern": "^[^/]+/[^/]+/meetings/[^/]+\\.md$",
+                              "type": "string"
+                            },
+                            "reason": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "run_id": {
+                              "type": "string"
+                            },
+                            "synthesis_version": {
+                              "maxLength": 160,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "meeting_file",
+                            "synthesis_version",
+                            "captured_at",
+                            "reason"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "meeting.synthesis.reconcile"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
                     {
                       "additionalProperties": false,
                       "properties": {
@@ -1404,6 +2991,722 @@
                         "arguments"
                       ],
                       "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "before_hash": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "log_entry": {
+                                  "type": "string"
+                                },
+                                "operation": {
+                                  "const": "update"
+                                },
+                                "situation_yaml": {
+                                  "additionalProperties": false,
+                                  "minProperties": 1,
+                                  "properties": {
+                                    "attention": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "action_required_now": {
+                                          "type": "boolean"
+                                        },
+                                        "evidence_gaps": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "reason": {
+                                          "type": "string"
+                                        },
+                                        "required": {
+                                          "type": "boolean"
+                                        },
+                                        "requires_response_now": {
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "components": {
+                                      "items": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "action_descriptors": {
+                                            "items": {
+                                              "additionalProperties": false,
+                                              "properties": {
+                                                "action_id": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "confirm_tool": {
+                                                  "type": "string"
+                                                },
+                                                "dashboard_owned_write": {
+                                                  "const": false
+                                                },
+                                                "disabled_reason": {
+                                                  "type": "string"
+                                                },
+                                                "display": {
+                                                  "type": "string"
+                                                },
+                                                "effect_class": {
+                                                  "type": "string"
+                                                },
+                                                "label": {
+                                                  "type": "string"
+                                                },
+                                                "mutation": {
+                                                  "enum": [
+                                                    "confirmed_route",
+                                                    "read_only"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "operation": {
+                                                  "enum": [
+                                                    "read",
+                                                    "canonical_confirmed_route"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "owner": {
+                                                  "type": "string"
+                                                },
+                                                "packet_type": {
+                                                  "const": "dashboard_action_descriptor"
+                                                },
+                                                "preview_tool": {
+                                                  "type": "string"
+                                                },
+                                                "requires_canonical_tool": {
+                                                  "type": "boolean"
+                                                },
+                                                "requires_confirmation": {
+                                                  "type": "boolean"
+                                                },
+                                                "surface": {
+                                                  "type": "string"
+                                                },
+                                                "target_ref": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": [],
+                                              "type": "object"
+                                            },
+                                            "type": "array"
+                                          },
+                                          "completed_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "component_id": {
+                                            "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                            "type": "string"
+                                          },
+                                          "created_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "entity_refs": {
+                                            "items": {
+                                              "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_gaps": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "blocker",
+                                              "child_commitment",
+                                              "completed_commitment",
+                                              "decision",
+                                              "evidence",
+                                              "handoff",
+                                              "note",
+                                              "watch"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "provenance": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "run_id": {
+                                                "type": "string"
+                                              },
+                                              "source": {
+                                                "type": "string"
+                                              },
+                                              "source_ref": {
+                                                "type": "string"
+                                              },
+                                              "workflow_id": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [],
+                                            "type": "object"
+                                          },
+                                          "status": {
+                                            "enum": [
+                                              "active",
+                                              "archived",
+                                              "blocked",
+                                              "completed",
+                                              "superseded",
+                                              "waiting"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "summary": {
+                                            "type": "string"
+                                          },
+                                          "superseded_by": {
+                                            "type": "string"
+                                          },
+                                          "title": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "todo_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "updated_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "component_id",
+                                          "kind",
+                                          "status",
+                                          "title"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "type": "array"
+                                    },
+                                    "due_date": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "evidence_refs": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "last_evidence_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "linked_todos": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "next_check": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "opened_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "owner_role": {
+                                      "enum": [
+                                        "approver",
+                                        "contributor",
+                                        "delegated_tracker",
+                                        "informed",
+                                        "monitor",
+                                        "monitor_and_unblock",
+                                        "owner"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "primary_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_objects": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "resolved_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "schema_version": {
+                                      "enum": [
+                                        1,
+                                        2
+                                      ],
+                                      "type": "integer"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "status": {
+                                      "enum": [
+                                        "active",
+                                        "blocked",
+                                        "emerging",
+                                        "resolving",
+                                        "waiting"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "title": {
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "urgency": {
+                                      "enum": [
+                                        "blocked",
+                                        "monitor",
+                                        "none",
+                                        "time_bound",
+                                        "urgent"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "state_md": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "operation",
+                                "slug",
+                                "situation_yaml"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "before_hash": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "log_entry": {
+                                  "type": "string"
+                                },
+                                "operation": {
+                                  "const": "resolve"
+                                },
+                                "situation_yaml": {
+                                  "additionalProperties": false,
+                                  "minProperties": 1,
+                                  "properties": {
+                                    "attention": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "action_required_now": {
+                                          "type": "boolean"
+                                        },
+                                        "evidence_gaps": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "reason": {
+                                          "type": "string"
+                                        },
+                                        "required": {
+                                          "type": "boolean"
+                                        },
+                                        "requires_response_now": {
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "components": {
+                                      "items": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "action_descriptors": {
+                                            "items": {
+                                              "additionalProperties": false,
+                                              "properties": {
+                                                "action_id": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "confirm_tool": {
+                                                  "type": "string"
+                                                },
+                                                "dashboard_owned_write": {
+                                                  "const": false
+                                                },
+                                                "disabled_reason": {
+                                                  "type": "string"
+                                                },
+                                                "display": {
+                                                  "type": "string"
+                                                },
+                                                "effect_class": {
+                                                  "type": "string"
+                                                },
+                                                "label": {
+                                                  "type": "string"
+                                                },
+                                                "mutation": {
+                                                  "enum": [
+                                                    "confirmed_route",
+                                                    "read_only"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "operation": {
+                                                  "enum": [
+                                                    "read",
+                                                    "canonical_confirmed_route"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "owner": {
+                                                  "type": "string"
+                                                },
+                                                "packet_type": {
+                                                  "const": "dashboard_action_descriptor"
+                                                },
+                                                "preview_tool": {
+                                                  "type": "string"
+                                                },
+                                                "requires_canonical_tool": {
+                                                  "type": "boolean"
+                                                },
+                                                "requires_confirmation": {
+                                                  "type": "boolean"
+                                                },
+                                                "surface": {
+                                                  "type": "string"
+                                                },
+                                                "target_ref": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": [],
+                                              "type": "object"
+                                            },
+                                            "type": "array"
+                                          },
+                                          "completed_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "component_id": {
+                                            "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                            "type": "string"
+                                          },
+                                          "created_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "entity_refs": {
+                                            "items": {
+                                              "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_gaps": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "blocker",
+                                              "child_commitment",
+                                              "completed_commitment",
+                                              "decision",
+                                              "evidence",
+                                              "handoff",
+                                              "note",
+                                              "watch"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "provenance": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "run_id": {
+                                                "type": "string"
+                                              },
+                                              "source": {
+                                                "type": "string"
+                                              },
+                                              "source_ref": {
+                                                "type": "string"
+                                              },
+                                              "workflow_id": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [],
+                                            "type": "object"
+                                          },
+                                          "status": {
+                                            "enum": [
+                                              "active",
+                                              "archived",
+                                              "blocked",
+                                              "completed",
+                                              "superseded",
+                                              "waiting"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "summary": {
+                                            "type": "string"
+                                          },
+                                          "superseded_by": {
+                                            "type": "string"
+                                          },
+                                          "title": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "todo_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "updated_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "component_id",
+                                          "kind",
+                                          "status",
+                                          "title"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "type": "array"
+                                    },
+                                    "due_date": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "evidence_refs": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "last_evidence_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "linked_todos": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "next_check": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "opened_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "owner_role": {
+                                      "enum": [
+                                        "approver",
+                                        "contributor",
+                                        "delegated_tracker",
+                                        "informed",
+                                        "monitor",
+                                        "monitor_and_unblock",
+                                        "owner"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "primary_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_objects": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "resolved_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "schema_version": {
+                                      "enum": [
+                                        1,
+                                        2
+                                      ],
+                                      "type": "integer"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "status": {
+                                      "const": "resolved"
+                                    },
+                                    "title": {
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "urgency": {
+                                      "enum": [
+                                        "blocked",
+                                        "monitor",
+                                        "none",
+                                        "time_bound",
+                                        "urgent"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "state_md": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "operation",
+                                "slug",
+                                "situation_yaml"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "operation_id": {
+                          "const": "situation.change"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
                     }
                   ]
                 },
@@ -1427,7 +3730,7 @@
             ],
             "type": "object"
           },
-          "confirmation": {
+          "authorization": {
             "additionalProperties": false,
             "properties": {
               "bound_actor": {
@@ -1445,6 +3748,15 @@
               },
               "expires_at": {
                 "type": "string"
+              },
+              "human_confirmation_required": {
+                "type": "boolean"
+              },
+              "mode": {
+                "enum": [
+                  "standing_safe_write",
+                  "human_confirmation"
+                ]
               }
             },
             "required": [
@@ -1452,7 +3764,9 @@
               "expires_at",
               "bound_actor",
               "bound_source",
-              "bound_session_id"
+              "bound_session_id",
+              "mode",
+              "human_confirmation_required"
             ],
             "type": "object"
           },
@@ -1502,7 +3816,10 @@
             "uniqueItems": true
           },
           "status": {
-            "const": "awaiting_confirmation"
+            "enum": [
+              "ready_to_apply",
+              "awaiting_confirmation"
+            ]
           }
         },
         "required": [
@@ -1514,12 +3831,12 @@
           "reason",
           "scope",
           "artifact",
-          "confirmation",
+          "authorization",
           "publication"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:728fa59ccdbe272feb814e22838cc5313a719da4c7aa1e8a8652fe99aeca6e87",
+      "output_schema_digest": "sha256:5df145757ef54e1c732167fd4b9a1f55c82d4eacd6b0bd7513813520e43cadb9",
       "title": "Preview Exact KB Changes"
     },
     {
@@ -1545,7 +3862,7 @@
             "type": "string"
           },
           "observed_at": {
-            "description": "Optional fixed ISO end time; omitted means the current UTC time.",
+            "description": "Optional fixed ISO end time; omitted means the latest complete UTC-day boundary.",
             "type": "string"
           },
           "session_id": {
@@ -1567,7 +3884,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:8fe85fcbb65993851f869d32f69faea854aa13f75f64f420ec9c2e2c23190af1",
+      "input_schema_digest": "sha256:ac191ee0490868b467b708c4063d8ba00a7659fac863972b8f166cb3d4c00978",
       "name": "kb.sync.prepare",
       "output_schema": {
         "additionalProperties": true,
@@ -1638,18 +3955,17 @@
         },
         "readOnlyHint": false
       },
-      "description": "Submit one harness action response or confirm the expiring final digest. Confirmed completion remembers evidence and applies only the reviewed exact patch.",
+      "description": "Submit one harness action response, cancel a non-applying run with a bounded reason code, or apply the expiring final preview under standing safe-write authorization. Completion remembers evidence and applies only the reviewed exact patch.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
-          "confirm": {
-            "description": "Exact unexpired digest returned by the final sync preview.",
-            "pattern": "^[0-9a-f]{64}$",
-            "type": "string"
+          "apply": {
+            "description": "Apply the ready final preview under standing safe-write authorization.",
+            "type": "boolean"
           },
           "response": {
             "additionalProperties": true,
-            "description": "Evidence packet or judgment packet requested by next_action.",
+            "description": "Complete evidence, typed kb.sync.source_degradation, or judgment packet requested by next_action, or the exact closed cancellation packet {schema_version:1, kind:'kb.sync.cancel', reason_code:'lowercase_machine_code'}.",
             "type": "object"
           },
           "run_id": {
@@ -1662,32 +3978,54 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:ce47d97c1034423229ac4dafa6a23c7583aa5a30e6e19912c2882468f5a62111",
+      "input_schema_digest": "sha256:04e89c9cea30f2b7beb99567e3ad675d64a01c02d753f2b616e64cc214ea338c",
       "name": "kb.sync.resume",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
-          "confirmation": {
+          "authorization": {
             "additionalProperties": true,
             "properties": {
               "digest": {
-                "description": "Exact preview digest.",
+                "description": "Exact preview integrity digest.",
                 "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
               },
               "expires_at": {
                 "description": "UTC expiry bound into the digest.",
                 "type": "string"
+              },
+              "human_confirmation_required": {
+                "description": "Whether human confirmation is required.",
+                "type": "boolean"
+              },
+              "mode": {
+                "description": "Write authorization mode.",
+                "type": "string"
               }
             },
             "required": [
               "digest",
-              "expires_at"
+              "expires_at",
+              "mode",
+              "human_confirmation_required"
             ],
             "type": "object"
           },
+          "evidence_committed": {
+            "description": "False for cancellation; no source evidence was remembered.",
+            "type": "boolean"
+          },
+          "exact_changes_applied": {
+            "description": "False for cancellation; no semantic patch was applied.",
+            "type": "boolean"
+          },
           "kind": {
             "description": "kb_sync_run or kb_sync_receipt.",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Machine-readable cancellation reason when status is cancelled.",
             "type": "string"
           },
           "run_id": {
@@ -1709,7 +4047,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:1bf3ee47d00f8ab850dad05bb0a0e94e70e7133a131c11cd188dbdb4be92cbaa",
+      "output_schema_digest": "sha256:ee8b3da71d7fdf8abec97df89d4b3b50db4e209af49fe04c9ef37948da2910a1",
       "title": "Resume Knowledge Sync"
     },
     {
