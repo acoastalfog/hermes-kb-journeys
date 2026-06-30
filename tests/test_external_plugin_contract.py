@@ -1291,7 +1291,7 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
     assert source["engine_version"] == "0.45.0"
-    assert source["engine_source_revision"] == "8540499a715e0aada1a5738e829dae8bdfe26755"
+    assert source["engine_source_revision"] == "7c450e60afa6d26b4bc8b2307b89a7d49edb0716"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 10
