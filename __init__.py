@@ -7431,17 +7431,16 @@ def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict
                 + _short(window.get("end"), "unknown")
             )
         lines.append(_short(action.get("instruction"), "Continue the run in Hermes chat."))
-    confirmation = packet.get("confirmation") if isinstance(packet.get("confirmation"), dict) else {}
-    if status == "awaiting_confirmation" and run_id:
+    authorization = packet.get("authorization") if isinstance(packet.get("authorization"), dict) else {}
+    if status == "ready_to_apply" and run_id:
         summary = _short(_get_path(packet, "preview", "semantic_summary"), "")
         if summary:
             lines.append(f"Preview: {summary}")
-        digest = _short(confirmation.get("digest"), "")
-        expiry = _short(confirmation.get("expires_at"), "")
+        expiry = _short(authorization.get("expires_at"), "")
         if expiry:
             lines.append(f"Expires: {expiry}")
-        if digest:
-            lines.append("Confirm this exact preview: /kb sync confirm")
+        if authorization.get("mode") == "standing_safe_write":
+            lines.append("Ready for safe apply: /kb sync apply (no digest confirmation required)")
     publication = packet.get("publication") if isinstance(packet.get("publication"), dict) else {}
     if publication:
         lines.append(f"Publication: {_short(publication.get('status'), 'not attempted')} (separate)")
@@ -7492,9 +7491,9 @@ def _render_sync_command(
     tokens = (args or "").strip().split()
     verb = tokens[0].lower() if tokens else ""
 
-    if verb in {"status", "confirm"} or (not tokens and state):
+    if verb in {"status", "apply"} or (not tokens and state):
         run_id = ""
-        if verb in {"status", "confirm"} and len(tokens) > 1 and not re.fullmatch(r"[0-9a-f]{64}", tokens[1]):
+        if verb in {"status", "apply"} and len(tokens) > 1:
             run_id = tokens[1]
         if not run_id and state:
             run_id = _short(state.get("run_id"), "")
@@ -7509,7 +7508,7 @@ def _render_sync_command(
         if current is None:
             return _render_error("KB Sync", target, errors)
         _store_sync_run_state(session_id, source=source, target=target, packet=current)
-        if verb != "confirm":
+        if verb != "apply":
             terminal = _short(current.get("terminal_state"), "")
             if not tokens and terminal in {"completed", "failed", "cancelled"}:
                 state = None
@@ -7519,38 +7518,30 @@ def _render_sync_command(
                     readback_verified=terminal == "completed" and current.get("status") == "completed",
                 )
         else:
-            if current.get("status") != "awaiting_confirmation":
+            if current.get("status") != "ready_to_apply":
                 return _render_sync_packet(current, readback_verified=False)
-            confirmation = current.get("confirmation") if isinstance(current.get("confirmation"), dict) else {}
+            authorization = current.get("authorization") if isinstance(current.get("authorization"), dict) else {}
             expected_actor = f"telegram:{_telegram_user_id(source) or 'operator'}"
             if (
-                _short(confirmation.get("bound_actor"), "") != expected_actor
-                or _short(confirmation.get("bound_session_id"), "") != session_id
+                _short(authorization.get("bound_actor"), "") != expected_actor
+                or _short(authorization.get("bound_session_id"), "") != session_id
+                or authorization.get("mode") != "standing_safe_write"
+                or authorization.get("human_confirmation_required") is not False
             ):
                 return {
                     "title": "KB Sync",
-                    "status": "confirmation_owner_mismatch",
+                    "status": "authorization_owner_mismatch",
                     "text": (
                         "KB Sync\nThis preview is not bound to the current Hermes actor and "
                         "conversation. No KB state changed."
                     ),
                     "actions": [],
                 }
-            current_digest = _short(confirmation.get("digest"), "")
-            supplied = next((token for token in tokens[1:] if re.fullmatch(r"[0-9a-f]{64}", token)), "")
-            digest = supplied or current_digest
-            if not digest or digest != current_digest:
-                return {
-                    "title": "KB Sync",
-                    "status": "confirmation_mismatch",
-                    "text": "KB Sync\nThe confirmation does not match the current preview. No KB state changed.",
-                    "actions": [],
-                }
             resumed, errors = _sync_tool_call(
                 ctx,
                 target,
                 "kb.sync.resume",
-                {"run_id": run_id, "confirm": digest},
+                {"run_id": run_id, "apply": True},
             )
             if resumed is None:
                 return _render_error("KB Sync", target, errors)
@@ -7570,7 +7561,7 @@ def _render_sync_command(
         return {
             "title": "KB Sync",
             "status": "invalid_request",
-            "text": "KB Sync\nUse /kb sync, /kb sync status, or /kb sync confirm.",
+            "text": "KB Sync\nUse /kb sync, /kb sync status, or /kb sync apply.",
             "actions": [],
         }
     actor_id = _telegram_user_id(source) or "operator"

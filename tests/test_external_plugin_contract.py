@@ -304,7 +304,7 @@ def test_generated_profile_exposes_canonical_kb_sync_contract(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("readback_status", ["completed", "failed"])
-def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
+def test_kb_sync_apply_claims_success_only_after_terminal_readback(
     readback_status, tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
@@ -327,16 +327,18 @@ def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
             "instruction": "Gather evidence.",
         },
     }
-    awaiting = {
+    ready = {
         "schema_version": 1,
         "kind": "kb_sync_run",
-        "status": "awaiting_confirmation",
+        "status": "ready_to_apply",
         "run_id": "kb_sync-test",
-        "confirmation": {
+        "authorization": {
             "digest": digest,
             "expires_at": "2099-01-01T00:00:00Z",
             "bound_actor": "telegram:42",
             "bound_session_id": "telegram:chat-1:42",
+            "mode": "standing_safe_write",
+            "human_confirmation_required": False,
         },
         "publication": {"status": "not_attempted"},
     }
@@ -352,7 +354,7 @@ def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
         {
             "mcp_kb_engine_prod_kb_sync_prepare": [{"result": prepared}],
             "mcp_kb_engine_prod_kb_sync_status": [
-                {"result": awaiting},
+                {"result": ready},
                 {"result": readback},
             ],
             "mcp_kb_engine_prod_kb_sync_resume": [
@@ -369,7 +371,7 @@ def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
         }
     )
     plugin._card_for_command(ctx, "kb", args="sync", source=source)
-    card = plugin._card_for_command(ctx, "kb", args="sync confirm", source=source)
+    card = plugin._card_for_command(ctx, "kb", args="sync apply", source=source)
 
     assert [name for name, _args in ctx.calls] == [
         "mcp_kb_engine_prod_kb_sync_prepare",
@@ -377,6 +379,7 @@ def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
         "mcp_kb_engine_prod_kb_sync_resume",
         "mcp_kb_engine_prod_kb_sync_status",
     ]
+    assert ctx.calls[2][1] == {"run_id": "kb_sync-test", "apply": True}
     if readback_status == "completed":
         assert "engine readback verified" in card["text"]
         assert "Knowledge changes landed" in card["text"]
@@ -385,7 +388,7 @@ def test_kb_sync_confirmation_claims_success_only_after_terminal_readback(
         assert "no completion is claimed" in card["text"].lower()
 
 
-def test_kb_sync_confirmation_rejects_another_actor_or_conversation(
+def test_kb_sync_apply_rejects_another_actor_or_conversation(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
@@ -406,13 +409,15 @@ def test_kb_sync_confirmation_rejects_another_actor_or_conversation(
     wrong_owner = {
         "schema_version": 1,
         "kind": "kb_sync_run",
-        "status": "awaiting_confirmation",
+        "status": "ready_to_apply",
         "run_id": "kb_sync-test",
-        "confirmation": {
+        "authorization": {
             "digest": "a" * 64,
             "expires_at": "2099-01-01T00:00:00Z",
             "bound_actor": "telegram:99",
             "bound_session_id": "telegram:other:99",
+            "mode": "standing_safe_write",
+            "human_confirmation_required": False,
         },
     }
     ctx = FakeContext(
@@ -422,8 +427,8 @@ def test_kb_sync_confirmation_rejects_another_actor_or_conversation(
         }
     )
     plugin._card_for_command(ctx, "kb", args="sync", source=source)
-    card = plugin._card_for_command(ctx, "kb", args="sync confirm", source=source)
-    assert card["status"] == "confirmation_owner_mismatch"
+    card = plugin._card_for_command(ctx, "kb", args="sync apply", source=source)
+    assert card["status"] == "authorization_owner_mismatch"
     assert "No KB state changed" in card["text"]
     assert all("kb_sync_resume" not in name for name, _args in ctx.calls)
 
@@ -1285,7 +1290,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_source_revision"] == "c63736c46b31f340e68ef61d1bf582b74c0a4bcc"
+    assert source["engine_version"] == "0.45.0"
+    assert source["engine_source_revision"] == "7c450e60afa6d26b4bc8b2307b89a7d49edb0716"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 10
@@ -1296,6 +1302,9 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert {"kb.sync.prepare", "kb.sync.status", "kb.sync.resume"} <= {
         tool["name"] for tool in source["tools"]
     }
+    assert next(
+        row for row in source["journeys"] if row["journey_id"] == "kb_sync"
+    )["confirmation_required"] is False
     assert plugin._DESCRIPTOR_BUNDLE == source
     assert plugin._DESCRIPTOR_ERROR == ""
     assert len(plugin._descriptor_allowlist()) == 10
@@ -1416,7 +1425,7 @@ def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp
 def test_descriptor_validation_rejects_unconstrained_executable_envelope(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     packet = _conforming_descriptor_packet(plugin)
-    workflow = next(tool for tool in packet["tools"] if tool["name"] == "change.apply_confirmed")
+    workflow = next(tool for tool in packet["tools"] if tool["name"] == "change.apply")
     workflow["input_schema"]["properties"]["preview"] = {
         "type": "object",
         "additionalProperties": True,
@@ -1592,7 +1601,7 @@ def test_generated_primary_action_contracts_are_concrete(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     for capability in (
         "change.preview",
-        "change.apply_confirmed",
+        "change.apply",
         "kb.sync.prepare",
         "kb.sync.status",
         "kb.sync.resume",
@@ -1903,7 +1912,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
