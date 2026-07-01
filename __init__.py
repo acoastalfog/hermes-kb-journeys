@@ -2980,11 +2980,10 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
         if items
         else "Next: tell me what changed or ask me to sync."
     )
-    legacy_sections = data.get("sections") if isinstance(data.get("sections"), list) else []
     return {
         "title": "Knowledge",
         "text": "\n".join(lines[:8]),
-        "actions": _dashboard_descriptor_actions(ctx, target, legacy_sections),
+        "actions": _dashboard_descriptor_actions(ctx, target, sections),
     }
 
 
@@ -5873,28 +5872,91 @@ def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
 
     scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
     git_state = data.get("git") if isinstance(data.get("git"), dict) else {}
-    state = _public_clip(
-        scope.get("publication_state")
-        or git_state.get("status")
-        or data.get("status"),
-        64,
+    raw_status = str(data.get("status") or "").strip().lower()
+    scope_state = str(scope.get("publication_state") or "").strip().lower()
+    try:
+        ahead = int(git_state.get("ahead") or 0)
+        behind = int(git_state.get("behind") or 0)
+    except (TypeError, ValueError):
+        ahead = behind = 0
+
+    blocked = (
+        data.get("ok") is False
+        or behind > 0
+        or raw_status in {"blocked", "error", "failed", "not_git_repo", "unavailable"}
+        or scope_state in {"blocked", "publication_blocked", "publication_unavailable"}
     )
+    dirty = (
+        not blocked
+        and (
+            git_state.get("clean") is False
+            or raw_status == "dirty"
+            or scope_state in {"publication_pending", "manual_publication_expected"}
+        )
+    )
+    push_pending = (
+        not blocked
+        and not dirty
+        and (
+            ahead > 0
+            or raw_status in {"ahead", "unpushed"}
+            or scope_state == "push_expected"
+        )
+    )
+    published = (
+        not blocked
+        and not dirty
+        and not push_pending
+        and data.get("ok") is True
+        and git_state.get("clean") is True
+        and raw_status in {"clean", "ready", "published"}
+    )
+
     lines = [_emphasis_headline("Publication")]
-    if state:
-        lines.append("Reviewed state: " + state.replace("_", " "))
-    if git_state.get("clean") is True:
-        lines.append("There are no unpublished workspace changes.")
+    if blocked:
+        posture = "blocked"
+        lines.extend(
+            [
+                "Publication is blocked by the current workspace state.",
+                "Next: resolve the blocker on a trusted operator surface.",
+            ]
+        )
+    elif dirty:
+        posture = "dirty"
+        lines.extend(
+            [
+                "Reviewed changes are ready for publication.",
+                "Next: approve one publish operation on a trusted operator surface.",
+            ]
+        )
+    elif push_pending:
+        posture = "ahead"
+        lines.extend(
+            [
+                "The reviewed commit exists but has not been pushed.",
+                "Next: approve one push and replica convergence on a trusted operator surface.",
+            ]
+        )
+    elif published:
+        posture = "published"
+        lines.extend(
+            [
+                "Reviewed changes are already published.",
+                "Next: no publication action is needed.",
+            ]
+        )
     else:
-        lines.append("Publishing requires one approval on a trusted operator surface.")
-    lines.extend(
-        [
-            "No publication was attempted.",
-            "Next: continue on that surface to publish and converge replicas.",
-        ]
-    )
+        posture = "unknown"
+        lines.extend(
+            [
+                "Publication state could not be verified.",
+                "Next: check it on a trusted operator surface.",
+            ]
+        )
+    lines.insert(-1, "No publication was attempted.")
     return {
         "title": "Publication",
-        "status": str(data.get("status") or "unknown"),
+        "status": posture,
         "text": "\n".join(lines[:6]),
         "actions": [],
     }
@@ -6656,10 +6718,32 @@ def _sync_success_state(packet: Any) -> str:
     terminal = str(packet.get("terminal_state") or "").strip().lower()
     status = str(packet.get("status") or "").strip().lower()
     if terminal in _SYNC_SUCCESS_STATES and status in _SYNC_SUCCESS_STATES:
-        return terminal
-    if not terminal and status in _SYNC_SUCCESS_STATES:
-        return status
+        return terminal if terminal == status else ""
     return ""
+
+
+def _sync_publication_is_separate(packet: Any) -> bool:
+    if not isinstance(packet, dict):
+        return False
+    publication = packet.get("publication")
+    return bool(
+        isinstance(publication, dict)
+        and publication.get("status") == "not_attempted"
+        and publication.get("sync_publishes") is False
+        and publication.get("separate_confirmation_required") is True
+    )
+
+
+def _sync_noop_verified(packet: Any) -> bool:
+    return bool(
+        isinstance(packet, dict)
+        and packet.get("kind") == "kb_sync_run"
+        and _sync_success_state(packet) == "completed"
+        and packet.get("reason") == "all_sources_current"
+        and packet.get("answered_actions") == 0
+        and not packet.get("run_id")
+        and _sync_publication_is_separate(packet)
+    )
 
 
 def _sync_readback_verified(resumed: Any, readback: Any, run_id: str) -> bool:
@@ -6672,6 +6756,8 @@ def _sync_readback_verified(resumed: Any, readback: Any, run_id: str) -> bool:
         and isinstance(readback, dict)
         and resumed.get("run_id") == run_id
         and readback.get("run_id") == run_id
+        and _sync_publication_is_separate(resumed)
+        and _sync_publication_is_separate(readback)
     )
 
 
@@ -6689,7 +6775,16 @@ def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict
         lines.extend(["Sync stopped.", "No completion is claimed.", "Next: ask me to retry."])
         return {"title": "Knowledge sync", "status": "failed", "text": "\n".join(lines), "actions": []}
 
-    if success_state:
+    if _sync_noop_verified(packet):
+        lines.extend(
+            [
+                "Everything is already current.",
+                "No knowledge changes were needed.",
+                "Publication was not attempted.",
+                "Receipt: verified no-op",
+            ]
+        )
+    elif success_state:
         if not readback_verified:
             lines.extend(
                 [
@@ -6698,6 +6793,20 @@ def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict
                     "Next: ask me to check sync status.",
                 ]
             )
+        elif not _sync_publication_is_separate(packet):
+            return {
+                "title": "Knowledge sync",
+                "status": "blocked",
+                "text": "\n".join(
+                    [
+                        _emphasis_headline("Knowledge sync"),
+                        "Publication separation could not be verified.",
+                        "No completion is claimed.",
+                        "Next: inspect the sync receipt on a trusted operator surface.",
+                    ]
+                ),
+                "actions": [],
+            }
         elif success_state == "completed_with_degradation":
             lines.extend(
                 [
@@ -6766,6 +6875,17 @@ def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict
     }
 
 
+def _sync_harness_rewrite(run_id: str) -> str:
+    """Give the active run to Hermes through the gateway's normal model turn."""
+    return (
+        f"Continue the canonical KB sync run {run_id}. "
+        "Call kb.sync.status for that exact run first, then follow its next_action. "
+        "Gather evidence and exercise semantic judgment in the Hermes harness; use "
+        "kb.sync.resume for the requested responses and routine standing-safe-write apply. "
+        "Do not publish. Return a compact truthful result to the user."
+    )
+
+
 def _sync_tool_call(
     ctx: Any,
     target: str,
@@ -6826,10 +6946,16 @@ def _render_sync_command(
             }:
                 state = None
             else:
-                return _render_sync_packet(
+                card = _render_sync_packet(
                     current,
-                    readback_verified=bool(_sync_success_state(current)),
+                    readback_verified=bool(
+                        _sync_success_state(current)
+                        and _sync_publication_is_separate(current)
+                    ),
                 )
+                if not tokens and run_id and not _sync_success_state(current):
+                    card["_gateway_rewrite"] = _sync_harness_rewrite(run_id)
+                return card
         else:
             if current.get("status") != "ready_to_apply":
                 return _render_sync_packet(current, readback_verified=False)
@@ -6882,7 +7008,14 @@ def _render_sync_command(
     if prepared is None:
         return _render_error("KB Sync", target, errors)
     _store_sync_run_state(session_id, source=source, target=target, packet=prepared)
-    return _render_sync_packet(prepared, readback_verified=False)
+    card = _render_sync_packet(
+        prepared,
+        readback_verified=_sync_noop_verified(prepared),
+    )
+    run_id = _short(prepared.get("run_id"), "")
+    if run_id and not _sync_success_state(prepared):
+        card["_gateway_rewrite"] = _sync_harness_rewrite(run_id)
+    return card
 
 
 def _render_queue(
@@ -8300,6 +8433,9 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 session_store=session_store,
                 event=event,
             )
+        gateway_rewrite = card.pop("_gateway_rewrite", "")
+        if gateway_rewrite:
+            return {"action": "rewrite", "text": str(gateway_rewrite)}
         _run_delivery(_send_card(adapter, event, card))
         return {"action": "skip", "reason": "kb_journeys"}
 

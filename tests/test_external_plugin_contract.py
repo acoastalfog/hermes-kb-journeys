@@ -275,7 +275,11 @@ def test_kb_sync_starts_canonical_prepare_and_renders_next_action(tmp_path, monk
                             "source_id": "m365.email",
                             "instruction": "Gather this exact bounded window.",
                         },
-                        "publication": {"status": "not_attempted"},
+                        "publication": {
+                            "status": "not_attempted",
+                            "separate_confirmation_required": True,
+                            "sync_publishes": False,
+                        },
                     }
                 }
             ]
@@ -345,7 +349,11 @@ def test_kb_sync_apply_claims_success_only_after_terminal_readback(
             "mode": "standing_safe_write",
             "human_confirmation_required": False,
         },
-        "publication": {"status": "not_attempted"},
+        "publication": {
+            "status": "not_attempted",
+            "separate_confirmation_required": True,
+            "sync_publishes": False,
+        },
     }
     readback = {
         "schema_version": 1,
@@ -353,7 +361,11 @@ def test_kb_sync_apply_claims_success_only_after_terminal_readback(
         "status": readback_status,
         "terminal_state": readback_status,
         "run_id": "kb_sync-test",
-        "publication": {"status": "not_attempted"},
+        "publication": {
+            "status": "not_attempted",
+            "separate_confirmation_required": True,
+            "sync_publishes": False,
+        },
     }
     ctx = FakeContext(
         {
@@ -378,6 +390,11 @@ def test_kb_sync_apply_claims_success_only_after_terminal_readback(
                                 else "completed"
                             ),
                             "run_id": "kb_sync-test",
+                            "publication": {
+                                "status": "not_attempted",
+                                "separate_confirmation_required": True,
+                                "sync_publishes": False,
+                            },
                         }
                     }
             ],
@@ -906,7 +923,11 @@ def test_sync_renderer_claims_completion_only_after_engine_readback(tmp_path, mo
         "status": "completed",
         "terminal_state": "completed",
         "run_id": "kb_sync-1",
-        "publication": {"status": "not_attempted"},
+        "publication": {
+            "status": "not_attempted",
+            "separate_confirmation_required": True,
+            "sync_publishes": False,
+        },
     }
     unverified = plugin._render_sync_packet(packet, readback_verified=False)
     verified = plugin._render_sync_packet(packet, readback_verified=True)
@@ -2181,7 +2202,11 @@ def test_m3_degraded_sync_is_success_only_with_terminal_readback(tmp_path, monke
         "status": "completed_with_degradation",
         "terminal_state": "completed_with_degradation",
         "run_id": "kb_sync-private-id",
-        "publication": {"status": "not_attempted"},
+        "publication": {
+            "status": "not_attempted",
+            "separate_confirmation_required": True,
+            "sync_publishes": False,
+        },
         "digest": "sha256:" + "b" * 64,
     }
     unverified = plugin._render_sync_packet(packet, readback_verified=False)
@@ -2195,19 +2220,249 @@ def test_m3_degraded_sync_is_success_only_with_terminal_readback(tmp_path, monke
 
 def test_m3_sync_readback_requires_same_run_and_terminal_state(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
+    publication = {
+        "status": "not_attempted",
+        "separate_confirmation_required": True,
+        "sync_publishes": False,
+    }
     completed = {
         "status": "completed",
         "terminal_state": "completed",
         "run_id": "run-1",
+        "publication": publication,
     }
     degraded = {
         "status": "completed_with_degradation",
         "terminal_state": "completed_with_degradation",
         "run_id": "run-1",
+        "publication": publication,
     }
     assert plugin._sync_readback_verified(degraded, degraded, "run-1") is True
     assert plugin._sync_readback_verified(completed, degraded, "run-1") is False
     assert plugin._sync_readback_verified(completed, {**completed, "run_id": "run-2"}, "run-1") is False
+
+
+def test_m3_sync_readback_requires_explicit_terminal_and_publication_separation(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    publication = {
+        "status": "not_attempted",
+        "separate_confirmation_required": True,
+        "sync_publishes": False,
+    }
+    completed = {
+        "status": "completed",
+        "terminal_state": "completed",
+        "run_id": "run-1",
+        "publication": publication,
+    }
+    assert plugin._sync_readback_verified(completed, completed, "run-1") is True
+    assert plugin._sync_readback_verified(
+        {key: value for key, value in completed.items() if key != "terminal_state"},
+        completed,
+        "run-1",
+    ) is False
+    assert plugin._sync_readback_verified(
+        completed,
+        {**completed, "publication": {**publication, "sync_publishes": True}},
+        "run-1",
+    ) is False
+
+
+def test_m3_all_sources_current_is_a_truthful_verified_noop(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_sync_packet(
+        {
+            "schema_version": 1,
+            "kind": "kb_sync_run",
+            "status": "completed",
+            "terminal_state": "completed",
+            "answered_actions": 0,
+            "reason": "all_sources_current",
+            "publication": {
+                "status": "not_attempted",
+                "separate_confirmation_required": True,
+                "sync_publishes": False,
+            },
+        },
+        readback_verified=False,
+    )
+    assert card["status"] == "completed"
+    assert "already current" in card["text"].lower()
+    assert "no knowledge changes were needed" in card["text"].lower()
+    assert "Receipt: verified no-op" in card["text"]
+    assert "could not be verified" not in card["text"]
+    _assert_compact_user_card(card)
+
+
+def test_m3_verified_sync_fails_closed_on_publication_invariant(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_sync_packet(
+        {
+            "status": "completed",
+            "terminal_state": "completed",
+            "run_id": "run-1",
+            "publication": {
+                "status": "attempted",
+                "separate_confirmation_required": False,
+                "sync_publishes": True,
+            },
+        },
+        readback_verified=True,
+    )
+    assert card["status"] == "blocked"
+    assert "publication separation could not be verified" in card["text"].lower()
+    assert "Receipt: verified" not in card["text"]
+    assert "no completion is claimed" in card["text"].lower()
+
+
+def test_m3_sync_shortcut_rewrites_into_harness_visible_context(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+
+    prepared = {
+        "schema_version": 1,
+        "kind": "kb_sync_run",
+        "status": "awaiting_action",
+        "run_id": "kb_sync-test",
+        "next_action": {"kind": "gather_evidence"},
+        "publication": {
+            "status": "not_attempted",
+            "separate_confirmation_required": True,
+            "sync_publishes": False,
+        },
+    }
+    ctx = FakeContext(
+        {"mcp_kb_engine_prod_kb_sync_prepare": [{"result": prepared}]}
+    )
+
+    class Adapter:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+            return type("Result", (), {"success": True})()
+
+    adapter = Adapter()
+    source = _FakeSource()
+    gateway = type(
+        "Gateway",
+        (),
+        {
+            "_is_user_authorized": staticmethod(lambda _source: True),
+            "adapters": {"telegram": adapter},
+        },
+    )()
+    result = plugin.build_pre_gateway_dispatch_hook(ctx)(
+        event=_FakeEvent(source, text="/kb sync"),
+        gateway=gateway,
+        session_store=None,
+    )
+
+    assert result["action"] == "rewrite"
+    assert "kb_sync-test" in result["text"]
+    assert "kb.sync.status" in result["text"]
+    assert "do not publish" in result["text"].lower()
+    assert adapter.sent == []
+
+
+def test_m3_mapping_sections_preserve_descriptor_actions(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    descriptor = {
+        "schema_version": 2,
+        "packet_type": "dashboard_action_descriptor",
+        "action_id": "archive-situation",
+        "label": "Archive",
+        "mutation": "handoff_only",
+        "target_kind": "situation",
+        "target_ref": "situations/lilly-ai-lab",
+        "surface": "change.preview",
+    }
+    card = plugin._render_dashboard(
+        {
+            "summary": {"readiness_status": "ready", "publication_status": "clean"},
+            "sections": {
+                "situations": {
+                    "cards": [
+                        {
+                            "id": "lilly-ai-lab",
+                            "title": "Lilly AI Lab next steps",
+                            "detail": "The outcome is complete.",
+                            "action_descriptors": [descriptor],
+                        }
+                    ]
+                }
+            },
+        },
+        ctx=FakeContext({}),
+        target="kb_engine_prod",
+    )
+    assert "Lilly AI Lab next steps" in card["text"]
+    assert [action.label for action in card["actions"]] == ["Archive"]
+    assert card["actions"][0].metadata["target_ref"] == "situations/lilly-ai-lab"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status", "expected_text"),
+    [
+        (
+            {
+                "status": "blocked",
+                "ok": False,
+                "git": {"status": "ready", "clean": True, "behind": 1, "ahead": 0},
+                "scope": {"publication_state": "publication_blocked"},
+            },
+            "blocked",
+            "Publication is blocked",
+        ),
+        (
+            {
+                "status": "dirty",
+                "ok": True,
+                "git": {"status": "ready", "clean": False, "behind": 0, "ahead": 0},
+                "scope": {"publication_state": "publication_pending"},
+            },
+            "dirty",
+            "Reviewed changes are ready for publication",
+        ),
+        (
+            {
+                "status": "ahead",
+                "ok": True,
+                "git": {"status": "ready", "clean": True, "behind": 0, "ahead": 1},
+                "scope": {"publication_state": "publication_applied"},
+            },
+            "ahead",
+            "has not been pushed",
+        ),
+        (
+            {
+                "status": "clean",
+                "ok": True,
+                "git": {"status": "ready", "clean": True, "behind": 0, "ahead": 0},
+                "scope": {"publication_state": "publication_applied"},
+            },
+            "published",
+            "already published",
+        ),
+    ],
+)
+def test_m3_publication_handoff_renders_consequence_state(
+    payload, expected_status, expected_text, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakeContext(
+        {"mcp_kb_engine_prod_publication_status": [{"result": payload}]}
+    )
+    card = plugin._render_publish_command(ctx, "kb_engine_prod", "")
+    assert card["status"] == expected_status
+    assert expected_text in card["text"]
+    assert "No publication was attempted." in card["text"]
+    _assert_compact_user_card(card)
 
 
 def test_m3_sync_packet_hides_next_action_machinery_and_source_body(tmp_path, monkeypatch):
