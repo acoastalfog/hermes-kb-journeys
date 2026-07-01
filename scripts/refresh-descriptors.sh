@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-engine_root=${KB_ENGINE_SOURCE:-/home/abcosta/Knowledge/kb-engine-k3}
+engine_root=${KB_ENGINE_SOURCE:?set KB_ENGINE_SOURCE to an exact clean kb-engine checkout}
 exporter=${KB_ENGINE_DESCRIPTOR_EXPORTER:-${engine_root}/scripts/export-harness-descriptors.py}
 output=${1:-${repo_root}/generated/kb-engine-descriptors.json}
 

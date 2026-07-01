@@ -1005,11 +1005,16 @@ def _prose_kb_command_from_text(text: str) -> tuple[str, str] | None:
         return None
     normalized = re.sub(r"[?!.,;:]+", "", stripped.lower())
     normalized = re.sub(r"\s+", " ", normalized).strip()
-    match = re.match(r"^kb\s+(status|sync|review)\b(?:\s+(.*))?$", normalized)
+    match = re.match(r"^kb\s+(status|sync|review|publish)\b(?:\s+(.*))?$", normalized)
     if match:
         verb = match.group(1)
         rest = (match.group(2) or "").strip()
-        return {"status": "kbstatus", "sync": "sync_unavailable", "review": "kblifecycle"}[verb], rest
+        return {
+            "status": "kbstatus",
+            "sync": "kbsync_run",
+            "review": "kblifecycle",
+            "publish": "kbpublish",
+        }[verb], rest
     if re.search(r"\breview queue\b", normalized) and re.search(
         r"\b(?:what(?: is|'s)?|show|list|open|view|display|check|pending|in)\b",
         normalized,
@@ -1032,6 +1037,24 @@ def _clip(value: Any, limit: int = 220) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+_PRIVATE_PATH_RE = re.compile(r"(?:(?:/home|/Users|/var|/opt)/[^\s,;]+)")
+_DIGEST_RE = re.compile(r"\bsha256:[0-9a-f]{32,}\b", re.IGNORECASE)
+_MCP_NAME_RE = re.compile(r"\bmcp_[A-Za-z0-9_]+\b")
+_CAPABILITY_NAME_RE = re.compile(
+    r"\b(?:attention|change|kb\.sync|policy|publication|search|workspace)\.[A-Za-z0-9_.-]+\b"
+)
+
+
+def _public_clip(value: Any, limit: int = 180) -> str:
+    """Bound user-facing text and remove implementation-only identifiers."""
+    text = re.sub(r"\s+", " ", _short(value, "")).strip()
+    text = _PRIVATE_PATH_RE.sub("an internal location", text)
+    text = _DIGEST_RE.sub("an integrity detail", text)
+    text = _MCP_NAME_RE.sub("the knowledge service", text)
+    text = _CAPABILITY_NAME_RE.sub("the knowledge service", text)
+    return _clip(text, limit)
 
 
 _EXPANDABLE_MIN_LINES = 3  # only collapse genuinely long bodies
@@ -2764,16 +2787,29 @@ def _items(data: Any, *paths: tuple[str, ...]) -> list[Any]:
 
 def _public_error(errors: list[str]) -> str:
     if not errors:
-        return "No compatible KB MCP tool responded."
+        return "The knowledge service did not return a usable response."
     detail = errors[-1]
     if detail.startswith("mcp_") and ": " in detail:
         detail = detail.split(": ", 1)[1]
-    return detail or "No compatible KB MCP tool responded."
+    if (
+        _PRIVATE_PATH_RE.search(detail)
+        or _DIGEST_RE.search(detail)
+        or _MCP_NAME_RE.search(detail)
+        or _CAPABILITY_NAME_RE.search(detail)
+    ):
+        return "The knowledge service did not return a usable response."
+    return _public_clip(detail) or "The knowledge service did not return a usable response."
 
 
 def _render_error(title: str, target: str, errors: list[str]) -> dict[str, Any]:
+    del target
     detail = _public_error(errors)
-    text = f"{_emphasis_headline(title)}\nMCP target: {target}\nKB data is not available yet.\n{detail}"
+    text = (
+        f"{_emphasis_headline(title)}\n"
+        "Knowledge service unavailable.\n"
+        f"{detail}\n"
+        "No KB completion is claimed."
+    )
     return {"title": title, "text": text, "actions": []}
 
 
@@ -2852,116 +2888,102 @@ def _render_today(data: Any) -> dict[str, Any]:
     }
 
 
+def _dashboard_sections(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = data.get("sections")
+    if isinstance(raw, dict):
+        return [
+            {"id": str(section_id), **section}
+            for section_id, section in raw.items()
+            if isinstance(section, dict)
+        ]
+    return [section for section in (raw or []) if isinstance(section, dict)]
+
+
+def _dashboard_items(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    preferred = {"situations": 0, "queue": 1, "todos": 2}
+    ordered = sorted(
+        enumerate(sections),
+        key=lambda row: (
+            preferred.get(str(row[1].get("id") or "").lower(), 9),
+            row[0],
+        ),
+    )
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _index, section in ordered:
+        for field in ("items", "cards", "attention", "standalone_critical"):
+            rows = section.get(field)
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                identity = str(
+                    item.get("target")
+                    or item.get("item_id")
+                    or item.get("id")
+                    or item.get("title")
+                    or ""
+                )
+                if identity and identity in seen:
+                    continue
+                if identity:
+                    seen.add(identity)
+                items.append(item)
+                if len(items) == 5:
+                    return items
+    return items
+
+
+def _dashboard_item_line(item: dict[str, Any]) -> str:
+    title = _public_clip(
+        item.get("title")
+        or item.get("name")
+        or item.get("summary")
+        or "Attention item",
+        120,
+    )
+    detail = _public_clip(item.get("detail"), 150)
+    if not detail:
+        context = [
+            _public_clip(item.get("priority") or item.get("severity"), 24),
+            _public_clip(item.get("due_date"), 48),
+        ]
+        detail = " · ".join(value for value in context if value)
+    return f"- {title}" + (f" — {detail}" if detail else "")
+
+
 def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
+    """Render the normal attention path as one small, user-facing packet."""
     if not isinstance(data, dict):
         return {
-            "title": "KB",
-            "text": f"{_emphasis_headline('KB')}\n{_short(data, 'No KB details returned.')}",
+            "title": "Knowledge",
+            "text": f"{_emphasis_headline('Knowledge')}\n{_public_clip(data, 180) or 'No details returned.'}",
             "actions": [],
         }
 
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
-    readiness = _short(
-        summary.get("readiness_status")
-        or _readiness_status(data)
+    readiness = _public_clip(summary.get("readiness_status") or _readiness_status(data), 32)
+    publication = _public_clip(summary.get("publication_status") or _publication_status(data), 32)
+    sections = _dashboard_sections(data)
+    items = _dashboard_items(sections)
+
+    status_bits = [value for value in (readiness, f"publication {publication}" if publication else "") if value]
+    lines = [_emphasis_headline("Knowledge")]
+    if status_bits:
+        lines.append("Status: " + " · ".join(status_bits))
+    lines.extend(_dashboard_item_line(item) for item in items)
+    if not items:
+        lines.append("Nothing currently needs attention.")
+    lines.append(
+        "Next: ask to open an item or tell me what changed."
+        if items
+        else "Next: tell me what changed or ask me to sync."
     )
-    publication = _short(
-        summary.get("publication_status")
-        or _publication_status(data)
-    )
-    sections = data.get("sections") if isinstance(data.get("sections"), list) else []
-    queue_count = _proposal_count_from_summary(summary)
-    if queue_count is None:
-        queue_count = _count_from(data, "proposals", "proposal_queue")
-    todo_count = _todo_count_from_summary(summary)
-    if todo_count is None:
-        todo_count = _count_from(data, "todo", "todos")
-    active_runs = summary.get("active_run_count")
-    lines = [
-        _emphasis_headline("KB"),
-        f"kb status: runtime {readiness} · publication {publication}",
-    ]
-    # Rich path: native heading + status table + section bullet lists. RAW
-    # markdown kept SEPARATE from the MarkdownV2 `text` body. The dashboard's
-    # descriptor buttons ride along in the SAME rich message via send_kb_actions.
-    rich_parts = [_rich_kv_table(
-        "KB",
-        [("Runtime", readiness), ("Publication", publication)],
-    )]
-    if data.get("llm_invoked_by_read_surface") is not None:
-        lines.append(
-            "Read-surface LLM: "
-            + ("yes" if data.get("llm_invoked_by_read_surface") else "no")
-        )
-    lines.extend(_receipt_lines(data))
-    counts: list[str] = []
-    if queue_count is not None:
-        counts.append(f"Proposals {queue_count}")
-    if todo_count is not None:
-        counts.append(f"TODOs {todo_count}")
-    if counts:
-        lines.append("kb review: " + " · ".join(counts))
-    if active_runs is not None:
-        lines.append(f"kb sync: {active_runs} active run(s)")
-    review_sync_bits: list[str] = []
-    if counts:
-        review_sync_bits.append("kb review: " + " · ".join(counts))
-    if active_runs is not None:
-        review_sync_bits.append(f"kb sync: {active_runs} active run(s)")
-    if review_sync_bits:
-        rich_parts.append("")
-        rich_parts.extend(_rich_bullets(review_sync_bits))
-    for section in sections[:4]:
-        if not isinstance(section, dict):
-            continue
-        cards = section.get("cards") if isinstance(section.get("cards"), list) else []
-        if not cards:
-            continue
-        lines.append("")
-        lines.append(_dashboard_section_title(section, summary))
-        rich_parts.append("")
-        rich_parts.append(_rich_heading(_dashboard_section_title(section, summary)))
-        rich_parts.append("")
-        for card in cards[:3]:
-            if not isinstance(card, dict):
-                continue
-            detail = _display_text(card.get("detail"))
-            suffix = f" — {detail}" if detail else ""
-            title_text = _display_text(card.get("title") or "item")
-            lines.append(f"- {title_text}{suffix}")
-            rich_parts.append(f"- {_rich_cell(f'{title_text}{suffix}')}")
-    next_actions = data.get("next_actions") if isinstance(data.get("next_actions"), list) else []
-    if next_actions and not any(
-        isinstance(section, dict) and str(section.get("id") or "").strip().lower() == "next"
-        for section in sections
-    ):
-        lines.append("")
-        lines.append("Next Actions")
-        rich_parts.append("")
-        rich_parts.append(_rich_heading("Next Actions"))
-        rich_parts.append("")
-        for action in next_actions[:3]:
-            lines.append(f"- {_display_text(action)}")
-            rich_parts.append(f"- {_rich_cell(_display_text(action))}")
-    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
-    if warnings:
-        lines.append("")
-        lines.append(f"Warnings: {len(warnings)}")
-        rich_parts.append("")
-        rich_parts.append(f"Warnings: {len(warnings)}")
-    refresh = data.get("refresh") if isinstance(data.get("refresh"), dict) else {}
-    if refresh:
-        lines.append(f"Refresh: every {_short(refresh.get('ttl_seconds'), '60')}s target")
-        rich_parts.append(f"Refresh: every {_rich_cell(_short(refresh.get('ttl_seconds'), '60'))}s target")
-    lines.append("")
-    lines.append("Commands: /kb status · /kb sync · /kb review")
-    rich_parts.append("")
-    rich_parts.append("Commands: /kb status · /kb sync · /kb review")
     return {
-        "title": "KB",
-        "text": "\n".join(lines),
+        "title": "Knowledge",
+        "text": "\n".join(lines[:8]),
         "actions": _dashboard_descriptor_actions(ctx, target, sections),
-        "rich_markdown": "\n".join(rich_parts),
     }
 
 
@@ -3549,195 +3571,18 @@ def _render_generic_descriptor_confirm(
     return {"title": label, "text": _generic_preview_text(label.replace("Preview", "Applied"), confirmed_payload), "actions": []}
 
 
-def _strip_env_value(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        return value[1:-1]
-    return value
-
-
-def _selected_env_values(keys: set[str]) -> dict[str, str]:
-    values = {key: value for key in keys if (value := os.getenv(key))}
-    missing = keys.difference(values)
-    if not missing:
-        return values
-    try:
-        from hermes_cli.config import get_env_path
-
-        env_path = get_env_path()
-        lines = env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    except Exception:
-        return values
-    for line in lines:
-        raw = line.strip()
-        if not raw or raw.startswith("#") or "=" not in raw:
-            continue
-        key, value = raw.split("=", 1)
-        key = key.strip()
-        if key in missing and key not in values:
-            values[key] = _strip_env_value(value)
-    return values
-
-
-def _first_env(env: dict[str, str], *keys: str) -> str | None:
-    for key in keys:
-        value = env.get(key)
-        if value:
-            return value
-    return None
-
-
-def _config_snapshot() -> dict[str, str]:
-    config: dict[str, Any] = {}
-    env_keys = {
-        "ANTHROPIC_API_KEY",
-        "ENVIRONMENT",
-        "HERMES_API_MODE",
-        "HERMES_ENV",
-        "HERMES_ENVIRONMENT",
-        "HERMES_KB_LANE",
-        "HERMES_KB_LLM_MODEL",
-        "HERMES_KB_LLM_PROVIDER",
-        "HERMES_KB_MODE",
-        "HERMES_KB_MODEL",
-        "HERMES_KB_PROVIDER",
-        "HERMES_KB_REASONING_EFFORT",
-        "HERMES_KB_WORKSPACE",
-        "HERMES_MODEL",
-        "HERMES_MODEL_API_MODE",
-        "HERMES_PROFILE",
-        "HERMES_PROVIDER",
-        "HERMES_REASONING_EFFORT",
-        "KB_LLM_MODEL",
-        "KB_LLM_PROVIDER",
-        "KB_LLM_REASONING_EFFORT",
-        "KB_OPENAI_COMPAT_MODEL",
-        "KB_PROVIDER",
-        "KB_WORKSPACE",
-        "MODEL",
-        "MODEL_PROVIDER",
-        "NVIDIA_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_REASONING_EFFORT",
-        "OPENROUTER_API_KEY",
-    }
-    env = _selected_env_values(env_keys)
-    try:
-        from hermes_cli.config import load_config
-
-        loaded = load_config()
-        if isinstance(loaded, dict):
-            config = loaded
-    except Exception:
-        config = {}
-
-    model_cfg = config.get("model")
-    agent_cfg = config.get("agent") if isinstance(config.get("agent"), dict) else {}
-    if isinstance(model_cfg, dict):
-        model = model_cfg.get("default") or model_cfg.get("name") or model_cfg.get("model")
-        provider = model_cfg.get("provider")
-        api_mode = model_cfg.get("api_mode")
-        reasoning = (
-            agent_cfg.get("reasoning_effort")
-            or model_cfg.get("reasoning_effort")
-            or model_cfg.get("reasoning")
-        )
-    else:
-        model = model_cfg
-        provider = config.get("provider")
-        api_mode = None
-        reasoning = None
-
-    provider = provider or _first_env(env, "HERMES_PROVIDER", "MODEL_PROVIDER")
-    model = model or _first_env(env, "HERMES_MODEL", "MODEL")
-    reasoning = reasoning or _first_env(env, "HERMES_REASONING_EFFORT", "OPENAI_REASONING_EFFORT")
-    api_mode = api_mode or _first_env(env, "HERMES_MODEL_API_MODE", "HERMES_API_MODE")
-
-    api_envs = [
-        "NVIDIA_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-    ]
-    configured = [name.removesuffix("_API_KEY") for name in api_envs if env.get(name)]
-
-    return {
-        "lane": _first_env(env, "HERMES_KB_MODE", "HERMES_KB_LANE", "HERMES_PROFILE") or "unknown",
-        "environment": (
-            _first_env(env, "HERMES_ENVIRONMENT", "HERMES_ENV", "ENVIRONMENT", "HERMES_PROFILE")
-            or "unknown"
-        ),
-        "workspace": _first_env(env, "HERMES_KB_WORKSPACE", "KB_WORKSPACE") or "not set",
-        "model": _short(model, "not set"),
-        "provider": _short(provider, "not set"),
-        "api_mode": _short(api_mode, "not set"),
-        "api": ", ".join(configured) if configured else "not detected",
-        "reasoning": _short(reasoning, "not set"),
-        "kb_provider": _short(
-            _first_env(env, "HERMES_KB_LLM_PROVIDER", "HERMES_KB_PROVIDER", "KB_LLM_PROVIDER", "KB_PROVIDER"),
-            "unknown",
-        ),
-        "kb_model": _short(
-            _first_env(env, "HERMES_KB_LLM_MODEL", "HERMES_KB_MODEL", "KB_LLM_MODEL", "KB_OPENAI_COMPAT_MODEL"),
-            "unknown",
-        ),
-        "kb_reasoning": _short(
-            _first_env(env, "HERMES_KB_REASONING_EFFORT", "KB_LLM_REASONING_EFFORT"),
-            "unknown",
-        ),
-    }
-
-
-def _primary_provider_target(provider_data: Any) -> dict[str, Any]:
-    if not isinstance(provider_data, dict):
-        return {}
-    targets = provider_data.get("targets")
-    if not isinstance(targets, list):
-        return {}
-    dict_targets = [target for target in targets if isinstance(target, dict)]
-    for item in dict_targets:
-        if _short(item.get("role"), "").lower() == "primary":
-            return item
-    return dict_targets[0] if dict_targets else {}
-
-
-def _provider_status_summary(provider_data: Any, fallback: dict[str, str] | None = None) -> dict[str, str]:
-    primary = _primary_provider_target(provider_data)
-    if not primary:
-        fallback = fallback or {}
-        return {
-            "provider": fallback.get("kb_provider") or "unknown",
-            "model": fallback.get("kb_model") or "unknown",
-            "reasoning": fallback.get("kb_reasoning") or "unknown",
-            "status": "unknown",
-        }
-    return {
-        "provider": _short(primary.get("adapter") or primary.get("provider")),
-        "model": _short(primary.get("model")),
-        "reasoning": _short(primary.get("reasoning_effort"), "not set"),
-        "status": _short(primary.get("status")),
-    }
-
-
-def _live_hermes_reasoning(gateway: Any, source: Any) -> str | None:
-    resolver = getattr(gateway, "_resolve_session_reasoning_config", None)
-    if not callable(resolver):
-        return None
-    try:
-        reasoning_config = resolver(source=source)
-    except TypeError:
-        try:
-            reasoning_config = resolver()
-        except Exception:
-            return None
-    except Exception:
-        return None
-    if not isinstance(reasoning_config, dict):
-        return None
-    if reasoning_config.get("enabled") is False:
-        return "none"
-    effort = str(reasoning_config.get("effort") or "").strip().lower()
-    return effort or None
+def _status_next_action(packet: dict[str, Any]) -> str:
+    value = packet.get("next_action")
+    if isinstance(value, dict):
+        value = value.get("summary") or value.get("label") or value.get("next_safe_action")
+    text = _public_clip(value, 120)
+    if not text:
+        return ""
+    if text.startswith("/kb sync"):
+        return "Ask me to sync."
+    if text.startswith("/kb review"):
+        return "Ask what needs attention."
+    return text
 
 
 def _render_status(
@@ -3747,183 +3592,39 @@ def _render_status(
     *,
     hermes_reasoning: str | None = None,
 ) -> dict[str, Any]:
-    snap = _config_snapshot()
-    if hermes_reasoning:
-        snap["reasoning"] = hermes_reasoning
-    kb = _provider_status_summary(provider_data, snap)
-    plugin_readiness = _plugin_readiness()
-    if isinstance(data, dict) and data.get("kind") in {"kb_status_proof_packet", "noc_kb_status_receipt"}:
-        return _render_status_proof(data, target, kb, snap)
-    readiness = "unknown"
-    publication = "unknown"
-    if isinstance(data, dict):
-        readiness = _short(_readiness_status(data))
-        publication = _short(_publication_status(data))
-    status_pairs: list[tuple[str, Any]] = [
-        ("Lane", snap["lane"]),
-        ("Environment", snap["environment"]),
-        ("MCP target", target),
-        ("Workspace", snap["workspace"]),
-        ("Hermes model", snap["model"]),
-        ("Hermes provider/API", f"{snap['provider']} / {snap['api_mode']} / {snap['api']}"),
-        ("Hermes reasoning", snap["reasoning"]),
-        ("KB provider", kb["provider"]),
-        ("KB model", kb["model"]),
-        ("KB reasoning", kb["reasoning"]),
-        ("Readiness", readiness),
-        ("Publication", publication),
-        ("Hermes KB plugin", plugin_readiness["status"]),
-        ("Plugin descriptors", plugin_readiness["descriptor_digest"] or "unavailable"),
-    ]
-    lines = [_emphasis_headline("KB Status")]
-    lines.extend(f"{key}: {value}" for key, value in status_pairs)
-    return {
-        "title": "KB Status",
-        "text": "\n".join(lines),
-        "actions": [],
-        "rich_markdown": _rich_kv_table("KB Status", status_pairs),
-    }
+    """Render user status without host, model, path, digest, or tool details."""
+    del target, provider_data, hermes_reasoning
+    if not isinstance(data, dict):
+        return {
+            "title": "Knowledge status",
+            "text": f"{_emphasis_headline('Knowledge status')}\nUnavailable.\nNo KB completion is claimed.",
+            "actions": [],
+        }
 
-
-def _status_line_value(packet: dict[str, Any], *paths: tuple[str, ...], default: str = "unknown") -> str:
-    for path in paths:
-        value = _get_path(packet, *path)
-        if value not in (None, "", [], {}):
-            return _short(value, default)
-    return default
-
-
-def _dirty_summary(packet: dict[str, Any]) -> str:
-    dirty_scope = packet.get("dirty_scope") if isinstance(packet.get("dirty_scope"), dict) else {}
-    worktrees = packet.get("worktrees") if isinstance(packet.get("worktrees"), dict) else {}
-    publication = packet.get("publication") if isinstance(packet.get("publication"), dict) else {}
-    dirty_count = None
-    for candidate in (
-        dirty_scope.get("count"),
-        dirty_scope.get("dirty_path_count"),
-        worktrees.get("dirty_path_count"),
-        publication.get("dirty_path_count"),
-        publication.get("changed_count"),
-    ):
-        if candidate is not None:
-            dirty_count = candidate
-            break
-    if dirty_count not in (None, ""):
-        return f"{_short(dirty_count, '0')} dirty"
-    dirty_bits = [
-        name
-        for name, value in dirty_scope.items()
-        if isinstance(value, bool) and value
-    ]
-    if dirty_bits:
-        return ", ".join(dirty_bits[:4])
-    return _status_line_value(packet, ("worktrees", "status"), ("workspace", "status"), default="unknown")
-
-
-def _next_action_summary(packet: dict[str, Any]) -> str:
-    next_action = packet.get("next_action")
-    if isinstance(next_action, dict):
-        return _short(
-            next_action.get("command")
-            or next_action.get("label")
-            or next_action.get("summary")
-            or next_action.get("next_safe_action"),
-            "",
-        )
-    return _short(next_action, "")
-
-
-def _render_status_proof(
-    packet: dict[str, Any],
-    target: str,
-    kb: dict[str, str],
-    snap: dict[str, str],
-) -> dict[str, Any]:
-    status = _short(packet.get("status") or packet.get("state"), "unknown")
-    lane = _status_line_value(
-        packet,
-        ("active_target", "target"),
-        ("active_target", "name"),
-        ("workspace", "lane"),
-        ("workspace", "target"),
-        default=target,
+    status = _public_clip(data.get("status") or data.get("state") or _readiness_status(data), 40)
+    publication = _public_clip(_publication_status(data), 48)
+    review = _get_path(data, "review", "pending_count")
+    sync = _public_clip(
+        _get_path(data, "sync", "status")
+        or _get_path(data, "sync", "state")
+        or _get_path(data, "sync", "last_run_status"),
+        48,
     )
-    runtime = _status_line_value(
-        packet,
-        ("runtime", "version"),
-        ("runtime", "installed_ref"),
-        ("runtime", "status"),
-    )
-    transport = _status_line_value(
-        packet,
-        ("transport", "status"),
-        ("runtime", "transport_status"),
-        ("runtime", "mcp_transport_status"),
-    )
-    publication = _status_line_value(
-        packet,
-        ("publication", "status"),
-        ("publication", "state"),
-        ("publication", "publication_state"),
-    )
-    review = _status_line_value(
-        packet,
-        ("review", "pending_count"),
-        ("review", "status"),
-        ("review", "state"),
-    )
-    sync = _status_line_value(
-        packet,
-        ("sync", "status"),
-        ("sync", "state"),
-        ("sync", "last_run_status"),
-    )
-    privacy = packet.get("privacy") if isinstance(packet.get("privacy"), dict) else {}
-    privacy_ok = not any(bool(value) for value in privacy.values())
-    next_action = _next_action_summary(packet)
-    proof_pairs: list[tuple[str, Any]] = [
-        ("Request", "/kb status"),
-        ("Outcome", status),
-        ("Lane", lane),
-        ("Runtime", runtime),
-        ("Transport", transport),
-        ("Publication", publication),
-        ("Pending review", review),
-        ("Sync", sync),
-        ("Dirty", _dirty_summary(packet)),
-        ("Privacy", "ok" if privacy_ok else "check receipt"),
-        ("KB model", f"{kb['provider']} / {kb['model']} / {kb['reasoning']}"),
-        ("KB reasoning", kb["reasoning"]),
-        ("Hermes reasoning", snap["reasoning"]),
-        ("Hermes KB plugin", _plugin_readiness()["status"]),
-    ]
+    lines = [_emphasis_headline("Knowledge status"), f"Status: {status or 'unknown'}"]
+    if publication:
+        lines.append("Publication: " + publication.replace("_", " "))
+    if review not in (None, ""):
+        lines.append(f"Needs attention: {_public_clip(review, 20)}")
+    if sync:
+        lines.append("Last sync: " + sync.replace("_", " "))
+    next_action = _status_next_action(data)
     if next_action:
-        proof_pairs.append(("Next", next_action))
-    detail_lines = [f"{key}: {value}" for key, value in proof_pairs]
-    # Phase B pilot: bold headline (Task 2) + collapse the long status detail body
-    # into an expandable blockquote (Task 1). The Commands hint stays outside the
-    # block so the primary action remains immediately visible. PLUGIN-DATA-SHAPE-ONLY.
-    text = "\n".join(
-        [
-            _emphasis_headline("KB Status"),
-            _expandable_block("\n".join(detail_lines)),
-            "Commands: /kb sync · /kb review",
-        ]
-    )
-    # Rich path: a native 2-col status table + plain Commands hint. RAW markdown,
-    # NOT MarkdownV2 — kept separate from `text` (opposite escaping rules).
-    rich_markdown = "\n".join(
-        [
-            _rich_kv_table("KB Status", proof_pairs),
-            "",
-            "Commands: /kb sync · /kb review",
-        ]
-    )
+        lines.append("Next: " + next_action)
     return {
-        "title": "KB Status",
-        "text": text,
+        "title": "Knowledge status",
+        "status": status or "unknown",
+        "text": "\n".join(lines[:7]),
         "actions": [],
-        "rich_markdown": rich_markdown,
     }
 
 
@@ -6162,492 +5863,103 @@ def _format_changed_paths(paths: list[str], *, limit: int = 10) -> list[str]:
     return lines
 
 
-def _publish_args(args: str) -> tuple[bool, str]:
-    parts = (args or "").strip().split()
-    confirm = any(part.lower() in {"confirm", "confirmed", "apply", "publish", "push"} for part in parts)
-    message_parts = [part for part in parts if part.lower() not in {"confirm", "confirmed", "apply", "publish", "push"}]
-    if message_parts and message_parts[0].lower() in {"message", "msg"}:
-        message_parts = message_parts[1:]
-    message = " ".join(message_parts).strip() or "Publish KB update"
-    return confirm, message
-
-
-def _publication_git_line(git_state: Any) -> str:
-    if not isinstance(git_state, dict):
-        return ""
-    branch = _short(git_state.get("branch"), "")
-    head = _short(git_state.get("head"), "")
-    upstream = _short(git_state.get("upstream"), "")
-    bits: list[str] = []
-    if branch:
-        bits.append(branch)
-    if head:
-        bits.append(head[:12])
-    if upstream:
-        bits.append(upstream)
-    return " · ".join(bits)
-
-
-def _closeout_packet(ctx: Any, target: str) -> Any:
-    _tool, payload, _errors = _dispatch_first(ctx, target, [("closeout.packet", {"limit": 5})])
-    return payload
-
-
-def _closeout_action_descriptors_from_payload(payload: Any) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    actions = payload.get("action_descriptors")
-    if not isinstance(actions, list):
-        return []
-    return [action for action in actions if isinstance(action, dict)]
-
-
-def _closeout_action_descriptors(ctx: Any, target: str) -> list[dict[str, Any]]:
-    return _closeout_action_descriptors_from_payload(_closeout_packet(ctx, target))
-
-
-def _closeout_publication_lines(payload: Any) -> list[str]:
-    if not isinstance(payload, dict) or payload.get("error"):
-        return []
-    publication = payload.get("publication") if isinstance(payload.get("publication"), dict) else {}
-    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    lines: list[str] = []
-    status = _short(
-        publication.get("status")
-        or publication.get("state")
-        or publication.get("publication_status")
-        or summary.get("publication_status"),
-        "",
-    )
-    if status:
-        lines.append(f"Publication posture: {status}")
-    manual_expected = bool(
-        publication.get("manual_publication_expected")
-        or publication.get("manual_publication")
-        or summary.get("manual_publication_expected")
-        or payload.get("manual_publication_expected")
-    )
-    if manual_expected:
-        lines.append("Manual publication expected.")
-    changed_count = publication.get("changed_count")
-    if changed_count is None:
-        changed_count = summary.get("changed_count")
-    if changed_count is None:
-        changed_count = payload.get("changed_count")
-    if changed_count is None:
-        changed_paths = _changed_paths(publication) or _changed_paths(payload)
-        changed_count = len(changed_paths) if changed_paths else None
-    if changed_count is not None:
-        lines.append(f"Closeout changed paths: {_short(changed_count, '0')}")
-    reason = _short(publication.get("reason") or summary.get("publication_reason"), "")
-    if reason:
-        lines.append("Posture reason: " + _clip(reason, 220))
-    return lines
-
-
-def _publication_descriptor(descriptors: list[dict[str, Any]], method: str) -> dict[str, Any] | None:
-    for descriptor in descriptors:
-        if descriptor.get("dashboard_owned_write") is True:
-            continue
-        if descriptor.get("target_kind") != "publication":
-            continue
-        if descriptor.get("method") == method or descriptor.get("preview_tool") == method or descriptor.get("confirm_tool") == method:
-            return descriptor
-    return None
-
-
-def _publication_descriptor_args(descriptor: dict[str, Any] | None, *, message: str) -> dict[str, Any]:
-    params = descriptor.get("params") if isinstance(descriptor, dict) and isinstance(descriptor.get("params"), dict) else {}
-    args = dict(params)
-    if message:
-        args["message"] = message
-    return args
-
-
-def _render_publication_preflight_descriptor(
-    ctx: Any,
-    target: str,
-    *,
-    descriptor: dict[str, Any],
-    callback_ctx: Any,
-) -> dict[str, Any]:
-    del callback_ctx
-    tool = _descriptor_tool_name(target, descriptor.get("preview_tool") or descriptor.get("method") or "publication.preflight")
-    payload = _dispatch_registry_tool(ctx, target, tool, _descriptor_params(descriptor))
-    if isinstance(payload, dict) and payload.get("error"):
-        return {"title": "KB Publish", "text": f"KB Publication Preflight Failed\n{payload['error']}", "actions": []}
-    packet_card = _render_supported_result_packet(payload)
-    if packet_card is not None:
-        return packet_card
-    if not isinstance(payload, dict):
-        return {
-            "title": "KB Publish",
-            "text": "KB Publication Preflight\n" + _short(payload, "No structured response returned."),
-            "actions": [],
-        }
-    lines = [
-        "KB Publication Preflight",
-        f"Status: {_short(payload.get('status') or payload.get('state'))}",
-    ]
-    changed_paths = _changed_paths(payload)
-    if changed_paths:
-        lines.append(f"Changed paths: {len(changed_paths)}")
-        lines.extend(_format_changed_paths(changed_paths, limit=5))
-    lines.extend(_receipt_lines(payload, include_request=True))
-    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
-    if warnings:
-        lines.extend(_warning_lines(warnings))
-    summary = _short(payload.get("summary") or payload.get("message"), "")
-    if summary:
-        lines.append("Summary: " + _clip(summary, 260))
-    return {"title": "KB Publish", "text": "\n".join(lines), "actions": []}
-
-
-def _publication_preflight_action(ctx: Any, target: str, descriptor: dict[str, Any] | None) -> list[Any]:
-    if not descriptor:
-        return []
-    return [
-        KbAction(
-            label="Run Preflight",
-            action_id="publication.preflight.open",
-            handler=lambda callback_ctx, d=dict(descriptor): _render_publication_preflight_descriptor(
-                ctx,
-                target,
-                descriptor=d,
-                callback_ctx=callback_ctx,
-            ),
-            metadata={
-                "target_kind": "publication",
-                "target_ref": descriptor.get("target_ref") or "publication",
-                "preview_tool": descriptor.get("preview_tool") or descriptor.get("method") or "publication.preflight",
-                "mutation": "read_only",
-            },
-        )
-    ]
-
-
-def _render_publish_descriptor_confirm(
-    ctx: Any,
-    target: str,
-    *,
-    preview_descriptor: dict[str, Any] | None,
-    confirm_descriptor: dict[str, Any],
-    message: str,
-    callback_ctx: Any,
-) -> dict[str, Any]:
-    generated_preview = _descriptor("publication.preview_commit") or {}
-    generated_commit = _descriptor("publication.commit_confirmed") or {}
-    preview_tool = _descriptor_tool_name(
-        target,
-        (preview_descriptor or {}).get("preview_tool")
-        or (preview_descriptor or {}).get("method")
-        or generated_preview.get("name"),
-    )
-    commit_tool = _descriptor_tool_name(
-        target,
-        confirm_descriptor.get("confirm_tool")
-        or confirm_descriptor.get("method")
-        or generated_commit.get("name"),
-    )
-    push_tool = _descriptor_tool_name(target, "publication.push_confirmed")
-    if not preview_tool or not commit_tool or not push_tool:
-        return _capability_unavailable(
-            "KB Publish",
-            ("publication.preview_commit", "publication.commit_confirmed", "publication.push_confirmed"),
-        )
-    actor = _queue_callback_actor(callback_ctx)
-    source = "Hermes Telegram Action Card"
-    session_id = f"telegram-kb-publish-{int(time.time())}"
-    preview_payload = _dispatch_registry_tool(
-        ctx, target, preview_tool, _publication_descriptor_args(preview_descriptor, message=message)
-    )
-    if not isinstance(preview_payload, dict) or preview_payload.get("error"):
-        return _render_publish_preview(preview_payload)
-    changed_paths = _changed_paths(preview_payload)
-    if not changed_paths:
-        return {
-            "title": "KB Publish",
-            "text": _render_publish_preview(preview_payload)["text"].replace("KB Publish Preview", "KB Publish"),
-            "actions": [],
-        }
-    confirmation = {
-        "confirmed": True,
-        "surface": "telegram",
-        "action": "publication.commit_and_push",
-        "preview_required": True,
-        "confirmation_text": str(confirm_descriptor.get("confirmation_copy") or "Confirm publication after preview."),
-    }
-    commit_args = _publication_descriptor_args(confirm_descriptor, message=message)
-    commit_args.update(
-        {
-            "expected_git_head": _short(_get_path(preview_payload, "git", "head"), ""),
-            "expected_changed_paths": changed_paths,
-            "push": False,
-            "actor": actor,
-            "source": source,
-            "session_id": session_id,
-            "user_confirmation": confirmation,
-        }
-    )
-    commit_payload = _dispatch_registry_tool(ctx, target, commit_tool, commit_args)
-    if not isinstance(commit_payload, dict) or not commit_payload.get("ok"):
-        return _render_publish_result(preview_payload, commit_payload, None)
-    push_payload = _dispatch_registry_tool(
-        ctx,
-        target,
-        push_tool,
-        {
-                "actor": actor,
-                "source": source,
-                "session_id": session_id,
-                "user_confirmation": confirmation,
-        },
-    )
-    return _render_publish_result(preview_payload, commit_payload, push_payload)
-
-
-def _publish_confirm_action(
-    ctx: Any,
-    target: str,
-    *,
-    preview_descriptor: dict[str, Any] | None,
-    confirm_descriptor: dict[str, Any] | None,
-    message: str,
-) -> list[Any]:
-    if not confirm_descriptor:
-        return []
-    return [
-        KbAction(
-            label="Confirm Publish",
-            action_id="publication.commit_confirmed.confirm",
-            handler=lambda callback_ctx: _render_publish_descriptor_confirm(
-                ctx,
-                target,
-                preview_descriptor=preview_descriptor,
-                confirm_descriptor=confirm_descriptor,
-                message=message,
-                callback_ctx=callback_ctx,
-            ),
-            metadata={
-                "target_kind": "publication",
-                "preview_tool": (preview_descriptor or {}).get("preview_tool")
-                or (_descriptor("publication.preview_commit") or {}).get("name"),
-                "confirm_tool": confirm_descriptor.get("confirm_tool") or confirm_descriptor.get("method"),
-                "preview_required": True,
-            },
-        )
-    ]
-
-
-def _render_publish_preview(
-    payload: Any,
-    *,
-    confirm_hint: str = "/kb publish confirm",
-    actions: list[Any] | None = None,
-    closeout_packet: Any = None,
-) -> dict[str, Any]:
-    if isinstance(payload, dict) and payload.get("error"):
-        return {"title": "KB Publish", "text": f"KB Publish Preview Failed\n{payload['error']}", "actions": []}
-    if not isinstance(payload, dict):
-        return {"title": "KB Publish", "text": "KB Publish Preview Failed\nPublication preview returned an unexpected response.", "actions": []}
-    packet_card = _render_supported_result_packet(payload)
-    if packet_card is not None:
-        closeout_lines = _closeout_publication_lines(closeout_packet)
-        if closeout_lines:
-            packet_card["text"] = packet_card["text"] + "\n" + "\n".join(closeout_lines)
-        packet_card["actions"] = actions or []
-        return packet_card
-    changed_paths = _changed_paths(payload)
-    status = _short(payload.get("status"))
-    message = _short(payload.get("message"), "Publish KB update")
-    git_line = _publication_git_line(payload.get("git"))
-    closeout_lines = _closeout_publication_lines(closeout_packet)
-    if not changed_paths:
-        lines = [
-            "KB Publish Preview",
-            "Decision Card: Publication",
-            "Nothing to publish.",
-            f"Status: {status}",
-            f"Message: {message}",
-        ]
-        lines.extend(closeout_lines)
-        lines.extend(_receipt_lines(payload))
-        if git_line:
-            lines.append(f"Git: {git_line}")
-        return {"title": "KB Publish", "text": "\n".join(lines), "actions": actions or []}
-    lines = [
-        "KB Publish Preview",
-        "Decision Card: Publication",
-        f"Status: {status}",
-        f"Message: {message}",
-        f"Changed paths: {len(changed_paths)}",
-    ]
-    lines.extend(closeout_lines)
-    lines.extend(_receipt_lines(payload))
-    if git_line:
-        lines.append(f"Git: {git_line}")
-    lines.append("")
-    lines.extend(_format_changed_paths(changed_paths))
-    lines.extend(
-        [
-            "",
-            f"To publish: {confirm_hint}",
-            "No commit or push has been made.",
-        ]
-    )
-    return {"title": "KB Publish", "text": "\n".join(lines), "actions": actions or []}
-
-
-def _render_publish_result(preview: Any, commit: Any, push: Any) -> dict[str, Any]:
-    changed_paths = _changed_paths(preview)
-    if isinstance(commit, dict) and commit.get("error"):
-        return {"title": "KB Publish", "text": f"KB Publish Failed\nCommit failed: {commit['error']}", "actions": []}
-    if not isinstance(commit, dict):
-        return {"title": "KB Publish", "text": "KB Publish Failed\nCommit returned an unexpected response.", "actions": []}
-    packet_card = _render_supported_result_packet(commit)
-    if packet_card is not None:
-        return packet_card
-    commit_status = _short(commit.get("status"))
-    commit_ok = bool(commit.get("ok"))
-    if not commit_ok:
-        reason = _short(commit.get("reason") or _get_path(commit, "publication", "reason"), "unknown")
-        lines = [
-            "KB Publish Blocked",
-            f"Committed: {commit_status}",
-            f"Reason: {reason}",
-        ]
-        if changed_paths:
-            lines.append(f"Changed paths: {len(changed_paths)}")
-            lines.extend(_format_changed_paths(changed_paths))
-        lines.append("Next: /kb publish")
-        return {"title": "KB Publish", "text": "\n".join(lines), "actions": []}
-    push_status = "not run"
-    push_ok = False
-    if isinstance(push, dict):
-        push_status = _short(push.get("status"))
-        push_ok = bool(push.get("ok"))
-    elif push is not None:
-        push_status = "unexpected response"
-    publication = commit.get("publication") if isinstance(commit.get("publication"), dict) else {}
-    commit_hash = _short(publication.get("commit") or publication.get("head"), "")
-    lines = [
-        "KB Published",
-        f"Committed: {commit_status}",
-        f"Pushed: {push_status}",
-    ]
-    lines.extend(_receipt_lines(commit))
-    if commit_hash:
-        lines.append(f"Commit: {commit_hash[:12]}")
-    if changed_paths:
-        lines.append(f"Changed paths: {len(changed_paths)}")
-        lines.extend(_format_changed_paths(changed_paths))
-    if not push_ok:
-        lines.append("Warning: commit succeeded but push did not report success.")
-        lines.append("Next: /kb publish push confirm")
-    else:
-        lines.append("Next: /kb status")
-    return {"title": "KB Publish", "text": "\n".join(lines), "actions": []}
-
-
 def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
-    required = (
-        "publication.preview_commit",
-        "publication.commit_confirmed",
-        "publication.push_confirmed",
+    """Report publication truth and hand off the consequence boundary."""
+    del args
+    _tool, data, errors = _dispatch_first(ctx, target, [("publication.status", {})])
+    if not isinstance(data, dict):
+        return _render_error("Publication", target, errors)
+
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    git_state = data.get("git") if isinstance(data.get("git"), dict) else {}
+    raw_status = str(data.get("status") or "").strip().lower()
+    scope_state = str(scope.get("publication_state") or "").strip().lower()
+    try:
+        ahead = int(git_state.get("ahead") or 0)
+        behind = int(git_state.get("behind") or 0)
+    except (TypeError, ValueError):
+        ahead = behind = 0
+
+    blocked = (
+        data.get("ok") is False
+        or behind > 0
+        or raw_status in {"blocked", "error", "failed", "not_git_repo", "unavailable"}
+        or scope_state in {"blocked", "publication_blocked", "publication_unavailable"}
     )
-    if any(_descriptor(name) is None for name in required):
-        return _capability_unavailable("KB Publish", required)
-    confirm, message = _publish_args(args)
-    closeout = _closeout_packet(ctx, target)
-    descriptors = _closeout_action_descriptors_from_payload(closeout)
-    preflight_descriptor = _publication_descriptor(descriptors, "publication.preflight")
-    preview_descriptor = _publication_descriptor(descriptors, "publication.preview_commit")
-    commit_descriptor = _publication_descriptor(descriptors, "publication.commit_confirmed")
-    generated_preview = _descriptor("publication.preview_commit") or {}
-    generated_commit = _descriptor("publication.commit_confirmed") or {}
-    preview_tool = _descriptor_tool_name(
-        target,
-        (preview_descriptor or {}).get("preview_tool")
-        or (preview_descriptor or {}).get("method")
-        or generated_preview.get("name"),
-    )
-    commit_tool = _descriptor_tool_name(
-        target,
-        (commit_descriptor or {}).get("confirm_tool")
-        or (commit_descriptor or {}).get("method")
-        or generated_commit.get("name"),
-    )
-    push_tool = _descriptor_tool_name(target, "publication.push_confirmed")
-    actor = "telegram:operator"
-    source = "Hermes Telegram"
-    session_id = f"telegram-kb-publish-{int(time.time())}"
-    preview_payload = _dispatch_registry_tool(
-        ctx, target, preview_tool, _publication_descriptor_args(preview_descriptor, message=message)
-    )
-    if not confirm:
-        actions = _publication_preflight_action(ctx, target, preflight_descriptor)
-        if _changed_paths(preview_payload):
-            actions.extend(
-                _publish_confirm_action(
-                    ctx,
-                    target,
-                    preview_descriptor=preview_descriptor,
-                    confirm_descriptor=commit_descriptor,
-                    message=message,
-                )
-            )
-        preview_card = _render_publish_preview(
-            preview_payload,
-            actions=actions,
-            closeout_packet=closeout,
+    dirty = (
+        not blocked
+        and (
+            git_state.get("clean") is False
+            or raw_status == "dirty"
+            or scope_state in {"publication_pending", "manual_publication_expected"}
         )
-        return preview_card
-    if not isinstance(preview_payload, dict) or preview_payload.get("error"):
-        return _render_publish_preview(preview_payload, closeout_packet=closeout)
-    changed_paths = _changed_paths(preview_payload)
-    if not changed_paths:
-        return {
-            "title": "KB Publish",
-            "text": _render_publish_preview(preview_payload, closeout_packet=closeout)["text"].replace("KB Publish Preview", "KB Publish"),
-            "actions": [],
-        }
-    confirmation = {
-        "confirmed": True,
-        "surface": "telegram",
-        "action": "publication.commit_and_push",
-        "preview_required": True,
-        "confirmation_text": "/kb publish confirm",
+    )
+    push_pending = (
+        not blocked
+        and not dirty
+        and (
+            ahead > 0
+            or raw_status in {"ahead", "unpushed"}
+            or scope_state == "push_expected"
+        )
+    )
+    published = (
+        not blocked
+        and not dirty
+        and not push_pending
+        and data.get("ok") is True
+        and git_state.get("clean") is True
+        and raw_status in {"clean", "ready", "published"}
+    )
+
+    lines = [_emphasis_headline("Publication")]
+    if blocked:
+        posture = "blocked"
+        lines.extend(
+            [
+                "Publication is blocked by the current workspace state.",
+                "Next: resolve the blocker on a trusted operator surface.",
+            ]
+        )
+    elif dirty:
+        posture = "dirty"
+        lines.extend(
+            [
+                "Reviewed changes are ready for publication.",
+                "Next: approve one publish operation on a trusted operator surface.",
+            ]
+        )
+    elif push_pending:
+        posture = "ahead"
+        lines.extend(
+            [
+                "The reviewed commit exists but has not been pushed.",
+                "Next: approve one push and replica convergence on a trusted operator surface.",
+            ]
+        )
+    elif published:
+        posture = "published"
+        lines.extend(
+            [
+                "Reviewed changes are already published.",
+                "Next: no publication action is needed.",
+            ]
+        )
+    else:
+        posture = "unknown"
+        lines.extend(
+            [
+                "Publication state could not be verified.",
+                "Next: check it on a trusted operator surface.",
+            ]
+        )
+    lines.insert(-1, "No publication was attempted.")
+    return {
+        "title": "Publication",
+        "status": posture,
+        "text": "\n".join(lines[:6]),
+        "actions": [],
     }
-    commit_payload = _dispatch_registry_tool(
-        ctx,
-        target,
-        commit_tool,
-        {
-                **_publication_descriptor_args(commit_descriptor, message=message),
-                "message": message,
-                "expected_git_head": _short(_get_path(preview_payload, "git", "head"), ""),
-                "expected_changed_paths": changed_paths,
-                "push": False,
-                "actor": actor,
-                "source": source,
-                "session_id": session_id,
-                "user_confirmation": confirmation,
-        },
-    )
-    if not isinstance(commit_payload, dict) or not commit_payload.get("ok"):
-        return _render_publish_result(preview_payload, commit_payload, None)
-    push_payload = _dispatch_registry_tool(
-        ctx,
-        target,
-        push_tool,
-        {
-                "actor": actor,
-                "source": source,
-                "session_id": session_id,
-                "user_confirmation": confirmation,
-        },
-    )
-    return _render_publish_result(preview_payload, commit_payload, push_payload)
 
 
 def _queue_items_from_payload(data: Any) -> list[Any]:
@@ -7397,65 +6709,181 @@ def _render_workflow_plan(
     return {"title": title, "text": "\n".join(lines), "actions": []}
 
 
-def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict[str, Any]:
-    """Render engine-owned sync truth without inferring completion."""
+_SYNC_SUCCESS_STATES = {"completed", "completed_with_degradation"}
+
+
+def _sync_success_state(packet: Any) -> str:
     if not isinstance(packet, dict):
-        return _render_error("KB Sync", _mcp_target(), ["sync returned no structured packet"])
-    status = _short(packet.get("status"), "unknown")
-    run_id = _short(packet.get("run_id"), "")
+        return ""
+    terminal = str(packet.get("terminal_state") or "").strip().lower()
+    status = str(packet.get("status") or "").strip().lower()
+    if terminal in _SYNC_SUCCESS_STATES and status in _SYNC_SUCCESS_STATES:
+        return terminal if terminal == status else ""
+    return ""
+
+
+def _sync_publication_is_separate(packet: Any) -> bool:
+    if not isinstance(packet, dict):
+        return False
+    publication = packet.get("publication")
+    return bool(
+        isinstance(publication, dict)
+        and publication.get("status") == "not_attempted"
+        and publication.get("sync_publishes") is False
+        and publication.get("separate_confirmation_required") is True
+    )
+
+
+def _sync_noop_verified(packet: Any) -> bool:
+    return bool(
+        isinstance(packet, dict)
+        and packet.get("kind") == "kb_sync_run"
+        and _sync_success_state(packet) == "completed"
+        and packet.get("reason") == "all_sources_current"
+        and packet.get("answered_actions") == 0
+        and not packet.get("run_id")
+        and _sync_publication_is_separate(packet)
+    )
+
+
+def _sync_readback_verified(resumed: Any, readback: Any, run_id: str) -> bool:
+    resumed_state = _sync_success_state(resumed)
+    readback_state = _sync_success_state(readback)
+    return bool(
+        resumed_state
+        and resumed_state == readback_state
+        and isinstance(resumed, dict)
+        and isinstance(readback, dict)
+        and resumed.get("run_id") == run_id
+        and readback.get("run_id") == run_id
+        and _sync_publication_is_separate(resumed)
+        and _sync_publication_is_separate(readback)
+    )
+
+
+def _render_sync_packet(packet: Any, *, readback_verified: bool = False) -> dict[str, Any]:
+    """Render one compact sync receipt without exposing workflow machinery."""
+    if not isinstance(packet, dict):
+        return _render_error("Knowledge sync", _mcp_target(), ["sync returned no structured packet"])
+
+    status = str(packet.get("status") or "unknown").strip().lower()
+    terminal = str(packet.get("terminal_state") or "").strip().lower()
+    success_state = _sync_success_state(packet)
+    lines = [_emphasis_headline("Knowledge sync")]
+
     if packet.get("error"):
-        return {
-            "title": "KB Sync",
-            "status": "failed",
-            "text": f"KB Sync\n{_short(packet.get('error'))}\nNo KB completion is claimed.",
-            "actions": [],
-        }
-    lines = ["KB Sync", f"Status: {status}"]
-    if run_id:
-        lines.append(f"Run: {run_id}")
-    reason = _short(packet.get("reason"), "")
-    if reason:
-        lines.append(f"Reason: {reason}")
-    action = packet.get("next_action") if isinstance(packet.get("next_action"), dict) else {}
-    if action:
-        lines.append(f"Next: {_short(action.get('kind'), 'harness action')}")
-        source_id = _short(action.get("source_id"), "")
-        if source_id:
-            lines.append(f"Source: {source_id}")
-        window = action.get("requested_window") if isinstance(action.get("requested_window"), dict) else {}
-        if window:
-            lines.append(
-                "Window: "
-                + _short(window.get("start"), "unknown")
-                + " to "
-                + _short(window.get("end"), "unknown")
+        lines.extend(["Sync stopped.", "No completion is claimed.", "Next: ask me to retry."])
+        return {"title": "Knowledge sync", "status": "failed", "text": "\n".join(lines), "actions": []}
+
+    if _sync_noop_verified(packet):
+        lines.extend(
+            [
+                "Everything is already current.",
+                "No knowledge changes were needed.",
+                "Publication was not attempted.",
+                "Receipt: verified no-op",
+            ]
+        )
+    elif success_state:
+        if not readback_verified:
+            lines.extend(
+                [
+                    "The final result could not be verified.",
+                    "No completion is claimed.",
+                    "Next: ask me to check sync status.",
+                ]
             )
-        lines.append(_short(action.get("instruction"), "Continue the run in Hermes chat."))
-    authorization = packet.get("authorization") if isinstance(packet.get("authorization"), dict) else {}
-    if status == "ready_to_apply" and run_id:
-        summary = _short(_get_path(packet, "preview", "semantic_summary"), "")
-        if summary:
-            lines.append(f"Preview: {summary}")
-        expiry = _short(authorization.get("expires_at"), "")
-        if expiry:
-            lines.append(f"Expires: {expiry}")
-        if authorization.get("mode") == "standing_safe_write":
-            lines.append("Ready for safe apply: /kb sync apply (no digest confirmation required)")
-    publication = packet.get("publication") if isinstance(packet.get("publication"), dict) else {}
-    if publication:
-        lines.append(f"Publication: {_short(publication.get('status'), 'not attempted')} (separate)")
-    terminal = _short(packet.get("terminal_state"), "")
-    if status == "completed" or terminal == "completed":
-        if readback_verified and run_id:
-            lines[1] = "Status: completed (engine readback verified)"
-            lines.append("Knowledge changes landed. Publication was not attempted.")
+        elif not _sync_publication_is_separate(packet):
+            return {
+                "title": "Knowledge sync",
+                "status": "blocked",
+                "text": "\n".join(
+                    [
+                        _emphasis_headline("Knowledge sync"),
+                        "Publication separation could not be verified.",
+                        "No completion is claimed.",
+                        "Next: inspect the sync receipt on a trusted operator surface.",
+                    ]
+                ),
+                "actions": [],
+            }
+        elif success_state == "completed_with_degradation":
+            lines.extend(
+                [
+                    "Sync completed with gaps.",
+                    "Verified knowledge changes are saved; some evidence was unavailable.",
+                    "Publication was not attempted.",
+                    "Receipt: verified",
+                ]
+            )
         else:
-            lines[1] = "Status: completion unverified"
-            lines.append("The engine did not provide a verified terminal readback; no completion is claimed.")
-    elif terminal in {"failed", "cancelled", "stalled_unobserved"}:
-        lines.append(f"Terminal: {terminal}")
-        lines.append("No successful completion is claimed.")
-    return {"title": "KB Sync", "status": status, "text": "\n".join(lines), "actions": []}
+            lines.extend(
+                [
+                    "Sync complete.",
+                    "Knowledge changes are saved and verified.",
+                    "Publication was not attempted.",
+                    "Receipt: verified",
+                ]
+            )
+    elif status == "ready_to_apply":
+        summary = _public_clip(_get_path(packet, "preview", "semantic_summary"), 150)
+        lines.append("The reviewed internal update is ready.")
+        if summary:
+            lines.append(summary)
+        lines.append("Next: say “apply it” to continue.")
+        lines.append("Publication remains separate.")
+    elif status in {"awaiting_action", "prepared", "running", "workflow_running"}:
+        action = packet.get("next_action") if isinstance(packet.get("next_action"), dict) else {}
+        action_kind = str(action.get("kind") or "").strip().lower()
+        if action_kind == "gather_evidence":
+            lines.append("The comprehensive update is ready for evidence gathering.")
+            lines.append("Next: continue here so I can gather and review the evidence.")
+        else:
+            lines.append("Sync is in progress.")
+            lines.append("Next: continue here to complete the review.")
+        lines.append("Publication was not attempted.")
+    elif terminal in {"failed", "stalled_unobserved"} or status in {"failed", "stalled_unobserved"}:
+        state = terminal or status
+        lines.extend(
+            [
+                f"Sync stopped: {state.replace('_', ' ')}.",
+                "No completion is claimed.",
+                "Next: ask me to inspect the blocker or retry.",
+            ]
+        )
+    elif terminal == "cancelled" or status == "cancelled":
+        lines.extend(
+            [
+                "Sync stopped without applying changes.",
+                "No completion is claimed.",
+                "Next: ask me to start again when ready.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"Status: {_public_clip(status, 48) or 'unknown'}.",
+                "No completion is claimed.",
+                "Next: ask me to check sync status.",
+            ]
+        )
+    return {
+        "title": "Knowledge sync",
+        "status": status,
+        "text": "\n".join(lines[:8]),
+        "actions": [],
+    }
+
+
+def _sync_harness_rewrite(run_id: str) -> str:
+    """Give the active run to Hermes through the gateway's normal model turn."""
+    return (
+        f"Continue the canonical KB sync run {run_id}. "
+        "Call kb.sync.status for that exact run first, then follow its next_action. "
+        "Gather evidence and exercise semantic judgment in the Hermes harness; use "
+        "kb.sync.resume for the requested responses and routine standing-safe-write apply. "
+        "Do not publish. Return a compact truthful result to the user."
+    )
 
 
 def _sync_tool_call(
@@ -7510,13 +6938,24 @@ def _render_sync_command(
         _store_sync_run_state(session_id, source=source, target=target, packet=current)
         if verb != "apply":
             terminal = _short(current.get("terminal_state"), "")
-            if not tokens and terminal in {"completed", "failed", "cancelled"}:
+            if not tokens and terminal in {
+                "completed",
+                "completed_with_degradation",
+                "failed",
+                "cancelled",
+            }:
                 state = None
             else:
-                return _render_sync_packet(
+                card = _render_sync_packet(
                     current,
-                    readback_verified=terminal == "completed" and current.get("status") == "completed",
+                    readback_verified=bool(
+                        _sync_success_state(current)
+                        and _sync_publication_is_separate(current)
+                    ),
                 )
+                if not tokens and run_id and not _sync_success_state(current):
+                    card["_gateway_rewrite"] = _sync_harness_rewrite(run_id)
+                return card
         else:
             if current.get("status") != "ready_to_apply":
                 return _render_sync_packet(current, readback_verified=False)
@@ -7549,12 +6988,7 @@ def _render_sync_command(
             if readback is None:
                 return _render_sync_packet(resumed, readback_verified=False)
             _store_sync_run_state(session_id, source=source, target=target, packet=readback)
-            verified = (
-                resumed.get("status") == "completed"
-                and readback.get("status") == "completed"
-                and readback.get("terminal_state") == "completed"
-                and readback.get("run_id") == run_id
-            )
+            verified = _sync_readback_verified(resumed, readback, run_id)
             return _render_sync_packet(readback, readback_verified=verified)
 
     if tokens and verb not in {"prepare"}:
@@ -7574,7 +7008,14 @@ def _render_sync_command(
     if prepared is None:
         return _render_error("KB Sync", target, errors)
     _store_sync_run_state(session_id, source=source, target=target, packet=prepared)
-    return _render_sync_packet(prepared, readback_verified=False)
+    card = _render_sync_packet(
+        prepared,
+        readback_verified=_sync_noop_verified(prepared),
+    )
+    run_id = _short(prepared.get("run_id"), "")
+    if run_id and not _sync_success_state(prepared):
+        card["_gateway_rewrite"] = _sync_harness_rewrite(run_id)
+    return card
 
 
 def _render_queue(
@@ -7816,7 +7257,7 @@ def _card_for_command(
         _, data, errors = _dispatch_first(ctx, target, [("attention.cockpit", cockpit_args)])
         return _render_error("KB Today", target, errors) if data is None else _render_today(data)
     if command == "kbstatus":
-        _, data, _errors = _dispatch_first(
+        _, data, errors = _dispatch_first(
             ctx,
             target,
             [
@@ -7824,9 +7265,9 @@ def _card_for_command(
                 ("attention.cockpit", cockpit_args),
             ],
         )
-        _, provider_data, _provider_errors = _dispatch_first(ctx, target, [("provider.status", {})])
-        hermes_reasoning = _live_hermes_reasoning(gateway, source)
-        return _render_status(data, target, provider_data, hermes_reasoning=hermes_reasoning)
+        if data is None:
+            return _render_error("Knowledge status", target, errors)
+        return _render_status(data, target)
     if command == "kbruns":
         _, data, errors = _dispatch_first(
             ctx,
@@ -8992,6 +8433,9 @@ def build_pre_gateway_dispatch_hook(ctx: Any) -> Callable[..., dict[str, str] | 
                 session_store=session_store,
                 event=event,
             )
+        gateway_rewrite = card.pop("_gateway_rewrite", "")
+        if gateway_rewrite:
+            return {"action": "rewrite", "text": str(gateway_rewrite)}
         _run_delivery(_send_card(adapter, event, card))
         return {"action": "skip", "reason": "kb_journeys"}
 

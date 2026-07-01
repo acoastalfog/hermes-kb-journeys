@@ -48,8 +48,8 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.42.0 at revision
-`c63736c46b31f340e68ef61d1bf582b74c0a4bcc`, which owns the exact
+The committed export is pinned to kb-engine 0.45.23 at revision
+`1b8032a4db5bde33090a7c363e5c6e0d079acc8c`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -57,14 +57,29 @@ read-only `KB_ENGINE_DEPLOY_KEY` Actions secret and disables persisted Git
 credentials. A missing secret or unreachable revision fails the workflow;
 local test results do not count as a green GitHub workflow.
 
+## User contract
+
+Ordinary language stays with the Hermes harness so it can gather sources,
+resolve references, ask one focused question when needed, and draft typed
+changes. The plugin does not duplicate that judgment with a synonym parser.
+The explicit prose forms `kb status`, `kb review`, `kb sync`, and `kb publish`
+remain deterministic shortcuts.
+
+Normal cards show at most five items in about eight lines and omit private
+paths, integrity digests, MCP names, source bodies, and workflow internals.
+`kb publish` reads publication status and hands the consequence to a trusted
+operator surface; the relay never commits or pushes.
+
 ## Canonical sync and change surface
 
-Version 0.7.0 makes `/kb sync` call the generated `kb.sync.prepare` contract.
-Hermes records only the run id and renders the engine's next harness action;
-the harness gathers evidence and exercises judgment. `/kb sync status` reads
-the same durable run, and `/kb sync apply` calls `kb.sync.resume` with standing
-safe-write authorization—no digest-copy ceremony. Hermes claims success only after a separate
-`kb.sync.status` readback reports the same run terminally completed.
+Version 0.8.0 makes `/kb sync` and command-like `kb sync` call the generated
+`kb.sync.prepare` contract. Hermes records the run id privately and renders the
+engine's next harness action; the harness gathers evidence and exercises
+judgment. `/kb sync status` reads the same durable run, and `/kb sync apply`
+calls `kb.sync.resume` with standing safe-write authorization—no digest-copy
+ceremony. Hermes claims success only after a separate
+`kb.sync.status` readback reports the same run in the same successful terminal
+state, including truthful completion with degradation.
 Publication remains a separate action and is never implied by sync.
 
 The same generated primary profile exposes only the two-step
@@ -82,36 +97,3 @@ current-upstream checkout:
 ```bash
 uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
 ```
-
-## Gate S H1 owner evidence
-
-`scripts/h1-owner-evidence.py` is a non-packaged evidence generator for the
-release candidate at `84f714952fcd0c5c5747f9e599b3a9c3dd83d817`. It runs the
-four H1 contract groups against immutable upstream Hermes Agent commit
-`2bd1977d8fad185c9b4be47884f7e87f1add0ce3` (`v2026.6.19`). Local tags and
-tracked, untracked, or ignored fixture additions are rejected before execution.
-Actual tracked blobs and executable bits are checked directly against each
-commit tree, independent of `assume-unchanged` or `skip-worktree` index flags.
-All Git identity/plumbing calls disable replacement objects and scrub inherited
-Git configuration, including custom replacement-ref bases and URL rewrites.
-It then consumes NOC's root-custodied final plugin deployment receipt
-and exact relay cutover receipt plus a separate post-cutover semantic
-confirmed-write/readback canary receipt. Every group loads the plugin through
-the pinned Hermes fixture; missing or wrong fixtures fail the group.
-
-It creates `h1-test-report.json` and `h1-candidate.json` together in a fresh
-mode-0700 directory, with both files mode 0600. Missing, stale, pre-cutover,
-secret-bearing, request-lifecycle-only, or digest-mismatched evidence creates
-neither file. The semantic handoff binds the canonical NOC producer revision,
-`hermes-relay` system-service identity, cutover receipt and plan, and final
-plugin deployment receipt. The script never calls Hermes, writes to the KB, or
-admits the candidate into NOC.
-
-Candidate freshness is inherited rather than reset: generation uses only the
-semantic canary's remaining TTL, and emits nothing once that original lifetime
-expires.
-
-The exact NOC handoff schema and invocation are documented in
-[`docs/gate-s-h1-owner-evidence.md`](docs/gate-s-h1-owner-evidence.md). NOC
-must implement that semantic canary producer before a real H1 candidate can be
-emitted.
