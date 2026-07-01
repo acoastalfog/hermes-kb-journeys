@@ -286,8 +286,10 @@ def test_kb_sync_starts_canonical_prepare_and_renders_next_action(tmp_path, monk
 
     assert card["status"] == "awaiting_action"
     assert card["actions"] == []
-    assert "Run: kb_sync-test" in card["text"]
-    assert "Next: gather_evidence" in card["text"]
+    assert "evidence gathering" in card["text"]
+    assert "kb_sync-test" not in card["text"]
+    assert "m365.email" not in card["text"]
+    assert len(card["text"].splitlines()) <= 8
     assert "kb_sync." not in json.dumps(card)
     assert "update_kb" not in json.dumps(card)
     assert ctx.calls == [
@@ -303,7 +305,10 @@ def test_generated_profile_exposes_canonical_kb_sync_contract(tmp_path, monkeypa
     assert plugin._canonical_sync_contract_ready() is True
 
 
-@pytest.mark.parametrize("readback_status", ["completed", "failed"])
+@pytest.mark.parametrize(
+    "readback_status",
+    ["completed", "completed_with_degradation", "failed"],
+)
 def test_kb_sync_apply_claims_success_only_after_terminal_readback(
     readback_status, tmp_path, monkeypatch
 ):
@@ -357,16 +362,24 @@ def test_kb_sync_apply_claims_success_only_after_terminal_readback(
                 {"result": ready},
                 {"result": readback},
             ],
-            "mcp_kb_engine_prod_kb_sync_resume": [
-                {
-                    "result": {
-                        "schema_version": 1,
-                        "kind": "kb_sync_receipt",
-                        "status": "completed",
-                        "terminal_state": "completed",
-                        "run_id": "kb_sync-test",
+                "mcp_kb_engine_prod_kb_sync_resume": [
+                    {
+                        "result": {
+                            "schema_version": 1,
+                            "kind": "kb_sync_receipt",
+                            "status": (
+                                readback_status
+                                if readback_status in {"completed", "completed_with_degradation"}
+                                else "completed"
+                            ),
+                            "terminal_state": (
+                                readback_status
+                                if readback_status in {"completed", "completed_with_degradation"}
+                                else "completed"
+                            ),
+                            "run_id": "kb_sync-test",
+                        }
                     }
-                }
             ],
         }
     )
@@ -380,11 +393,13 @@ def test_kb_sync_apply_claims_success_only_after_terminal_readback(
         "mcp_kb_engine_prod_kb_sync_status",
     ]
     assert ctx.calls[2][1] == {"run_id": "kb_sync-test", "apply": True}
-    if readback_status == "completed":
-        assert "engine readback verified" in card["text"]
-        assert "Knowledge changes landed" in card["text"]
+    if readback_status in {"completed", "completed_with_degradation"}:
+        assert "Receipt: verified" in card["text"]
+        assert "saved" in card["text"]
+        if readback_status == "completed_with_degradation":
+            assert "completed with gaps" in card["text"].lower()
     else:
-        assert "Knowledge changes landed" not in card["text"]
+        assert "Receipt: verified" not in card["text"]
         assert "no completion is claimed" in card["text"].lower()
 
 
@@ -895,10 +910,10 @@ def test_sync_renderer_claims_completion_only_after_engine_readback(tmp_path, mo
     }
     unverified = plugin._render_sync_packet(packet, readback_verified=False)
     verified = plugin._render_sync_packet(packet, readback_verified=True)
-    assert "completion unverified" in unverified["text"]
-    assert "changes landed" not in unverified["text"]
-    assert "engine readback verified" in verified["text"]
-    assert "Knowledge changes landed" in verified["text"]
+    assert "could not be verified" in unverified["text"]
+    assert "Receipt: verified" not in unverified["text"]
+    assert "Receipt: verified" in verified["text"]
+    assert "saved and verified" in verified["text"]
 
 
 def test_evidence_completion_requires_digest_bound_readback(tmp_path, monkeypatch):
@@ -1077,7 +1092,8 @@ def test_render_error_headline_is_bold(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     card = plugin._render_error("KB Status", "kb_engine_prod", ["boom"])
     assert card["text"].startswith("*KB Status*")  # bold headline
-    assert "KB data is not available yet." in card["text"]
+    assert "Knowledge service unavailable." in card["text"]
+    assert "kb_engine_prod" not in card["text"]
 
 
 def test_render_dashboard_headline_is_bold(tmp_path, monkeypatch):
@@ -1087,8 +1103,9 @@ def test_render_dashboard_headline_is_bold(tmp_path, monkeypatch):
         ctx=FakeContext({}),
         target="kb_engine_prod",
     )
-    assert card["text"].startswith("*KB*")  # bold headline
-    assert "kb status:" in card["text"]
+    assert card["text"].startswith("*Knowledge*")  # bold headline
+    assert "Status: ready · publication clean" in card["text"]
+    assert len(card["text"].splitlines()) <= 8
 
 
 # --- Phase B Task 5: enriched _render_status cockpit pilot ---
@@ -1114,23 +1131,20 @@ def test_render_status_enriched_card_composition(tmp_path, monkeypatch):
     card = plugin._render_status(_status_proof_packet(), "kb_engine_prod")
     text = card["text"]
     assert text.startswith("*")                       # bold headline (Task 2)
-    assert "**> " in text and "||" in text            # long body collapsed (Task 1)
-    # The detail content survives inside the expandable block.
-    assert "Outcome: ready" in text
-    assert "v0.36.1" in text
-    assert "/kb sync" in text
-    # Every expandable/quote line must match the verified telegram blockquote regex
-    # (space after the prefix) so the body renders as a quote, not literal text.
-    for ln in text.splitlines():
-        if ln.startswith(">") or ln.startswith("**>"):
-            assert _TELEGRAM_BLOCKQUOTE_RE.match(ln) is not None, f"bad quote line: {ln!r}"
+    assert "Status: ready" in text
+    assert "Publication: clean" in text
+    assert "Needs attention: 3" in text
+    assert "Last sync: idle" in text
+    assert "kb_engine_prod" not in text
+    assert "v0.36.1" not in text
+    assert len(text.splitlines()) <= 7
 
 
 def test_render_status_simple_card_headline_is_bold(tmp_path, monkeypatch):
     # Non-proof status packet still gets the bold headline; short body stays inline.
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     card = plugin._render_status({"readiness": "ready"}, "kb_engine_prod")
-    assert card["text"].startswith("*KB Status*")
+    assert card["text"].startswith("*Knowledge status*")
 
 
 # ---------------------------------------------------------------------------
@@ -1198,7 +1212,7 @@ def test_upstream_env_status_renders_plain_text(tmp_path, monkeypatch):
     card = plugin._render_status({"readiness": "ready"}, "kb_engine_prod")
     assert isinstance(card, dict)
     assert card.get("text"), "text field must be non-empty"
-    assert "KB Status" in card["text"]
+    assert "Knowledge status" in card["text"]
     # Stub KbAction instances may appear in actions, but no real callback buttons.
     for action in card.get("actions", []):
         assert not hasattr(action, "callback_data"), "stub actions must not carry callback_data"
@@ -1290,8 +1304,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.0"
-    assert source["engine_source_revision"] == "7c450e60afa6d26b4bc8b2307b89a7d49edb0716"
+    assert source["engine_version"] == "0.45.23"
+    assert source["engine_source_revision"] == "1b8032a4db5bde33090a7c363e5c6e0d079acc8c"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 10
@@ -1912,7 +1926,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.8.0"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -1984,7 +1998,7 @@ def test_transport_error_keeps_evidence_preview_resumable(tmp_path, monkeypatch)
         source=source,
         session_store=None,
     )
-    assert "not available" in card["text"]
+    assert "unavailable" in card["text"]
     assert cleared == []
 
 
@@ -2010,6 +2024,10 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow_path = ROOT / ".github" / "workflows" / "test.yml"
     workflow_text = workflow_path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(workflow_text)
+    assert (
+        workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
+        == "1b8032a4db5bde33090a7c363e5c6e0d079acc8c"
+    )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
         step
@@ -2026,3 +2044,235 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     assert checkout["persist-credentials"] is False
     assert "https://github.com/acoastalfog/kb-engine.git" not in workflow_text
     assert "git -C kb-engine fetch" not in workflow_text
+
+
+# --- Milestone 3: Hermes-first free-text user contract ---
+
+_BANNED_USER_MACHINERY = (
+    "/home/",
+    "/Users/",
+    "sha256:",
+    "kb_engine_prod",
+    "attention.cockpit",
+    "kb.sync.",
+    "publication.status",
+    "MCP",
+    "PRIVATE SOURCE BODY",
+)
+
+
+def _assert_compact_user_card(card, *, max_lines=8):
+    text = card["text"]
+    assert len(text.splitlines()) <= max_lines
+    assert len([line for line in text.splitlines() if line.startswith("- ")]) <= 5
+    assert re.search(r"\b[0-9a-f]{64}\b", text, re.IGNORECASE) is None
+    for forbidden in _BANNED_USER_MACHINERY:
+        assert forbidden not in text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Ordinary language stays with Hermes, which can combine KB and live
+        # context instead of being reduced to a plugin-only read.
+        ("What needs my attention?", None),
+        ("What needs my attention today?", None),
+        ("kb sync", ("kbsync_run", "")),
+        # Natural sync language reaches Hermes so the harness can gather and
+        # judge; the deterministic shortcut only prepares/renders a run.
+        ("Sync everything.", None),
+        ("kb publish", ("kbpublish", "")),
+        ("Publish the reviewed changes.", None),
+        # Nuanced semantic updates and ambiguous references belong to the LLM
+        # harness, not a second regex intent engine in this plugin.
+        ("Lilly is waiting on legal until Friday.", None),
+        ("This is done; archive it.", None),
+    ],
+)
+def test_m3_free_text_front_doors_preserve_harness_owned_judgment(
+    text, expected, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._prose_kb_command_from_text(text) == expected
+
+
+def test_m3_attention_mapping_renders_five_compact_user_items(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    packet = {
+            "schema_version": 1,
+            "front_door": "attention_cockpit",
+            "status": "ready",
+            "mode": "compact",
+            "summary": {
+                "active_todo_count": 1,
+                "readiness_status": "ready",
+                "publication_status": "clean",
+            },
+            "sections": {
+                "situations": {
+                    "surface": "attention.cockpit",
+                    "items": [
+                        {
+                            "item_id": "situation-1",
+                            "title": "Lilly AI Lab next steps",
+                            "detail": "Legal review is due Friday.",
+                            "entity_path": "/home/abcosta/Knowledge/kb-anthony/private.md",
+                            "target": "situations/lilly-ai-lab",
+                            "source_body": "PRIVATE SOURCE BODY",
+                        }
+                    ],
+                },
+                "queue": {
+                    "surface": "review.inbox",
+                    "items": [
+                        {
+                            "item_id": "todo-1",
+                            "title": "Confirm the legal owner",
+                            "priority": "P1",
+                        }
+                    ],
+                },
+            },
+            "next_actions": ["Open Lilly AI Lab"],
+            "digest": "sha256:" + "a" * 64,
+        }
+    ctx = FakeContext(
+        {"mcp_kb_engine_prod_attention_cockpit": [{"result": packet}]}
+    )
+    card = plugin._card_for_command(ctx, "kblifecycle")
+    assert "Lilly AI Lab next steps" in card["text"]
+    assert "Legal review is due Friday." in card["text"]
+    assert "Confirm the legal owner" in card["text"]
+    _assert_compact_user_card(card)
+
+
+def test_m3_publish_is_a_read_only_trusted_operator_handoff(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_publication_status": [
+                {
+                    "result": {
+                        "schema_version": 1,
+                        "status": "ready",
+                        "ok": True,
+                        "git": {"status": "dirty", "clean": False},
+                        "scope": {
+                            "publication_state": "pending_reviewed_changes",
+                            "unrelated_workspace_dirty": False,
+                        },
+                    }
+                }
+            ]
+        }
+    )
+    card = plugin._card_for_command(ctx, "kbpublish")
+    assert "trusted operator" in card["text"].lower()
+    assert "No publication was attempted." in card["text"]
+    assert [name for name, _args in ctx.calls] == ["mcp_kb_engine_prod_publication_status"]
+    _assert_compact_user_card(card)
+
+
+def test_m3_degraded_sync_is_success_only_with_terminal_readback(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = {
+        "status": "completed_with_degradation",
+        "terminal_state": "completed_with_degradation",
+        "run_id": "kb_sync-private-id",
+        "publication": {"status": "not_attempted"},
+        "digest": "sha256:" + "b" * 64,
+    }
+    unverified = plugin._render_sync_packet(packet, readback_verified=False)
+    assert "Receipt: verified" not in unverified["text"]
+    assert "no completion is claimed" in unverified["text"].lower()
+    verified = plugin._render_sync_packet(packet, readback_verified=True)
+    assert "completed with gaps" in verified["text"].lower()
+    assert "Receipt: verified" in verified["text"]
+    _assert_compact_user_card(verified)
+
+
+def test_m3_sync_readback_requires_same_run_and_terminal_state(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    completed = {
+        "status": "completed",
+        "terminal_state": "completed",
+        "run_id": "run-1",
+    }
+    degraded = {
+        "status": "completed_with_degradation",
+        "terminal_state": "completed_with_degradation",
+        "run_id": "run-1",
+    }
+    assert plugin._sync_readback_verified(degraded, degraded, "run-1") is True
+    assert plugin._sync_readback_verified(completed, degraded, "run-1") is False
+    assert plugin._sync_readback_verified(completed, {**completed, "run_id": "run-2"}, "run-1") is False
+
+
+def test_m3_sync_packet_hides_next_action_machinery_and_source_body(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    card = plugin._render_sync_packet(
+        {
+            "status": "awaiting_action",
+            "run_id": "kb_sync-private-id",
+            "next_action": {
+                "kind": "gather_evidence",
+                "source_id": "private-source",
+                "instruction": (
+                    "Read PRIVATE SOURCE BODY from "
+                    "/home/abcosta/Knowledge/kb-anthony/private.md using kb.sync.resume"
+                ),
+            },
+            "digest": "sha256:" + "c" * 64,
+        }
+    )
+    assert "gather" in card["text"].lower()
+    _assert_compact_user_card(card)
+
+
+def test_m3_disconnected_status_is_compact_and_secret_safe(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    card = plugin._card_for_command(FakeContext({}), "kbstatus")
+    assert "unavailable" in card["text"].lower()
+    assert "No KB completion is claimed." in card["text"]
+    _assert_compact_user_card(card, max_lines=4)
+
+
+def test_m3_tell_update_never_claims_success_without_readback(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._durable_completion(
+        {"status": "applied", "ok": True, "receipt": {"confirmed": True}}
+    )["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What needs my attention today?",
+        "Sync everything.",
+        "Lilly is waiting on legal until Friday.",
+        "This is done; archive it.",
+    ],
+)
+def test_m3_ordinary_language_falls_through_to_hermes_without_plugin_calls(
+    text, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+    hook = plugin.build_pre_gateway_dispatch_hook(ctx)
+    source = _FakeSource()
+    gateway = type(
+        "Gateway",
+        (),
+        {
+            "_is_user_authorized": staticmethod(lambda _source: True),
+            "adapters": {"telegram": object()},
+        },
+    )()
+    assert hook(
+        event=_FakeEvent(source, text=text), gateway=gateway, session_store=None
+    ) is None
+    assert ctx.calls == []

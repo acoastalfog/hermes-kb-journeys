@@ -1,6 +1,6 @@
 name: kb_journeys
-version: 0.7.0
-description: "Telegram-native KB status, sync, and review cards backed by generated kb-engine contracts."
+version: 0.8.0
+description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
   - pre_gateway_dispatch
@@ -24,3 +24,5 @@ migrations:
     hard_break: "/kb sync uses kb.sync.prepare/status/resume; /kbsync, update_kb, and /kb run sync remain removed"
   - version: 0.7.0
     hard_break: "/kb sync apply replaces /kb sync confirm; normal bounded sync uses standing safe-write authorization"
+  - version: 0.8.0
+    hard_break: "User cards are compact; publication is a trusted-operator handoff; plain kb sync uses the canonical journey"

@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:859f4165998b739931b17bc35def6291c9c095114823289fd7c706eb12f22d65",
+      "input_schema_digest": "sha256:caf420e5a72c105518fc03ed5561df37f9753e79097db553b3eb41c134054ebe",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -16,9 +16,9 @@
       "output_schema_digest": "sha256:ee8b3da71d7fdf8abec97df89d4b3b50db4e209af49fe04c9ef37948da2910a1"
     }
   ],
-  "digest": "sha256:5fcd133d50fac2bd3503c8dcef91bf59f91982a76fa378073297ac3166d07214",
-  "engine_source_revision": "7c450e60afa6d26b4bc8b2307b89a7d49edb0716",
-  "engine_version": "0.45.0",
+  "digest": "sha256:7d94d8eeec35ff36143297e502344effda82a4d6e8bbfa294e19c4253e83a733",
+  "engine_source_revision": "1b8032a4db5bde33090a7c363e5c6e0d079acc8c",
+  "engine_version": "0.45.23",
   "journeys": [
     {
       "confirmation_required": false,
@@ -63,7 +63,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:9e0e997b8998d1e3636d0e95da08e111b4649e06c459bee005b7fd5d59655f83",
+  "source_export_digest": "sha256:c8131ecefc6aff440ca6ef8da7cc6a2d82c0da769fa324ee9eb9fdb1d8e82327",
   "tools": [
     {
       "annotations": {
@@ -569,10 +569,365 @@
                                       "type": "string"
                                     },
                                     "operation": {
+                                      "const": "create"
+                                    },
+                                    "situation_yaml": {
+                                      "additionalProperties": false,
+                                      "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
+                                      "minProperties": 1,
+                                      "properties": {
+                                        "attention": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_required_now": {
+                                              "type": "boolean"
+                                            },
+                                            "evidence_gaps": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "reason": {
+                                              "type": "string"
+                                            },
+                                            "required": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_response_now": {
+                                              "type": "boolean"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "components": {
+                                          "items": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "action_descriptors": {
+                                                "items": {
+                                                  "additionalProperties": false,
+                                                  "properties": {
+                                                    "action_id": {
+                                                      "minLength": 1,
+                                                      "type": "string"
+                                                    },
+                                                    "confirm_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "dashboard_owned_write": {
+                                                      "const": false
+                                                    },
+                                                    "disabled_reason": {
+                                                      "type": "string"
+                                                    },
+                                                    "display": {
+                                                      "type": "string"
+                                                    },
+                                                    "effect_class": {
+                                                      "type": "string"
+                                                    },
+                                                    "label": {
+                                                      "type": "string"
+                                                    },
+                                                    "mutation": {
+                                                      "enum": [
+                                                        "confirmed_route",
+                                                        "read_only"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "operation": {
+                                                      "enum": [
+                                                        "read",
+                                                        "canonical_confirmed_route"
+                                                      ],
+                                                      "type": "string"
+                                                    },
+                                                    "owner": {
+                                                      "type": "string"
+                                                    },
+                                                    "packet_type": {
+                                                      "const": "dashboard_action_descriptor"
+                                                    },
+                                                    "preview_tool": {
+                                                      "type": "string"
+                                                    },
+                                                    "requires_canonical_tool": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "requires_confirmation": {
+                                                      "type": "boolean"
+                                                    },
+                                                    "surface": {
+                                                      "type": "string"
+                                                    },
+                                                    "target_ref": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  "required": [],
+                                                  "type": "object"
+                                                },
+                                                "type": "array"
+                                              },
+                                              "completed_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "component_id": {
+                                                "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                                "type": "string"
+                                              },
+                                              "created_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              },
+                                              "entity_refs": {
+                                                "items": {
+                                                  "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_gaps": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "evidence_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "kind": {
+                                                "enum": [
+                                                  "blocker",
+                                                  "child_commitment",
+                                                  "completed_commitment",
+                                                  "decision",
+                                                  "evidence",
+                                                  "handoff",
+                                                  "note",
+                                                  "watch"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "provenance": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                  "run_id": {
+                                                    "type": "string"
+                                                  },
+                                                  "source": {
+                                                    "type": "string"
+                                                  },
+                                                  "source_ref": {
+                                                    "type": "string"
+                                                  },
+                                                  "workflow_id": {
+                                                    "type": "string"
+                                                  }
+                                                },
+                                                "required": [],
+                                                "type": "object"
+                                              },
+                                              "status": {
+                                                "enum": [
+                                                  "active",
+                                                  "archived",
+                                                  "blocked",
+                                                  "completed",
+                                                  "superseded",
+                                                  "waiting"
+                                                ],
+                                                "type": "string"
+                                              },
+                                              "summary": {
+                                                "type": "string"
+                                              },
+                                              "superseded_by": {
+                                                "type": "string"
+                                              },
+                                              "title": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "todo_refs": {
+                                                "items": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "type": "array",
+                                                "uniqueItems": true
+                                              },
+                                              "updated_at": {
+                                                "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [
+                                              "component_id",
+                                              "kind",
+                                              "status",
+                                              "title"
+                                            ],
+                                            "type": "object"
+                                          },
+                                          "type": "array"
+                                        },
+                                        "due_date": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "evidence_refs": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "last_evidence_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "linked_todos": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "next_check": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "opened_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "owner_role": {
+                                          "enum": [
+                                            "approver",
+                                            "contributor",
+                                            "delegated_tracker",
+                                            "informed",
+                                            "monitor",
+                                            "monitor_and_unblock",
+                                            "owner"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "primary_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_entities": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "related_objects": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "resolved_at": {
+                                          "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                          "type": "string"
+                                        },
+                                        "schema_version": {
+                                          "enum": [
+                                            1,
+                                            2
+                                          ],
+                                          "type": "integer"
+                                        },
+                                        "slug": {
+                                          "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                          "type": "string"
+                                        },
+                                        "status": {
+                                          "enum": [
+                                            "active",
+                                            "blocked",
+                                            "emerging",
+                                            "resolving",
+                                            "waiting"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "title": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "urgency": {
+                                          "enum": [
+                                            "blocked",
+                                            "monitor",
+                                            "none",
+                                            "time_bound",
+                                            "urgent"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "state_md": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "operation",
+                                    "slug",
+                                    "situation_yaml"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "before_hash": {
+                                      "pattern": "^[0-9a-f]{64}$",
+                                      "type": "string"
+                                    },
+                                    "log_entry": {
+                                      "type": "string"
+                                    },
+                                    "operation": {
                                       "const": "update"
                                     },
                                     "situation_yaml": {
                                       "additionalProperties": false,
+                                      "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                                       "minProperties": 1,
                                       "properties": {
                                         "attention": {
@@ -926,6 +1281,7 @@
                                     },
                                     "situation_yaml": {
                                       "additionalProperties": false,
+                                      "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                                       "minProperties": 1,
                                       "properties": {
                                         "attention": {
@@ -1268,6 +1624,257 @@
                             "arguments"
                           ],
                           "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "action_type": {
+                                  "description": "Optional action type classification.",
+                                  "type": "string"
+                                },
+                                "content": {
+                                  "description": "TODO content to create.",
+                                  "type": "string"
+                                },
+                                "delegated_to": {
+                                  "description": "Optional assignee or delegate.",
+                                  "type": "string"
+                                },
+                                "due_date": {
+                                  "description": "Optional due date in YYYY-MM-DD or natural operator form.",
+                                  "type": "string"
+                                },
+                                "entity_path": {
+                                  "description": "Optional canonical entity path for the TODO.",
+                                  "type": "string"
+                                },
+                                "notes": {
+                                  "description": "Optional notes to store on the TODO.",
+                                  "type": "string"
+                                },
+                                "priority": {
+                                  "description": "Optional priority such as P0, P1, or P2. Defaults to P1.",
+                                  "type": "string"
+                                },
+                                "project_ref": {
+                                  "description": "Optional project reference.",
+                                  "type": "string"
+                                },
+                                "provenance_date": {
+                                  "description": "Optional date for source provenance.",
+                                  "type": "string"
+                                },
+                                "source": {
+                                  "description": "Optional source surface. Defaults to control_plane.",
+                                  "type": "string"
+                                },
+                                "source_ref": {
+                                  "description": "Optional source reference id or URL.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "content"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.add"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "note": {
+                                  "description": "Optional completion note or rationale.",
+                                  "type": "string"
+                                },
+                                "todo_id": {
+                                  "description": "Stable TODO id to complete.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "todo_id"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.complete"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "todo_id": {
+                                  "description": "Stable TODO id to archive.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "todo_id"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.archive"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "note": {
+                                  "description": "Optional duplicate rationale.",
+                                  "type": "string"
+                                },
+                                "todo_id": {
+                                  "description": "Stable TODO id to archive as a duplicate.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "todo_id"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.duplicate"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "note": {
+                                  "description": "Optional supersession rationale.",
+                                  "type": "string"
+                                },
+                                "todo_id": {
+                                  "description": "Stable TODO id to archive as superseded.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "todo_id"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.supersede"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "minProperties": 2,
+                              "properties": {
+                                "classification": {
+                                  "enum": [
+                                    "true_p0",
+                                    ""
+                                  ],
+                                  "type": "string"
+                                },
+                                "delegated_to": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "due_date": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                                  "type": "string"
+                                },
+                                "entity_path": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "note": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "priority": {
+                                  "enum": [
+                                    "P0",
+                                    "P1",
+                                    "P2",
+                                    "P3"
+                                  ],
+                                  "type": "string"
+                                },
+                                "provenance_date": {
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                                  "type": "string"
+                                },
+                                "source_ref": {
+                                  "maxLength": 1024,
+                                  "minLength": 1,
+                                  "pattern": "^[^\\r\\n]+$",
+                                  "type": "string"
+                                },
+                                "todo_id": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "todo_id"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "todo.update"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
                         }
                       ]
                     },
@@ -1403,7 +2010,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:859f4165998b739931b17bc35def6291c9c095114823289fd7c706eb12f22d65",
+      "input_schema_digest": "sha256:caf420e5a72c105518fc03ed5561df37f9753e79097db553b3eb41c134054ebe",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -1923,10 +2530,365 @@
                               "type": "string"
                             },
                             "operation": {
+                              "const": "create"
+                            },
+                            "situation_yaml": {
+                              "additionalProperties": false,
+                              "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
+                              "minProperties": 1,
+                              "properties": {
+                                "attention": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "action_required_now": {
+                                      "type": "boolean"
+                                    },
+                                    "evidence_gaps": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "reason": {
+                                      "type": "string"
+                                    },
+                                    "required": {
+                                      "type": "boolean"
+                                    },
+                                    "requires_response_now": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "components": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "action_descriptors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "action_id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "confirm_tool": {
+                                              "type": "string"
+                                            },
+                                            "dashboard_owned_write": {
+                                              "const": false
+                                            },
+                                            "disabled_reason": {
+                                              "type": "string"
+                                            },
+                                            "display": {
+                                              "type": "string"
+                                            },
+                                            "effect_class": {
+                                              "type": "string"
+                                            },
+                                            "label": {
+                                              "type": "string"
+                                            },
+                                            "mutation": {
+                                              "enum": [
+                                                "confirmed_route",
+                                                "read_only"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "operation": {
+                                              "enum": [
+                                                "read",
+                                                "canonical_confirmed_route"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "owner": {
+                                              "type": "string"
+                                            },
+                                            "packet_type": {
+                                              "const": "dashboard_action_descriptor"
+                                            },
+                                            "preview_tool": {
+                                              "type": "string"
+                                            },
+                                            "requires_canonical_tool": {
+                                              "type": "boolean"
+                                            },
+                                            "requires_confirmation": {
+                                              "type": "boolean"
+                                            },
+                                            "surface": {
+                                              "type": "string"
+                                            },
+                                            "target_ref": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [],
+                                          "type": "object"
+                                        },
+                                        "type": "array"
+                                      },
+                                      "completed_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "component_id": {
+                                        "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                        "type": "string"
+                                      },
+                                      "created_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      },
+                                      "entity_refs": {
+                                        "items": {
+                                          "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_gaps": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "evidence_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "blocker",
+                                          "child_commitment",
+                                          "completed_commitment",
+                                          "decision",
+                                          "evidence",
+                                          "handoff",
+                                          "note",
+                                          "watch"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "provenance": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "run_id": {
+                                            "type": "string"
+                                          },
+                                          "source": {
+                                            "type": "string"
+                                          },
+                                          "source_ref": {
+                                            "type": "string"
+                                          },
+                                          "workflow_id": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [],
+                                        "type": "object"
+                                      },
+                                      "status": {
+                                        "enum": [
+                                          "active",
+                                          "archived",
+                                          "blocked",
+                                          "completed",
+                                          "superseded",
+                                          "waiting"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "summary": {
+                                        "type": "string"
+                                      },
+                                      "superseded_by": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "todo_refs": {
+                                        "items": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "updated_at": {
+                                        "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "component_id",
+                                      "kind",
+                                      "status",
+                                      "title"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                },
+                                "due_date": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "evidence_refs": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "last_evidence_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "linked_todos": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "next_check": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "opened_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "owner_role": {
+                                  "enum": [
+                                    "approver",
+                                    "contributor",
+                                    "delegated_tracker",
+                                    "informed",
+                                    "monitor",
+                                    "monitor_and_unblock",
+                                    "owner"
+                                  ],
+                                  "type": "string"
+                                },
+                                "primary_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_entities": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "related_objects": {
+                                  "items": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "resolved_at": {
+                                  "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                  "type": "string"
+                                },
+                                "schema_version": {
+                                  "enum": [
+                                    1,
+                                    2
+                                  ],
+                                  "type": "integer"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "status": {
+                                  "enum": [
+                                    "active",
+                                    "blocked",
+                                    "emerging",
+                                    "resolving",
+                                    "waiting"
+                                  ],
+                                  "type": "string"
+                                },
+                                "title": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "urgency": {
+                                  "enum": [
+                                    "blocked",
+                                    "monitor",
+                                    "none",
+                                    "time_bound",
+                                    "urgent"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            },
+                            "slug": {
+                              "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                              "type": "string"
+                            },
+                            "state_md": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "operation",
+                            "slug",
+                            "situation_yaml"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "before_hash": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "log_entry": {
+                              "type": "string"
+                            },
+                            "operation": {
                               "const": "update"
                             },
                             "situation_yaml": {
                               "additionalProperties": false,
+                              "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                               "minProperties": 1,
                               "properties": {
                                 "attention": {
@@ -2280,6 +3242,7 @@
                             },
                             "situation_yaml": {
                               "additionalProperties": false,
+                              "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                               "minProperties": 1,
                               "properties": {
                                 "attention": {
@@ -2622,6 +3585,257 @@
                     "arguments"
                   ],
                   "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action_type": {
+                          "description": "Optional action type classification.",
+                          "type": "string"
+                        },
+                        "content": {
+                          "description": "TODO content to create.",
+                          "type": "string"
+                        },
+                        "delegated_to": {
+                          "description": "Optional assignee or delegate.",
+                          "type": "string"
+                        },
+                        "due_date": {
+                          "description": "Optional due date in YYYY-MM-DD or natural operator form.",
+                          "type": "string"
+                        },
+                        "entity_path": {
+                          "description": "Optional canonical entity path for the TODO.",
+                          "type": "string"
+                        },
+                        "notes": {
+                          "description": "Optional notes to store on the TODO.",
+                          "type": "string"
+                        },
+                        "priority": {
+                          "description": "Optional priority such as P0, P1, or P2. Defaults to P1.",
+                          "type": "string"
+                        },
+                        "project_ref": {
+                          "description": "Optional project reference.",
+                          "type": "string"
+                        },
+                        "provenance_date": {
+                          "description": "Optional date for source provenance.",
+                          "type": "string"
+                        },
+                        "source": {
+                          "description": "Optional source surface. Defaults to control_plane.",
+                          "type": "string"
+                        },
+                        "source_ref": {
+                          "description": "Optional source reference id or URL.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "content"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.add"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "note": {
+                          "description": "Optional completion note or rationale.",
+                          "type": "string"
+                        },
+                        "todo_id": {
+                          "description": "Stable TODO id to complete.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "todo_id"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.complete"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "todo_id": {
+                          "description": "Stable TODO id to archive.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "todo_id"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.archive"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "note": {
+                          "description": "Optional duplicate rationale.",
+                          "type": "string"
+                        },
+                        "todo_id": {
+                          "description": "Stable TODO id to archive as a duplicate.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "todo_id"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.duplicate"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "note": {
+                          "description": "Optional supersession rationale.",
+                          "type": "string"
+                        },
+                        "todo_id": {
+                          "description": "Stable TODO id to archive as superseded.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "todo_id"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.supersede"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "minProperties": 2,
+                      "properties": {
+                        "classification": {
+                          "enum": [
+                            "true_p0",
+                            ""
+                          ],
+                          "type": "string"
+                        },
+                        "delegated_to": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "due_date": {
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        },
+                        "entity_path": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "note": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "priority": {
+                          "enum": [
+                            "P0",
+                            "P1",
+                            "P2",
+                            "P3"
+                          ],
+                          "type": "string"
+                        },
+                        "provenance_date": {
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                          "type": "string"
+                        },
+                        "source_ref": {
+                          "maxLength": 1024,
+                          "minLength": 1,
+                          "pattern": "^[^\\r\\n]+$",
+                          "type": "string"
+                        },
+                        "todo_id": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "todo_id"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "todo.update"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
                 }
               ]
             },
@@ -2661,7 +3875,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:0c3f7524878d6385763f6aa51f1c40d32da76699197ef600161d881b076249f3",
+      "input_schema_digest": "sha256:b538123e65e828a0b45262bf9fa472a608e86f1061854d86cd27c6c9f0fa82be",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -3008,10 +4222,365 @@
                                   "type": "string"
                                 },
                                 "operation": {
+                                  "const": "create"
+                                },
+                                "situation_yaml": {
+                                  "additionalProperties": false,
+                                  "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
+                                  "minProperties": 1,
+                                  "properties": {
+                                    "attention": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "action_required_now": {
+                                          "type": "boolean"
+                                        },
+                                        "evidence_gaps": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "reason": {
+                                          "type": "string"
+                                        },
+                                        "required": {
+                                          "type": "boolean"
+                                        },
+                                        "requires_response_now": {
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "required": [],
+                                      "type": "object"
+                                    },
+                                    "components": {
+                                      "items": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "action_descriptors": {
+                                            "items": {
+                                              "additionalProperties": false,
+                                              "properties": {
+                                                "action_id": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "confirm_tool": {
+                                                  "type": "string"
+                                                },
+                                                "dashboard_owned_write": {
+                                                  "const": false
+                                                },
+                                                "disabled_reason": {
+                                                  "type": "string"
+                                                },
+                                                "display": {
+                                                  "type": "string"
+                                                },
+                                                "effect_class": {
+                                                  "type": "string"
+                                                },
+                                                "label": {
+                                                  "type": "string"
+                                                },
+                                                "mutation": {
+                                                  "enum": [
+                                                    "confirmed_route",
+                                                    "read_only"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "operation": {
+                                                  "enum": [
+                                                    "read",
+                                                    "canonical_confirmed_route"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "owner": {
+                                                  "type": "string"
+                                                },
+                                                "packet_type": {
+                                                  "const": "dashboard_action_descriptor"
+                                                },
+                                                "preview_tool": {
+                                                  "type": "string"
+                                                },
+                                                "requires_canonical_tool": {
+                                                  "type": "boolean"
+                                                },
+                                                "requires_confirmation": {
+                                                  "type": "boolean"
+                                                },
+                                                "surface": {
+                                                  "type": "string"
+                                                },
+                                                "target_ref": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "required": [],
+                                              "type": "object"
+                                            },
+                                            "type": "array"
+                                          },
+                                          "completed_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "component_id": {
+                                            "pattern": "^[a-z0-9][a-z0-9_.:-]*$",
+                                            "type": "string"
+                                          },
+                                          "created_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          },
+                                          "entity_refs": {
+                                            "items": {
+                                              "pattern": "^[^\\s/]+(/[^\\s/]+)+$",
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_gaps": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "evidence_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "blocker",
+                                              "child_commitment",
+                                              "completed_commitment",
+                                              "decision",
+                                              "evidence",
+                                              "handoff",
+                                              "note",
+                                              "watch"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "provenance": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "run_id": {
+                                                "type": "string"
+                                              },
+                                              "source": {
+                                                "type": "string"
+                                              },
+                                              "source_ref": {
+                                                "type": "string"
+                                              },
+                                              "workflow_id": {
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": [],
+                                            "type": "object"
+                                          },
+                                          "status": {
+                                            "enum": [
+                                              "active",
+                                              "archived",
+                                              "blocked",
+                                              "completed",
+                                              "superseded",
+                                              "waiting"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "summary": {
+                                            "type": "string"
+                                          },
+                                          "superseded_by": {
+                                            "type": "string"
+                                          },
+                                          "title": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "todo_refs": {
+                                            "items": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "updated_at": {
+                                            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "component_id",
+                                          "kind",
+                                          "status",
+                                          "title"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "type": "array"
+                                    },
+                                    "due_date": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "evidence_refs": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "last_evidence_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "linked_todos": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "next_check": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "opened_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "owner_role": {
+                                      "enum": [
+                                        "approver",
+                                        "contributor",
+                                        "delegated_tracker",
+                                        "informed",
+                                        "monitor",
+                                        "monitor_and_unblock",
+                                        "owner"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "primary_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_entities": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "related_objects": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    "resolved_at": {
+                                      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+                                      "type": "string"
+                                    },
+                                    "schema_version": {
+                                      "enum": [
+                                        1,
+                                        2
+                                      ],
+                                      "type": "integer"
+                                    },
+                                    "slug": {
+                                      "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                      "type": "string"
+                                    },
+                                    "status": {
+                                      "enum": [
+                                        "active",
+                                        "blocked",
+                                        "emerging",
+                                        "resolving",
+                                        "waiting"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "title": {
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "urgency": {
+                                      "enum": [
+                                        "blocked",
+                                        "monitor",
+                                        "none",
+                                        "time_bound",
+                                        "urgent"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                },
+                                "slug": {
+                                  "pattern": "^\\d{4}-\\d{2}-[a-z0-9][a-z0-9-]*$",
+                                  "type": "string"
+                                },
+                                "state_md": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "operation",
+                                "slug",
+                                "situation_yaml"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "before_hash": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "log_entry": {
+                                  "type": "string"
+                                },
+                                "operation": {
                                   "const": "update"
                                 },
                                 "situation_yaml": {
                                   "additionalProperties": false,
+                                  "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                                   "minProperties": 1,
                                   "properties": {
                                     "attention": {
@@ -3365,6 +4934,7 @@
                                 },
                                 "situation_yaml": {
                                   "additionalProperties": false,
+                                  "description": "Writable Situation delta. Send only fields being changed; do not echo the object.context read model or derived fields.",
                                   "minProperties": 1,
                                   "properties": {
                                     "attention": {
@@ -3707,6 +5277,257 @@
                         "arguments"
                       ],
                       "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "action_type": {
+                              "description": "Optional action type classification.",
+                              "type": "string"
+                            },
+                            "content": {
+                              "description": "TODO content to create.",
+                              "type": "string"
+                            },
+                            "delegated_to": {
+                              "description": "Optional assignee or delegate.",
+                              "type": "string"
+                            },
+                            "due_date": {
+                              "description": "Optional due date in YYYY-MM-DD or natural operator form.",
+                              "type": "string"
+                            },
+                            "entity_path": {
+                              "description": "Optional canonical entity path for the TODO.",
+                              "type": "string"
+                            },
+                            "notes": {
+                              "description": "Optional notes to store on the TODO.",
+                              "type": "string"
+                            },
+                            "priority": {
+                              "description": "Optional priority such as P0, P1, or P2. Defaults to P1.",
+                              "type": "string"
+                            },
+                            "project_ref": {
+                              "description": "Optional project reference.",
+                              "type": "string"
+                            },
+                            "provenance_date": {
+                              "description": "Optional date for source provenance.",
+                              "type": "string"
+                            },
+                            "source": {
+                              "description": "Optional source surface. Defaults to control_plane.",
+                              "type": "string"
+                            },
+                            "source_ref": {
+                              "description": "Optional source reference id or URL.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "content"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.add"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "note": {
+                              "description": "Optional completion note or rationale.",
+                              "type": "string"
+                            },
+                            "todo_id": {
+                              "description": "Stable TODO id to complete.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "todo_id"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.complete"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "todo_id": {
+                              "description": "Stable TODO id to archive.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "todo_id"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.archive"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "note": {
+                              "description": "Optional duplicate rationale.",
+                              "type": "string"
+                            },
+                            "todo_id": {
+                              "description": "Stable TODO id to archive as a duplicate.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "todo_id"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.duplicate"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "note": {
+                              "description": "Optional supersession rationale.",
+                              "type": "string"
+                            },
+                            "todo_id": {
+                              "description": "Stable TODO id to archive as superseded.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "todo_id"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.supersede"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "minProperties": 2,
+                          "properties": {
+                            "classification": {
+                              "enum": [
+                                "true_p0",
+                                ""
+                              ],
+                              "type": "string"
+                            },
+                            "delegated_to": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "due_date": {
+                              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                              "type": "string"
+                            },
+                            "entity_path": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "note": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "priority": {
+                              "enum": [
+                                "P0",
+                                "P1",
+                                "P2",
+                                "P3"
+                              ],
+                              "type": "string"
+                            },
+                            "provenance_date": {
+                              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                              "type": "string"
+                            },
+                            "source_ref": {
+                              "maxLength": 1024,
+                              "minLength": 1,
+                              "pattern": "^[^\\r\\n]+$",
+                              "type": "string"
+                            },
+                            "todo_id": {
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "todo_id"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "todo.update"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
                     }
                   ]
                 },
@@ -3836,7 +5657,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:5df145757ef54e1c732167fd4b9a1f55c82d4eacd6b0bd7513813520e43cadb9",
+      "output_schema_digest": "sha256:7c2d565fc3675c55d7c400c8287a6a11b85d5a45d841523dcd22922ce92592f2",
       "title": "Preview Exact KB Changes"
     },
     {
@@ -3853,7 +5674,7 @@
         },
         "readOnlyHint": false
       },
-      "description": "Start the canonical harness-driven knowledge-update journey. It creates only run-scoped cache state and returns the first bounded gather action.",
+      "description": "Start or reuse the one active canonical knowledge-update journey. It creates only run-scoped cache state and returns the current bounded harness action.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -4068,6 +5889,16 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "evidence_refs": {
+            "description": "Optional exact secret-safe refs to inspect against the live semantic frontier without truncation.",
+            "items": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 2000,
+            "type": "array",
+            "uniqueItems": true
+          },
           "run_id": {
             "description": "Run id returned by kb.sync.prepare.",
             "type": "string"
@@ -4078,7 +5909,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:f076e6d91464fabca17c1d85c977dc423b3c8e81277d85d06bdb241aae9f2420",
+      "input_schema_digest": "sha256:39c05163b357895568256e504cf61f97b290ee14fd777fd4a4dcacf558457c74",
       "name": "kb.sync.status",
       "output_schema": {
         "additionalProperties": true,
