@@ -1947,7 +1947,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.8.1"
+    assert manifest["version"] == "0.8.2"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -2166,6 +2166,143 @@ def test_m3_attention_mapping_renders_five_compact_user_items(tmp_path, monkeypa
     assert "Legal review is due Friday." in card["text"]
     assert "Confirm the legal owner" in card["text"]
     _assert_compact_user_card(card)
+
+
+def test_m3_compact_attention_tool_result_is_rendered_once_before_model_context(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    ctx = _ProbeHookContext({})
+    plugin.register(ctx)
+
+    items = [
+        {
+            "item_id": f"situation-{index}",
+            "title": f"Situation {index}",
+            "detail": f"Why situation {index} needs attention now.",
+            "entity_path": f"/home/abcosta/Knowledge/kb-anthony/situations/{index}.md",
+            "source_body": "PRIVATE SOURCE BODY",
+        }
+        for index in range(7)
+    ]
+    packet = {
+        "schema_version": 1,
+        "front_door": "attention_cockpit",
+        "status": "degraded",
+        "mode": "compact",
+        "summary": {
+            "active_todo_count": 2,
+            "readiness_status": "degraded",
+            "publication_status": "not_attempted",
+        },
+        "sections": {
+            "situations": {
+                "surface": "attention.cockpit",
+                "items": items,
+            }
+        },
+        "next_actions": ["Open the highest-priority situation."],
+        "digest": "sha256:" + "a" * 64,
+    }
+    envelope = json.dumps(
+        {
+            "result": json.dumps(packet, ensure_ascii=False, sort_keys=True),
+            "structuredContent": packet,
+        },
+        ensure_ascii=False,
+    )
+
+    assert "transform_tool_result" in ctx.hooks
+    rendered = ctx.hooks["transform_tool_result"][0](
+        tool_name="mcp_kb_engine_prod_attention_cockpit",
+        args={"attention_limit": 5, "mode": "compact"},
+        result=envelope,
+    )
+
+    assert isinstance(rendered, str)
+    assert len(rendered.encode("utf-8")) < 2_000
+    assert len(rendered.encode("utf-8")) < len(envelope.encode("utf-8")) // 10
+    _assert_compact_user_card({"text": rendered})
+    assert "Status: degraded" in rendered
+    assert "Situation 0" in rendered
+    assert "Situation 4" in rendered
+    assert "Situation 5" not in rendered
+    assert "Next:" in rendered
+
+
+def test_m3_compact_attention_transform_fails_closed_without_exact_generated_packet(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
+    packet = {
+        "status": "ready",
+        "mode": "compact",
+        "summary": {},
+        "sections": {},
+    }
+
+    def envelope(structured, text=None):
+        return json.dumps(
+            {
+                "result": json.dumps(
+                    structured if text is None else text,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "structuredContent": structured,
+            },
+            ensure_ascii=False,
+        )
+
+    cases = [
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {},
+            envelope({**packet, "mode": "full"}),
+        ),
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {"mode": "full"},
+            envelope(packet),
+        ),
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {"detail": True},
+            envelope(packet),
+        ),
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {},
+            envelope(packet, {**packet, "status": "different"}),
+        ),
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {},
+            envelope({"mode": "compact"}),
+        ),
+        (
+            "mcp_kb_engine_prod_attention_cockpit",
+            {},
+            json.dumps({"error": "upstream unavailable"}),
+        ),
+        ("mcp_kb_engine_prod_workspace_readiness", {}, envelope(packet)),
+        ("mcp_other_attention_cockpit", {}, envelope(packet)),
+        ("web_search", {}, envelope(packet)),
+    ]
+
+    for tool_name, args, result in cases:
+        assert (
+            plugin._compact_attention_tool_result(
+                tool_name=tool_name,
+                args=args,
+                result=result,
+            )
+            is None
+        )
 
 
 def test_m3_publish_is_a_read_only_trusted_operator_handoff(tmp_path, monkeypatch):
@@ -2571,7 +2708,11 @@ def test_m3_probe_telemetry_registers_no_observers_without_private_contract(
 
     plugin.register(ctx)
 
-    assert set(ctx.hooks) == {"pre_gateway_dispatch", "post_llm_call"}
+    assert set(ctx.hooks) == {
+        "pre_gateway_dispatch",
+        "post_llm_call",
+        "transform_tool_result",
+    }
 
 
 def test_m3_probe_telemetry_counts_attempts_context_and_engine_calls_once(
