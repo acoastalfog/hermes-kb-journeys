@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -857,6 +858,177 @@ def _mcp_target() -> str:
 
 def _mcp_tool_name(target: str, tool_name: str) -> str:
     return f"mcp_{_sanitize_component(target)}_{_sanitize_component(tool_name)}"
+
+
+# ---------------------------------------------------------------------------
+# Probe-scoped telemetry
+#
+# This is deliberately not a general telemetry surface. NOC may give an
+# isolated Hermes probe one inherited pipe plus an opaque run id. Only that
+# exact process registers observer callbacks, keeps aggregate counters in
+# memory, and writes one secret-free packet. Normal Hermes processes pay no
+# observer-payload construction cost because they register none of these
+# callbacks.
+# ---------------------------------------------------------------------------
+
+_PROBE_TELEMETRY_FD_ENV = "NOC_HERMES_PROBE_TELEMETRY_FD"
+_PROBE_TELEMETRY_RUN_ID_ENV = "NOC_HERMES_PROBE_RUN_ID"
+_PROBE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class _ProbeTelemetry:
+    def __init__(self, *, fd: int, run_id: str) -> None:
+        self._fd = fd
+        self._run_id = run_id
+        self._lock = threading.Lock()
+        self._model_calls = 0
+        self._engine_tool_call_ids: set[str] = set()
+        self._engine_complete = True
+        self._context_seen = False
+        self._context_complete = True
+        self._max_context_bytes = 0
+        self._emitted = False
+
+    @staticmethod
+    def _canonical_context_bytes(messages: Any) -> int | None:
+        if not isinstance(messages, list):
+            return None
+        try:
+            encoded = json.dumps(
+                messages,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            return None
+        return len(encoded)
+
+    def record_pre_api_request(self, **kwargs: Any) -> None:
+        context_bytes = self._canonical_context_bytes(
+            kwargs.get("request_messages")
+        )
+        with self._lock:
+            if self._emitted:
+                return
+            # Hermes fires this hook once immediately before each provider
+            # attempt, including retry attempts.
+            self._model_calls += 1
+            if context_bytes is None:
+                self._context_complete = False
+            else:
+                self._context_seen = True
+                self._max_context_bytes = max(
+                    self._max_context_bytes, context_bytes
+                )
+
+    def _matches_engine_tool(self, tool_name: Any) -> bool:
+        prefix = f"mcp_{_sanitize_component(_mcp_target())}_"
+        return str(tool_name or "").startswith(prefix)
+
+    def record_observed_tool(self, **kwargs: Any) -> None:
+        if not self._matches_engine_tool(kwargs.get("tool_name")):
+            return
+        tool_call_id = str(kwargs.get("tool_call_id") or "")
+        with self._lock:
+            if self._emitted:
+                return
+            if not tool_call_id:
+                # Hermes has historically delivered some post-tool hooks more
+                # than once. Without an id there is no truthful way to
+                # distinguish a duplicate observer event from another call.
+                self._engine_complete = False
+                return
+            self._engine_tool_call_ids.add(
+                hashlib.sha256(
+                    tool_call_id.encode("utf-8", errors="replace")
+                ).hexdigest()
+            )
+
+    def emit(self) -> None:
+        with self._lock:
+            if self._emitted:
+                return
+            self._emitted = True
+            context_complete = self._context_complete and (
+                self._model_calls == 0 or self._context_seen
+            )
+            observation_complete = context_complete and self._engine_complete
+            packet = {
+                "schema_version": 1,
+                "kind": "hermes_probe_telemetry",
+                "run_id": self._run_id,
+                "status": "complete" if observation_complete else "incomplete",
+                "model_calls": self._model_calls,
+                "engine_calls": (
+                    len(self._engine_tool_call_ids)
+                    if self._engine_complete
+                    else None
+                ),
+                "context_bytes": self._max_context_bytes if context_complete else None,
+            }
+            encoded = (
+                json.dumps(
+                    packet,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("ascii")
+        try:
+            # The packet is far below POSIX PIPE_BUF, so one write is atomic.
+            os.write(self._fd, encoded)
+        except OSError:
+            # Probe telemetry must never alter the user turn. The NOC caller
+            # treats a missing packet as failed observation.
+            return
+
+
+_PROBE_TELEMETRY: _ProbeTelemetry | None = None
+
+
+def _probe_telemetry_from_env() -> _ProbeTelemetry | None:
+    fd_text = os.getenv(_PROBE_TELEMETRY_FD_ENV, "")
+    run_id = os.getenv(_PROBE_TELEMETRY_RUN_ID_ENV, "")
+    if not fd_text and not run_id:
+        return None
+    if not fd_text.isascii() or not fd_text.isdecimal():
+        return None
+    if not _PROBE_RUN_ID_RE.fullmatch(run_id):
+        return None
+    try:
+        fd = int(fd_text)
+        if fd <= 2 or fd > 1_048_576 or not os.get_inheritable(fd):
+            return None
+        import fcntl
+        import stat
+
+        descriptor = os.fstat(fd)
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        if not stat.S_ISFIFO(descriptor.st_mode):
+            return None
+        if (flags & os.O_ACCMODE) not in {os.O_WRONLY, os.O_RDWR}:
+            return None
+    except (ImportError, OSError, OverflowError, ValueError):
+        return None
+    return _ProbeTelemetry(fd=fd, run_id=run_id)
+
+
+def _activate_probe_telemetry(ctx: Any) -> None:
+    global _PROBE_TELEMETRY
+    if _PROBE_TELEMETRY is None:
+        _PROBE_TELEMETRY = _probe_telemetry_from_env()
+    if _PROBE_TELEMETRY is None:
+        return
+    ctx.register_hook("pre_api_request", _PROBE_TELEMETRY.record_pre_api_request)
+    ctx.register_hook("post_tool_call", _PROBE_TELEMETRY.record_observed_tool)
+
+
+def _emit_probe_telemetry() -> None:
+    if _PROBE_TELEMETRY is not None:
+        _PROBE_TELEMETRY.emit()
 
 
 def _hermes_state_path(filename: str) -> Path:
@@ -8449,6 +8621,7 @@ def _on_post_llm_call(
     platform: str = "",
     **_: Any,
 ) -> None:
+    _emit_probe_telemetry()
     if str(platform or "").lower() != "telegram":
         return
     _record_iterative_queue_reply_state(session_id, assistant_response)
@@ -8467,5 +8640,6 @@ def register(ctx: Any) -> None:
             )
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
+    _activate_probe_telemetry(ctx)
     ctx.register_hook("pre_gateway_dispatch", build_pre_gateway_dispatch_hook(ctx))
     ctx.register_hook("post_llm_call", _on_post_llm_call)

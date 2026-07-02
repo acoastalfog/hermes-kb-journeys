@@ -1947,7 +1947,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.8.0"
+    assert manifest["version"] == "0.8.1"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -2531,3 +2531,242 @@ def test_m3_ordinary_language_falls_through_to_hermes_without_plugin_calls(
         event=_FakeEvent(source, text=text), gateway=gateway, session_store=None
     ) is None
     assert ctx.calls == []
+
+
+class _ProbeHookContext(FakeContext):
+    def __init__(self, results):
+        super().__init__(results)
+        self.hooks = {}
+        self.commands = {}
+
+    def register_hook(self, name, callback):
+        self.hooks.setdefault(name, []).append(callback)
+
+    def register_command(self, name, handler, **metadata):
+        self.commands[name] = {"handler": handler, **metadata}
+
+
+def _configure_probe_pipe(monkeypatch, *, run_id="probe-0123456789abcdef"):
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(write_fd, True)
+    os.set_blocking(read_fd, False)
+    monkeypatch.setenv("NOC_HERMES_PROBE_TELEMETRY_FD", str(write_fd))
+    monkeypatch.setenv("NOC_HERMES_PROBE_RUN_ID", run_id)
+    return read_fd, write_fd
+
+
+def _read_probe_packet(read_fd):
+    raw = os.read(read_fd, 4096)
+    assert raw.endswith(b"\n")
+    return json.loads(raw)
+
+
+def test_m3_probe_telemetry_registers_no_observers_without_private_contract(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("NOC_HERMES_PROBE_TELEMETRY_FD", raising=False)
+    monkeypatch.delenv("NOC_HERMES_PROBE_RUN_ID", raising=False)
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = _ProbeHookContext({})
+
+    plugin.register(ctx)
+
+    assert set(ctx.hooks) == {"pre_gateway_dispatch", "post_llm_call"}
+
+
+def test_m3_probe_telemetry_counts_attempts_context_and_engine_calls_once(
+    tmp_path, monkeypatch
+):
+    read_fd, write_fd = _configure_probe_pipe(monkeypatch)
+    try:
+        plugin = _load_plugin_module(monkeypatch, tmp_path)
+        _install_conforming_descriptor_fixture(plugin, monkeypatch)
+        ctx = _ProbeHookContext(
+            {
+                "mcp_kb_engine_prod_attention_cockpit": [
+                    {"result": {"status": "ready"}}
+                ]
+            }
+        )
+        plugin.register(ctx)
+
+        assert {"pre_api_request", "post_tool_call"} <= set(ctx.hooks)
+        assert "api_request_error" not in ctx.hooks
+
+        small_context = [{"role": "user", "content": "cafe"}]
+        large_context = [{"role": "user", "content": "café λλλ"}]
+        pre_request = ctx.hooks["pre_api_request"][0]
+        pre_request(api_request_id="turn-1:api:1", request_messages=small_context)
+        # The same upstream request id may span retries. Each pre-request hook
+        # is one outgoing provider attempt.
+        pre_request(api_request_id="turn-1:api:1", request_messages=large_context)
+        pre_request(api_request_id="turn-1:api:2", request_messages=small_context)
+
+        post_tool = ctx.hooks["post_tool_call"][0]
+        post_tool(
+            tool_name="mcp_kb_engine_prod_attention_cockpit",
+            tool_call_id="tool-1",
+        )
+        post_tool(
+            tool_name="mcp_kb_engine_prod_attention_cockpit",
+            tool_call_id="tool-1",
+        )
+        post_tool(tool_name="web_search", tool_call_id="tool-2")
+
+        for callback in ctx.hooks["post_llm_call"]:
+            callback(platform="cli", assistant_response="PRIVATE RESPONSE")
+
+        packet = _read_probe_packet(read_fd)
+        expected_context_bytes = len(
+            json.dumps(
+                large_context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        assert packet == {
+            "schema_version": 1,
+            "kind": "hermes_probe_telemetry",
+            "run_id": "probe-0123456789abcdef",
+            "status": "complete",
+            "model_calls": 3,
+            "engine_calls": 1,
+            "context_bytes": expected_context_bytes,
+        }
+        assert "PRIVATE" not in json.dumps(packet)
+
+        # A repeated terminal hook cannot emit a second packet.
+        for callback in ctx.hooks["post_llm_call"]:
+            callback(platform="cli", assistant_response="SECOND PRIVATE RESPONSE")
+        with pytest.raises(BlockingIOError):
+            os.read(read_fd, 4096)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_m3_probe_telemetry_gateway_dispatch_does_not_emit_or_count(
+    tmp_path, monkeypatch
+):
+    read_fd, write_fd = _configure_probe_pipe(
+        monkeypatch, run_id="probe-direct-0123456789"
+    )
+    try:
+        plugin = _load_plugin_module(monkeypatch, tmp_path)
+        _install_conforming_descriptor_fixture(plugin, monkeypatch)
+        ctx = _ProbeHookContext(
+            {
+                "mcp_kb_engine_prod_attention_cockpit": [
+                    {"result": {"status": "ready"}}
+                ]
+            }
+        )
+        plugin.register(ctx)
+
+        class Adapter:
+            @staticmethod
+            def send(*_args, **_kwargs):
+                return type("SendResult", (), {"success": True})()
+
+        source = _FakeSource()
+        gateway = type(
+            "Gateway",
+            (),
+            {
+                "_is_user_authorized": staticmethod(lambda _source: True),
+                "adapters": {"telegram": Adapter()},
+            },
+        )()
+        result = ctx.hooks["pre_gateway_dispatch"][0](
+            event=_FakeEvent(source, text="kb status"),
+            gateway=gateway,
+            session_store=None,
+        )
+
+        assert result == {"action": "skip", "reason": "kb_journeys"}
+        with pytest.raises(BlockingIOError):
+            os.read(read_fd, 4096)
+
+        for callback in ctx.hooks["post_llm_call"]:
+            callback(platform="cli", assistant_response="PRIVATE RESPONSE")
+        assert _read_probe_packet(read_fd) == {
+            "schema_version": 1,
+            "kind": "hermes_probe_telemetry",
+            "run_id": "probe-direct-0123456789",
+            "status": "complete",
+            "model_calls": 0,
+            "engine_calls": 0,
+            "context_bytes": 0,
+        }
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_m3_probe_telemetry_missing_engine_call_id_is_incomplete(
+    tmp_path, monkeypatch
+):
+    read_fd, write_fd = _configure_probe_pipe(
+        monkeypatch, run_id="probe-incomplete-0123456789"
+    )
+    try:
+        plugin = _load_plugin_module(monkeypatch, tmp_path)
+        ctx = _ProbeHookContext({})
+        plugin.register(ctx)
+
+        context = [{"role": "user", "content": "status"}]
+        ctx.hooks["pre_api_request"][0](
+            api_request_id="turn-1:api:1", request_messages=context
+        )
+        ctx.hooks["post_tool_call"][0](
+            tool_name="mcp_kb_engine_prod_attention_cockpit",
+            tool_call_id="",
+        )
+        for callback in ctx.hooks["post_llm_call"]:
+            callback(platform="cli", assistant_response="PRIVATE RESPONSE")
+
+        assert _read_probe_packet(read_fd) == {
+            "schema_version": 1,
+            "kind": "hermes_probe_telemetry",
+            "run_id": "probe-incomplete-0123456789",
+            "status": "incomplete",
+            "model_calls": 1,
+            "engine_calls": None,
+            "context_bytes": len(
+                json.dumps(
+                    context,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ),
+        }
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_m3_probe_telemetry_rejects_malformed_contract_without_leaking_values(
+    tmp_path, monkeypatch, caplog
+):
+    read_fd, write_fd = _configure_probe_pipe(
+        monkeypatch, run_id="invalid run id PRIVATE-NONCE"
+    )
+    try:
+        plugin = _load_plugin_module(monkeypatch, tmp_path)
+        ctx = _ProbeHookContext({})
+        plugin.register(ctx)
+
+        assert "pre_api_request" not in ctx.hooks
+        assert "api_request_error" not in ctx.hooks
+        assert "post_tool_call" not in ctx.hooks
+        for callback in ctx.hooks["post_llm_call"]:
+            callback(platform="cli", assistant_response="PRIVATE RESPONSE")
+        with pytest.raises(BlockingIOError):
+            os.read(read_fd, 4096)
+        assert "PRIVATE-NONCE" not in caplog.text
+        assert "PRIVATE RESPONSE" not in caplog.text
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
