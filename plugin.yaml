@@ -1,9 +1,11 @@
 name: kb_journeys
-version: 0.8.0
+version: 0.8.1
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
+  - post_tool_call
   - pre_gateway_dispatch
+  - pre_api_request
   - post_llm_call
 descriptor_bundle: generated/kb-engine-descriptors.json
 install_receipt:

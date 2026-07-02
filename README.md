@@ -70,6 +70,16 @@ paths, integrity digests, MCP names, source bodies, and workflow internals.
 `kb publish` reads publication status and hands the consequence to a trusted
 operator surface; the relay never commits or pushes.
 
+Version 0.8.1 also exposes aggregate model-call, kb-engine-call, and context-size
+metrics only to an isolated NOC probe that supplies a valid inherited pipe and
+run id. The isolated one-shot emits exactly one packet after its completed LLM
+turn. Provider-attempt hooks count model calls and canonical UTF-8 context size;
+identified kb-engine tool hooks are deduplicated, while a missing tool-call id
+makes the packet incomplete. Normal Hermes sessions register no telemetry
+observers, and the packet contains no prompts, responses, tool names, errors,
+or correlation identifiers. The plugin stores nothing; missing, incomplete, or
+malformed probe telemetry remains unobserved rather than inferred.
+
 ## Canonical sync and change surface
 
 Version 0.8.0 makes `/kb sync` and command-like `kb sync` call the generated
