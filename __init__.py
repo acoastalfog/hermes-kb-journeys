@@ -3159,6 +3159,44 @@ def _render_dashboard(data: Any, *, ctx: Any, target: str) -> dict[str, Any]:
     }
 
 
+def _compact_attention_tool_result(
+    *,
+    tool_name: str = "",
+    args: Any = None,
+    result: Any = None,
+    **_: Any,
+) -> str | None:
+    """Replace one duplicated compact cockpit envelope before model reuse."""
+    target = _mcp_target()
+    capability = _capability_for_registry_name(target, tool_name)
+    descriptor = _descriptor(capability)
+    annotations = (
+        descriptor.get("annotations")
+        if isinstance(descriptor, dict) and isinstance(descriptor.get("annotations"), dict)
+        else {}
+    )
+    if capability != "attention.cockpit" or annotations.get("readOnlyHint") is not True:
+        return None
+
+    requested = args if isinstance(args, dict) else {}
+    if requested.get("detail") is True or str(requested.get("mode") or "").lower() == "full":
+        return None
+
+    envelope = _maybe_json(result)
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("structuredContent"), dict):
+        return None
+    payload, error = _unwrap_tool_result(envelope)
+    if error or not isinstance(payload, dict) or payload.get("mode") != "compact":
+        return None
+    if _validate_runtime_output(capability, payload) is not None:
+        return None
+    if _maybe_json(envelope.get("result")) != payload:
+        return None
+
+    rendered = _render_dashboard(payload, ctx=None, target=target).get("text")
+    return rendered if isinstance(rendered, str) and rendered.strip() else None
+
+
 _WORKBENCH_SECTION_IDS = {"closeout", "now", "reports", "situations", "workbench"}
 
 
@@ -8641,5 +8679,6 @@ def register(ctx: Any) -> None:
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
     _activate_probe_telemetry(ctx)
+    ctx.register_hook("transform_tool_result", _compact_attention_tool_result)
     ctx.register_hook("pre_gateway_dispatch", build_pre_gateway_dispatch_hook(ctx))
     ctx.register_hook("post_llm_call", _on_post_llm_call)
