@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -82,6 +83,9 @@ SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
 SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
+SYNC_PACKET_TRANSPORT_TOOL = "kb_sync_resume_packet"
+SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
+SYNC_PACKET_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
     "semantic_write_receipt",
     "semantic_write_through_receipt",
@@ -7106,6 +7110,160 @@ def _sync_tool_call(
     return (data if isinstance(data, dict) else None), errors
 
 
+def _sync_packet_spool_root() -> Path:
+    state_root = Path(
+        os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
+    ).expanduser()
+    return (state_root / "kb-sync" / "prepare").resolve()
+
+
+def _load_sync_spooled_packet(packet_path: Any) -> dict[str, Any]:
+    raw_path = str(packet_path or "").strip()
+    if not raw_path or "\x00" in raw_path or "\n" in raw_path or "\r" in raw_path:
+        raise ValueError("packet_path is required")
+    requested_path = Path(raw_path).expanduser()
+    if not requested_path.is_absolute() or requested_path.is_symlink():
+        raise ValueError("packet_path must be an absolute regular spool file")
+    spool_root = _sync_packet_spool_root()
+    resolved_path = requested_path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(spool_root)
+    except ValueError as exc:
+        raise ValueError("packet_path is outside the private sync spool") from exc
+    info = resolved_path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("packet_path is not a regular file")
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError("packet_path ownership or mode is unsafe")
+    if info.st_size <= 0 or info.st_size > SYNC_PACKET_MAX_BYTES:
+        raise ValueError("packet_path size is outside the safe transport bound")
+    try:
+        packet = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("packet_path does not contain valid UTF-8 JSON") from exc
+    if not isinstance(packet, dict):
+        raise ValueError("spooled packet must be a JSON object")
+    if packet.get("schema_version") != 1 or packet.get("kind") != "kb.source_evidence":
+        raise ValueError("spooled packet is not kb.source_evidence schema v1")
+    if not all(
+        isinstance(packet.get(field), str) and str(packet[field]).strip()
+        for field in ("source_id", "connector_id", "harness_id")
+    ):
+        raise ValueError("spooled packet is missing its source identity")
+    canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
+    digest_prefix = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    if not resolved_path.name.endswith(f"-{digest_prefix}.json"):
+        raise ValueError("spooled packet filename does not bind its content digest")
+    return packet
+
+
+def _compact_sync_packet_result(payload: Any, *, run_id: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "kb.sync.resume returned a non-object response",
+        }
+    next_action = payload.get("next_action")
+    compact_action: dict[str, Any] = {}
+    if isinstance(next_action, dict):
+        for field in (
+            "kind",
+            "action_index",
+            "source_id",
+            "reconciliation_window",
+            "apply_required",
+        ):
+            if field in next_action:
+                compact_action[field] = next_action[field]
+        evidence_refs = next_action.get("evidence_refs")
+        if isinstance(evidence_refs, list):
+            compact_action["evidence_ref_count"] = len(evidence_refs)
+    return {
+        "accepted": True,
+        "run_id": str(payload.get("run_id") or run_id),
+        "status": payload.get("status"),
+        "next_action": compact_action,
+        "source_currency": payload.get("source_currency"),
+        "publication": payload.get("publication"),
+        "instruction": "Continue with kb.sync.status for this exact run.",
+    }
+
+
+def _register_sync_packet_transport(ctx: Any) -> None:
+    schema = {
+        "name": SYNC_PACKET_TRANSPORT_TOOL,
+        "description": (
+            "Forward one exact private packet spooled by kb-sync-gather to the "
+            "current kb.sync.resume action without placing source bodies in model "
+            "context. Use only the exact path printed by kb-sync-gather."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The exact active kb.sync run id.",
+                },
+                "packet_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute mode-0600 file beneath the private "
+                        "XDG_STATE_HOME/kb-sync/prepare spool."
+                    ),
+                },
+            },
+            "required": ["run_id", "packet_path"],
+            "additionalProperties": False,
+        },
+    }
+
+    def _handler(args: dict[str, Any], **_: Any) -> str:
+        run_id = str(args.get("run_id") or "").strip()
+        if not SYNC_PACKET_RUN_ID_RE.fullmatch(run_id):
+            return json.dumps(
+                {"accepted": False, "error": "run_id is invalid"},
+                separators=(",", ":"),
+            )
+        try:
+            packet = _load_sync_spooled_packet(args.get("packet_path"))
+        except (OSError, ValueError) as exc:
+            return json.dumps(
+                {"accepted": False, "run_id": run_id, "error": str(exc)},
+                separators=(",", ":"),
+            )
+        _tool, payload, errors = _dispatch_first(
+            ctx,
+            _mcp_target(),
+            [("kb.sync.resume", {"run_id": run_id, "response": packet})],
+        )
+        if payload is None:
+            return json.dumps(
+                {
+                    "accepted": False,
+                    "run_id": run_id,
+                    "error": _clip("; ".join(errors), 240) or "kb.sync.resume failed",
+                },
+                separators=(",", ":"),
+            )
+        return json.dumps(
+            _compact_sync_packet_result(payload, run_id=run_id),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    ctx.register_tool(
+        name=SYNC_PACKET_TRANSPORT_TOOL,
+        toolset="kb_journeys",
+        schema=schema,
+        handler=_handler,
+        description=(
+            "Private local-spool transport for complete kb.sync source packets."
+        ),
+        emoji="📦",
+    )
+
+
 def _render_sync_command(
     ctx: Any,
     target: str,
@@ -8678,6 +8836,7 @@ def register(ctx: Any) -> None:
             )
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
+    _register_sync_packet_transport(ctx)
     _activate_probe_telemetry(ctx)
     ctx.register_hook("transform_tool_result", _compact_attention_tool_result)
     ctx.register_hook("pre_gateway_dispatch", build_pre_gateway_dispatch_hook(ctx))
