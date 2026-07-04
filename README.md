@@ -99,6 +99,15 @@ restore the retired overloaded `control.*` wrappers.
 The old `/kbsync`, `update_kb`, and `/kb run sync` entrypoints remain hard
 breaks with migration guidance. Missing canonical descriptors fail closed.
 
+Version 0.8.3 adds one narrow transport tool for complete source packets that
+exceed model-context limits. `kb-sync-gather` already writes the exact packet
+to a private mode-0600 spool; `kb_sync_resume_packet` verifies that file is
+inside the Hermes state spool, validates its owner, mode, schema, and
+content-bound filename, and forwards it through the existing generated
+`kb.sync.resume` MCP tool. It returns only compact run state. This is not a
+source executor or second sync path: the connector still gathers, kb-engine
+still validates and owns the run, and Hermes Agent remains exact upstream.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

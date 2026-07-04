@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
@@ -201,6 +202,136 @@ class FakeContext:
         values = self.results.get(tool_name)
         result = values.pop(0) if values else {"error": f"missing {tool_name}"}
         return json.dumps(result)
+
+
+class FakePacketTransportContext:
+    def __init__(self, dispatch_result=None):
+        self.registered_tools = {}
+        self.calls = []
+        self.dispatch_result = dispatch_result or {
+            "result": {
+                "schema_version": 1,
+                "kind": "kb_sync_run",
+                "status": "awaiting_action",
+                "run_id": "hdf-kb_sync-test",
+                "next_action": {
+                    "kind": "gather_evidence",
+                    "action_index": 1,
+                    "source_id": "m365.calendar",
+                },
+                "source_currency": {"target_through": "2026-07-04T00:00:00Z"},
+                "publication": {"status": "not_attempted"},
+            }
+        }
+
+    def register_tool(self, **kwargs):
+        self.registered_tools[kwargs["name"]] = kwargs
+
+    def dispatch_tool(self, tool_name, args):
+        self.calls.append((tool_name, args))
+        return json.dumps(self.dispatch_result)
+
+
+def _spooled_source_packet(root: Path, *, mode: int = 0o600) -> tuple[Path, dict]:
+    packet = {
+        "schema_version": 1,
+        "kind": "kb.source_evidence",
+        "source_id": "m365.email",
+        "connector_id": "neutral.m365-evidence",
+        "harness_id": "hermes-cron",
+        "requested_journey": "kb.sync",
+        "collected_at": "2026-07-04T00:05:00Z",
+        "items": [
+            {
+                "external_id": "mail-1",
+                "revision_id": "revision-1",
+                "semantic_text": "private evidence body",
+            }
+        ],
+        "coverage": {
+            "requested_window": {
+                "start": "2026-07-03T00:00:00Z",
+                "end": "2026-07-04T00:00:00Z",
+            },
+            "observed_intervals": [
+                {
+                    "start": "2026-07-03T00:00:00Z",
+                    "end": "2026-07-04T00:00:00Z",
+                }
+            ],
+            "gaps": [],
+            "errors": [],
+            "truncated": False,
+        },
+        "limits": {"max_items": 1, "truncated": False},
+        "provenance": {"source_refs": ["source:mail-1"]},
+        "privacy": {"classification": "private"},
+    }
+    canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    spool = root / "kb-sync" / "prepare" / "run-1"
+    spool.mkdir(parents=True)
+    path = spool / f"m365.email-{digest}.json"
+    path.write_text(json.dumps(packet, indent=2) + "\n", encoding="utf-8")
+    path.chmod(mode)
+    return path, packet
+
+
+def test_sync_packet_transport_forwards_exact_private_spool_without_rendering_body(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    ctx = FakePacketTransportContext()
+
+    plugin._register_sync_packet_transport(ctx)
+
+    registered = ctx.registered_tools["kb_sync_resume_packet"]
+    result = json.loads(
+        registered["handler"](
+            {"run_id": "hdf-kb_sync-test", "packet_path": str(packet_path)}
+        )
+    )
+
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_resume",
+            {"run_id": "hdf-kb_sync-test", "response": packet},
+        )
+    ]
+    assert result["accepted"] is True
+    assert result["run_id"] == "hdf-kb_sync-test"
+    assert result["next_action"] == {
+        "kind": "gather_evidence",
+        "action_index": 1,
+        "source_id": "m365.calendar",
+    }
+    assert "private evidence body" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("unsafe", ["outside", "permissive"])
+def test_sync_packet_transport_rejects_unsafe_spool(tmp_path, monkeypatch, unsafe):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    if unsafe == "outside":
+        packet_path, _ = _spooled_source_packet(tmp_path / "outside")
+    else:
+        packet_path, _ = _spooled_source_packet(state_root, mode=0o644)
+    ctx = FakePacketTransportContext()
+    plugin._register_sync_packet_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_sync_resume_packet"]["handler"](
+            {"run_id": "hdf-kb_sync-test", "packet_path": str(packet_path)}
+        )
+    )
+
+    assert result["accepted"] is False
+    assert ctx.calls == []
+    assert "private evidence body" not in json.dumps(result)
 
 
 def test_user_plugin_loads_from_standard_plugin_directory(tmp_path, monkeypatch):
@@ -1947,7 +2078,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.8.2"
+    assert manifest["version"] == "0.8.3"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -2675,12 +2806,16 @@ class _ProbeHookContext(FakeContext):
         super().__init__(results)
         self.hooks = {}
         self.commands = {}
+        self.registered_tools = {}
 
     def register_hook(self, name, callback):
         self.hooks.setdefault(name, []).append(callback)
 
     def register_command(self, name, handler, **metadata):
         self.commands[name] = {"handler": handler, **metadata}
+
+    def register_tool(self, **metadata):
+        self.registered_tools[metadata["name"]] = metadata
 
 
 def _configure_probe_pipe(monkeypatch, *, run_id="probe-0123456789abcdef"):
