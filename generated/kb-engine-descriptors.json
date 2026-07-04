@@ -6,7 +6,7 @@
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
     {
-      "input_schema_digest": "sha256:ac191ee0490868b467b708c4063d8ba00a7659fac863972b8f166cb3d4c00978",
+      "input_schema_digest": "sha256:698caffff276f49f1a070330ca4a38a3819d0e396d52d61a86760a05cfc047d9",
       "name": "kb.sync.prepare",
       "output_schema_digest": "sha256:a1d49c64a799ce3502af7c999fbdb480abf5783b50db2e2163748cdc55834caf"
     },
@@ -14,11 +14,16 @@
       "input_schema_digest": "sha256:04e89c9cea30f2b7beb99567e3ad675d64a01c02d753f2b616e64cc214ea338c",
       "name": "kb.sync.resume",
       "output_schema_digest": "sha256:ee8b3da71d7fdf8abec97df89d4b3b50db4e209af49fe04c9ef37948da2910a1"
+    },
+    {
+      "input_schema_digest": "sha256:92bd72c07c9765f2166e97ef8292d441028f2615115a6f85bc4356e1ace1f728",
+      "name": "publication.daily_integration_apply",
+      "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:7d94d8eeec35ff36143297e502344effda82a4d6e8bbfa294e19c4253e83a733",
-  "engine_source_revision": "1b8032a4db5bde33090a7c363e5c6e0d079acc8c",
-  "engine_version": "0.45.23",
+  "digest": "sha256:9a2ae948a3c52e49c25da5ae9fadd9a5a103c26e17e065b4665c3c3005319218",
+  "engine_source_revision": "01dec6553a664e87b072d377d35ef8f030395261",
+  "engine_version": "0.45.29",
   "journeys": [
     {
       "confirmation_required": false,
@@ -27,8 +32,7 @@
       "required_tools": [
         "kb.sync.prepare",
         "kb.sync.resume",
-        "kb.sync.status",
-        "publication.status"
+        "kb.sync.status"
       ],
       "status": "ready",
       "title": "KB sync journey"
@@ -52,9 +56,9 @@
       ],
       "required_tools": [
         "attention.cockpit",
-        "policy.route_explain",
-        "search.query",
-        "workspace.readiness"
+        "object.context",
+        "object.find",
+        "search.query"
       ],
       "status": "ready",
       "title": "Read-only orientation and trust"
@@ -63,7 +67,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:c8131ecefc6aff440ca6ef8da7cc6a2d82c0da769fa324ee9eb9fdb1d8e82327",
+  "source_export_digest": "sha256:bd70e384c5f98d9ca948885a787e70cef7f92c0580085f8667a3a96029951826",
   "tools": [
     {
       "annotations": {
@@ -5686,6 +5690,10 @@
             "description": "Optional fixed ISO end time; omitted means the latest complete UTC-day boundary.",
             "type": "string"
           },
+          "recovery_run_id": {
+            "description": "Optional completed kb_sync run whose exact accepted source artifacts must be re-audited through an append-only semantic correction.",
+            "type": "string"
+          },
           "session_id": {
             "description": "Harness session id for provenance.",
             "type": "string"
@@ -5705,7 +5713,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:ac191ee0490868b467b708c4063d8ba00a7659fac863972b8f166cb3d4c00978",
+      "input_schema_digest": "sha256:698caffff276f49f1a070330ca4a38a3819d0e396d52d61a86760a05cfc047d9",
       "name": "kb.sync.prepare",
       "output_schema": {
         "additionalProperties": true,
@@ -5890,18 +5898,28 @@
         "additionalProperties": false,
         "properties": {
           "evidence_refs": {
-            "description": "Optional exact secret-safe refs to inspect against the live semantic frontier without truncation.",
+            "description": "Optional exact secret-safe refs to inspect against the live semantic frontier and return as complete accepted source items without truncation.",
             "items": {
               "pattern": "^sha256:[0-9a-f]{64}$",
               "type": "string"
             },
-            "maxItems": 2000,
+            "maxItems": 10,
             "type": "array",
             "uniqueItems": true
           },
           "run_id": {
             "description": "Run id returned by kb.sync.prepare.",
             "type": "string"
+          },
+          "target_refs": {
+            "description": "Optional exact target refs to return as current-object dossiers after evidence attribution. Mutually exclusive with evidence_refs.",
+            "items": {
+              "description": "Canonical current KB object path.",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -5909,7 +5927,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:39c05163b357895568256e504cf61f97b290ee14fd777fd4a4dcacf558457c74",
+      "input_schema_digest": "sha256:caf5eec4e2c10df8544290cca34d43daa551f221a4bc958f63410973c61b1ea4",
       "name": "kb.sync.status",
       "output_schema": {
         "additionalProperties": true,
@@ -5960,142 +5978,180 @@
         },
         "readOnlyHint": true
       },
-      "description": "Explain likely harness-neutral MCP routes, candidate tools/templates, and write policy for a freeform KB action request.",
+      "description": "Return a harness-neutral durable object packet with identity, object-family facets, kind contract, editable surfaces, object-local guidance, allowed operations, current state, and provenance hints.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "include_instruction_layers": {
+            "description": "Opt in to serve the RAW, UNMERGED INSTRUCTIONS.md layer files for the object (entity + immediate type level) under object_guidance.instruction_layers. Default off; no-op for file-backed objects. The engine never merges or reasons across layers.",
+            "type": "boolean"
+          },
           "object_path": {
-            "description": "Optional known durable object path.",
+            "description": "Durable KB object path to inspect.",
             "type": "string"
           },
           "user_input": {
-            "description": "Freeform KB action request to route.",
+            "description": "Optional operator guidance to include in the packet.",
             "type": "string"
           }
         },
         "required": [
-          "user_input"
+          "object_path"
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:ed82c1439f61a7f7639dcd40c9f185d12a6be4e7bf4b79334c87e364aa84754d",
-      "name": "policy.route_explain",
+      "input_schema_digest": "sha256:5c6f262bf8afcaa9ad4df9754e23f4a8c4c8c3515a3a52ebf95d1299469b9631",
+      "name": "object.context",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
-          "candidates": {
-            "description": "Ranked route candidates.",
+          "allowed_operations": {
+            "description": "Operations allowed for this object context.",
             "items": {
               "additionalProperties": true,
               "properties": {
-                "call_sequence": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "confidence": {
-                  "type": "number"
-                },
                 "confirmation_required": {
+                  "description": "Whether the operation crosses a confirmation boundary.",
                   "type": "boolean"
                 },
-                "journey_id": {
+                "description": {
+                  "description": "Operation description.",
                   "type": "string"
                 },
-                "mcp_policy": {
+                "operation_id": {
+                  "description": "Allowed deterministic operation id.",
                   "type": "string"
                 },
-                "template_or_tool": {
+                "title": {
+                  "description": "Operation title.",
                   "type": "string"
                 }
               },
               "required": [
-                "template_or_tool",
-                "mcp_policy",
-                "journey_id",
-                "confidence",
-                "confirmation_required",
-                "call_sequence"
+                "operation_id",
+                "confirmation_required"
               ],
               "type": "object"
             },
             "type": "array"
           },
-          "intent": {
+          "context": {
+            "description": "Bounded human-readable object context.",
+            "type": "string"
+          },
+          "current_state": {
             "additionalProperties": true,
             "properties": {
-              "confidence": {
-                "type": "number"
-              },
-              "id": {
+              "object_kind": {
+                "description": "Resolved durable object kind.",
                 "type": "string"
               },
-              "rationale": {
+              "object_path": {
+                "description": "Canonical durable object path.",
+                "type": "string"
+              },
+              "status": {
+                "description": "Current status.",
+                "type": "string"
+              },
+              "title": {
+                "description": "Current title.",
                 "type": "string"
               }
             },
             "required": [
-              "id",
-              "confidence",
-              "rationale"
+              "object_path",
+              "object_kind",
+              "title",
+              "status"
             ],
             "type": "object"
           },
-          "journey": {
+          "object": {
             "additionalProperties": true,
             "properties": {
-              "conformance_resource": {
+              "kind": {
+                "description": "Object reference kind.",
                 "type": "string"
               },
-              "journey_id": {
+              "path": {
+                "description": "Canonical durable object path.",
                 "type": "string"
               },
-              "resource": {
+              "status": {
+                "description": "Current object status.",
+                "type": "string"
+              },
+              "title": {
+                "description": "Human-readable object title.",
                 "type": "string"
               }
             },
             "required": [
-              "journey_id",
-              "resource",
-              "conformance_resource"
+              "kind",
+              "path",
+              "status",
+              "title"
             ],
             "type": "object"
           },
-          "route_packet": {
+          "provenance": {
             "additionalProperties": true,
             "properties": {
-              "preview_path": {
+              "source_of_truth": {
+                "description": "Durable source of truth.",
+                "type": "string"
+              },
+              "workspace_root": {
+                "description": "Resolved workspace root.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source_of_truth",
+              "workspace_root"
+            ],
+            "type": "object"
+          },
+          "state_hints": {
+            "additionalProperties": true,
+            "properties": {
+              "fallback_call_sequence": {
+                "description": "Compatibility follow-up sequence.",
                 "items": {
+                  "description": "Tool name.",
                   "type": "string"
                 },
                 "type": "array"
               },
-              "recommended_journey_id": {
-                "type": "string"
-              },
-              "schema_version": {
-                "type": "integer"
+              "recommended_call_sequence": {
+                "description": "Primary safe follow-up sequence.",
+                "items": {
+                  "description": "Tool name.",
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
-              "schema_version",
-              "recommended_journey_id",
-              "preview_path"
+              "recommended_call_sequence",
+              "fallback_call_sequence"
             ],
             "type": "object"
           }
         },
         "required": [
-          "intent",
-          "journey",
-          "candidates",
-          "route_packet"
+          "object",
+          "context",
+          "allowed_operations",
+          "current_state",
+          "provenance",
+          "state_hints"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:8ac16ac9d11ba64d52475c41bf6aad349f60efee9295ba7e1236eeefde32cfe1",
-      "title": "Policy Route Explain"
+      "output_schema_digest": "sha256:72462d19780b57e2e5649c04c1ab7f773293d7b9b74f1896974037d73865f47a",
+      "title": "Object Context"
     },
     {
       "annotations": {
@@ -6111,67 +6167,359 @@
         },
         "readOnlyHint": true
       },
-      "description": "Return workspace Git publication state plus workflow and confirmed-control publication policy.",
+      "description": "Find durable KB objects by title, venue, DOI/OpenReview/arXiv/submission id, URL, or canonical path before requesting an object context packet.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
-          "paths": {
-            "description": "Optional workspace-relative paths to scope publication status.",
-            "items": {
-              "description": "Workspace-relative path.",
-              "type": "string"
-            },
-            "type": "array"
+          "identifier": {
+            "description": "Optional DOI, OpenReview id/URL, arXiv id, or submission id.",
+            "type": "string"
           },
-          "transaction_id": {
-            "description": "Optional confirmed-control transaction id to echo in the receipt.",
+          "limit": {
+            "description": "Maximum candidate count.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "object_kind": {
+            "description": "Optional object kind filter, such as manuscript.",
+            "type": "string"
+          },
+          "object_path": {
+            "description": "Optional known or partial durable object path.",
+            "type": "string"
+          },
+          "query": {
+            "description": "Freeform object search query.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Optional title/name search text.",
+            "type": "string"
+          },
+          "venue": {
+            "description": "Optional publication venue filter.",
             "type": "string"
           }
         },
         "type": "object"
       },
-      "input_schema_digest": "sha256:15d09f846d586c434ebdd59853487e1afc026c30f5522d74d262c2c5d0573328",
-      "name": "publication.status",
+      "input_schema_digest": "sha256:87465420527d06525480c7d866ffc5184e5a45055e78662657e09a5240ad4869",
+      "name": "object.find",
       "output_schema": {
         "additionalProperties": true,
         "properties": {
-          "git": {
+          "candidates": {
+            "description": "Ranked durable object matches.",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "match_reasons": {
+                  "description": "Signals supporting the match.",
+                  "items": {
+                    "description": "Match signal.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "object_kind": {
+                  "description": "Resolved durable object kind.",
+                  "type": "string"
+                },
+                "object_path": {
+                  "description": "Canonical durable object path.",
+                  "type": "string"
+                },
+                "recommended_next_tool": {
+                  "description": "Recommended bounded follow-up tool.",
+                  "type": "string"
+                },
+                "score": {
+                  "type": "integer"
+                },
+                "status": {
+                  "description": "Current object status when known.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Human-readable object title.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "object_path",
+                "object_kind",
+                "title",
+                "score",
+                "match_reasons",
+                "recommended_next_tool"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "query": {
+            "description": "Normalized search query.",
+            "type": "string"
+          },
+          "resolution_guidance": {
             "additionalProperties": true,
             "properties": {
-              "clean": {
+              "ambiguous": {
+                "description": "Whether several candidates remain.",
                 "type": "boolean"
               },
+              "canonical_object_path": {
+                "description": "Resolved canonical object path when unambiguous.",
+                "type": "string"
+              },
+              "recommended_action": {
+                "description": "Safe next action.",
+                "type": "string"
+              },
+              "semantic_status": {
+                "description": "Semantic resolution status.",
+                "type": "string"
+              },
               "status": {
+                "description": "Resolution status.",
                 "type": "string"
               }
             },
             "required": [
               "status",
-              "clean"
+              "semantic_status",
+              "recommended_action",
+              "ambiguous"
             ],
             "type": "object"
+          },
+          "schema_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "query",
+          "count",
+          "candidates",
+          "resolution_guidance"
+        ],
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:71c61c2fba9a8db3cb559d90ab617cd72e0df00c6cebd736e21868e743538715",
+      "title": "Find Durable Objects"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": false
+      },
+      "description": "Commit and push one exactly previewed clean Daily Integration change set under the standing workflow policy; resumes a failed push without a second commit.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Harness actor.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "calendar_receipt": {
+            "additionalProperties": false,
+            "properties": {
+              "counts": {
+                "additionalProperties": false,
+                "properties": {
+                  "applied": {
+                    "description": "Managed-calendar applied count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "failed": {
+                    "description": "Managed-calendar failed count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "held": {
+                    "description": "Managed-calendar held count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kept": {
+                    "description": "Managed-calendar kept count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "pending": {
+                    "description": "Managed-calendar pending count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "planned": {
+                    "description": "Managed-calendar planned count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "read_back": {
+                    "description": "Managed-calendar read_back count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "recorded": {
+                    "description": "Managed-calendar recorded count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "planned",
+                  "applied",
+                  "kept",
+                  "read_back",
+                  "recorded",
+                  "held",
+                  "failed",
+                  "pending"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "managed_calendar_closeout",
+                "type": "string"
+              },
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Digest of the receipt excluding this field.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "run_id": {
+                "description": "Linked kb.sync run id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "const": 1,
+                "type": "integer"
+              },
+              "source_reads": {
+                "additionalProperties": false,
+                "properties": {
+                  "calendar_complete": {
+                    "const": true,
+                    "type": "boolean"
+                  },
+                  "tripit_complete": {
+                    "const": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "tripit_complete",
+                  "calendar_complete"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "Managed-calendar terminal status.",
+                "enum": [
+                  "completed",
+                  "not_required"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "kind",
+              "run_id",
+              "status",
+              "ok",
+              "source_reads",
+              "counts",
+              "receipt_digest"
+            ],
+            "type": "object"
+          },
+          "preview_digest": {
+            "description": "Exact Daily Integration publication preview digest.",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "Completed kb.sync run id.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Harness session id.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "description": "Harness source.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "calendar_receipt",
+          "preview_digest",
+          "actor",
+          "source",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:92bd72c07c9765f2166e97ef8292d441028f2615115a6f85bc4356e1ace1f728",
+      "name": "publication.daily_integration_apply",
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "authorization_mode": {
+            "const": "standing_daily_integration_policy",
+            "type": "string"
+          },
+          "human_confirmation_required": {
+            "type": "boolean"
+          },
+          "idempotent_replay": {
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "Daily Integration publication packet kind.",
+            "enum": [
+              "daily_integration_publication_preview",
+              "daily_integration_publication_receipt"
+            ],
+            "type": "string"
           },
           "ok": {
             "type": "boolean"
           },
+          "preview_digest": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
           "schema_version": {
             "type": "integer"
-          },
-          "scope": {
-            "additionalProperties": true,
-            "properties": {
-              "publication_state": {
-                "type": "string"
-              },
-              "unrelated_workspace_dirty": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "publication_state",
-              "unrelated_workspace_dirty"
-            ],
-            "type": "object"
           },
           "status": {
             "type": "string"
@@ -6179,15 +6527,218 @@
         },
         "required": [
           "schema_version",
+          "kind",
           "status",
           "ok",
-          "git",
-          "scope"
+          "run_id",
+          "authorization_mode"
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:1758b3ff246439cb09d5d717cbe40a97e55d529dbddbf4f73493bb5e5bca2fe0",
-      "title": "Publication Status"
+      "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e",
+      "title": "Apply Daily Integration Publication"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Validate one linked clean kb.sync receipt, managed-calendar closeout, graph, complete dirty tree, and standing Daily Integration Git policy without mutation.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "calendar_receipt": {
+            "additionalProperties": false,
+            "properties": {
+              "counts": {
+                "additionalProperties": false,
+                "properties": {
+                  "applied": {
+                    "description": "Managed-calendar applied count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "failed": {
+                    "description": "Managed-calendar failed count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "held": {
+                    "description": "Managed-calendar held count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kept": {
+                    "description": "Managed-calendar kept count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "pending": {
+                    "description": "Managed-calendar pending count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "planned": {
+                    "description": "Managed-calendar planned count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "read_back": {
+                    "description": "Managed-calendar read_back count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "recorded": {
+                    "description": "Managed-calendar recorded count.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "planned",
+                  "applied",
+                  "kept",
+                  "read_back",
+                  "recorded",
+                  "held",
+                  "failed",
+                  "pending"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "managed_calendar_closeout",
+                "type": "string"
+              },
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "receipt_digest": {
+                "description": "Digest of the receipt excluding this field.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "run_id": {
+                "description": "Linked kb.sync run id.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "schema_version": {
+                "const": 1,
+                "type": "integer"
+              },
+              "source_reads": {
+                "additionalProperties": false,
+                "properties": {
+                  "calendar_complete": {
+                    "const": true,
+                    "type": "boolean"
+                  },
+                  "tripit_complete": {
+                    "const": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "tripit_complete",
+                  "calendar_complete"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "Managed-calendar terminal status.",
+                "enum": [
+                  "completed",
+                  "not_required"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "kind",
+              "run_id",
+              "status",
+              "ok",
+              "source_reads",
+              "counts",
+              "receipt_digest"
+            ],
+            "type": "object"
+          },
+          "run_id": {
+            "description": "Completed kb.sync run id.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "calendar_receipt"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:8958330017ff9db5b3ec67f1757bedde1a555b2e5b35167f4d067096799fdfb2",
+      "name": "publication.daily_integration_preview",
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "authorization_mode": {
+            "const": "standing_daily_integration_policy",
+            "type": "string"
+          },
+          "human_confirmation_required": {
+            "type": "boolean"
+          },
+          "idempotent_replay": {
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "Daily Integration publication packet kind.",
+            "enum": [
+              "daily_integration_publication_preview",
+              "daily_integration_publication_receipt"
+            ],
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "preview_digest": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "kind",
+          "status",
+          "ok",
+          "run_id",
+          "authorization_mode"
+        ],
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e",
+      "title": "Preview Daily Integration Publication"
     },
     {
       "annotations": {
@@ -6289,124 +6840,6 @@
       },
       "output_schema_digest": "sha256:87a4a453eddc8a2d5c119cf1064dcee1b80c2d879f5f451e7dc7e759db733d98",
       "title": "Search KB"
-    },
-    {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "kbSurface": {
-          "replacement": "",
-          "surface": "primary",
-          "visibleIn": {
-            "compat": true,
-            "journey_first_strict": true
-          }
-        },
-        "readOnlyHint": true
-      },
-      "description": "Report resource-owned readiness for providers, plugins, sources, durable state, and workflows.",
-      "input_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "description": "Readiness probe depth. Cheap avoids expensive live checks.",
-            "enum": [
-              "cheap",
-              "deep"
-            ],
-            "type": "string"
-          }
-        },
-        "type": "object"
-      },
-      "input_schema_digest": "sha256:0f38b526f450f7e0e334a18cc4406190729882b96cbc532ba4971adaead37cad",
-      "name": "workspace.readiness",
-      "output_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "graph_validation": {
-            "additionalProperties": true,
-            "properties": {
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "status"
-            ],
-            "type": "object"
-          },
-          "mode": {
-            "type": "string"
-          },
-          "ready": {
-            "type": "boolean"
-          },
-          "resources": {
-            "items": {
-              "additionalProperties": true,
-              "properties": {
-                "kind": {
-                  "type": "string"
-                },
-                "owner": {
-                  "type": "string"
-                },
-                "resource_id": {
-                  "type": "string"
-                },
-                "status": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "resource_id",
-                "owner",
-                "kind",
-                "status"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
-          "runtime_readiness": {
-            "additionalProperties": true,
-            "properties": {
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "status"
-            ],
-            "type": "object"
-          },
-          "source_coverage": {
-            "additionalProperties": true,
-            "properties": {
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "status"
-            ],
-            "type": "object"
-          },
-          "status": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "status",
-          "ready",
-          "mode",
-          "resources"
-        ],
-        "type": "object"
-      },
-      "output_schema_digest": "sha256:e1baa6671cbf5c71df97d16cad3b73fdfba2af3b188c0b56a92cc95f021048ef",
-      "title": "Workspace Readiness"
     }
   ]
 }

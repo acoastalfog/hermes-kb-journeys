@@ -48,8 +48,8 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.45.23 at revision
-`1b8032a4db5bde33090a7c363e5c6e0d079acc8c`, which owns the exact
+The committed export is pinned to kb-engine 0.45.29 at revision
+`01dec6553a664e87b072d377d35ef8f030395261`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -99,14 +99,22 @@ restore the retired overloaded `control.*` wrappers.
 The old `/kbsync`, `update_kb`, and `/kb run sync` entrypoints remain hard
 breaks with migration guidance. Missing canonical descriptors fail closed.
 
-Version 0.8.3 adds one narrow transport tool for complete source packets that
+Version 0.9.0 keeps one narrow transport tool for complete source packets that
 exceed model-context limits. `kb-sync-gather` already writes the exact packet
-to a private mode-0600 spool; `kb_sync_resume_packet` verifies that file is
+to a private mode-0600 spool; `kb_integration_transport(operation=resume_packet)` verifies that file is
 inside the Hermes state spool, validates its owner, mode, schema, and
 content-bound filename, and forwards it through the existing generated
 `kb.sync.resume` MCP tool. It returns only compact run state. This is not a
 source executor or second sync path: the connector still gathers, kb-engine
 still validates and owns the run, and Hermes Agent remains exact upstream.
+
+The same single tool's `daily_integration_closeout` operation composes the
+completed-run readback, the protected local `calendar.live` socket, and the two
+generated clean-publication calls. The plugin never receives a Graph credential
+or connector path and never claims per-run human confirmation. It returns only
+compact stage truth and a six-line morning brief; full calendar and publication
+receipts remain bound to the engine run. With eleven generated engine tools plus
+this one local transport, Hermes stays at the twelve-tool cap.
 
 ## Local Test
 

@@ -286,12 +286,16 @@ def test_sync_packet_transport_forwards_exact_private_spool_without_rendering_bo
     packet_path, packet = _spooled_source_packet(state_root)
     ctx = FakePacketTransportContext()
 
-    plugin._register_sync_packet_transport(ctx)
+    plugin._register_integration_transport(ctx)
 
-    registered = ctx.registered_tools["kb_sync_resume_packet"]
+    registered = ctx.registered_tools["kb_integration_transport"]
     result = json.loads(
         registered["handler"](
-            {"run_id": "hdf-kb_sync-test", "packet_path": str(packet_path)}
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_path": str(packet_path),
+            }
         )
     )
 
@@ -321,17 +325,117 @@ def test_sync_packet_transport_rejects_unsafe_spool(tmp_path, monkeypatch, unsaf
     else:
         packet_path, _ = _spooled_source_packet(state_root, mode=0o644)
     ctx = FakePacketTransportContext()
-    plugin._register_sync_packet_transport(ctx)
+    plugin._register_integration_transport(ctx)
 
     result = json.loads(
-        ctx.registered_tools["kb_sync_resume_packet"]["handler"](
-            {"run_id": "hdf-kb_sync-test", "packet_path": str(packet_path)}
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_path": str(packet_path),
+            }
         )
     )
 
     assert result["accepted"] is False
     assert ctx.calls == []
     assert "private evidence body" not in json.dumps(result)
+
+
+def test_daily_integration_closeout_composes_calendar_publication_and_brief(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-daily"
+    closeout = {
+        "schema_version": 1,
+        "kind": "managed_calendar_closeout",
+        "run_id": run_id,
+        "status": "completed",
+        "ok": True,
+        "source_reads": {"tripit_complete": True, "calendar_complete": True},
+        "counts": {
+            "planned": 2, "applied": 1, "kept": 1, "read_back": 1,
+            "recorded": 1, "held": 0, "failed": 0, "pending": 0,
+        },
+        "receipt_digest": "sha256:" + "c" * 64,
+    }
+    monkeypatch.setattr(
+        plugin,
+        "_calendar_live_request",
+        lambda envelope, mode="execute": {"ok": True, "status": "completed", "closeout": closeout},
+    )
+    sync = {
+        "kind": "kb_sync_receipt",
+        "status": "completed",
+        "run_id": run_id,
+        "source_currency": {
+            "sources": [
+                {"source_id": source_id, "state": "current"}
+                for source_id in ("mail", "calendar", "slack", "meetings", "tripit")
+            ]
+        },
+        "semantic_accounting": {"integrated_target_count": 3},
+        "lifecycle": {"status": "fixed_point"},
+    }
+    preview = {
+        "ok": True,
+        "status": "ready",
+        "preview_digest": "sha256:" + "d" * 64,
+    }
+    publication = {
+        "ok": True,
+        "status": "published",
+        "readback": {"ok": True, "clean": True, "ahead": 0},
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {"result": sync}
+    responses = iter((sync, preview, publication))
+
+    def dispatch(tool_name, args):
+        ctx.calls.append((tool_name, args))
+        return json.dumps({"result": next(responses)})
+
+    ctx.dispatch_tool = dispatch
+    plugin._register_integration_transport(ctx)
+    envelope = {
+        "schema_version": 1,
+        "kind": "managed_calendar_plan",
+        "policy_scope": "kb_managed_event_travel_v1",
+        "run_id": run_id,
+        "entity_path": "events/demo",
+        "source_reads": {},
+        "artifacts": [],
+    }
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": run_id,
+                "session_id": "hermes-cron-daily",
+                "calendar_envelope": envelope,
+            }
+        )
+    )
+
+    assert result["accepted"] is True and result["complete"] is True
+    assert result["stages"] == {
+        "integration": "completed",
+        "calendar": "completed",
+        "publication": "published",
+    }
+    assert "Evidence: 5/5 sources current." in result["morning_brief"]
+    assert "KB: 3 targets integrated" in result["morning_brief"]
+    assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 12
+    assert [name for name, _args in ctx.calls] == [
+        "mcp_kb_engine_prod_kb_sync_status",
+        "mcp_kb_engine_prod_publication_daily_integration_preview",
+        "mcp_kb_engine_prod_publication_daily_integration_apply",
+    ]
+    apply_args = ctx.calls[-1][1]
+    assert apply_args["calendar_receipt"] == closeout
+    assert apply_args["session_id"] == "hermes-cron-daily"
 
 
 def test_user_plugin_loads_from_standard_plugin_directory(tmp_path, monkeypatch):
@@ -1456,11 +1560,11 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.23"
-    assert source["engine_source_revision"] == "1b8032a4db5bde33090a7c363e5c6e0d079acc8c"
+    assert source["engine_version"] == "0.45.29"
+    assert source["engine_source_revision"] == "01dec6553a664e87b072d377d35ef8f030395261"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
-    assert len(source["tools"]) == 10
+    assert len(source["tools"]) == 11
     serialized = json.dumps(source, sort_keys=True)
     assert "kb_sync.preview" not in serialized
     assert "kb_sync.confirmed" not in serialized
@@ -1468,12 +1572,16 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert {"kb.sync.prepare", "kb.sync.status", "kb.sync.resume"} <= {
         tool["name"] for tool in source["tools"]
     }
+    assert {
+        "publication.daily_integration_preview",
+        "publication.daily_integration_apply",
+    } <= {tool["name"] for tool in source["tools"]}
     assert next(
         row for row in source["journeys"] if row["journey_id"] == "kb_sync"
     )["confirmation_required"] is False
     assert plugin._DESCRIPTOR_BUNDLE == source
     assert plugin._DESCRIPTOR_ERROR == ""
-    assert len(plugin._descriptor_allowlist()) == 10
+    assert len(plugin._descriptor_allowlist()) == 11
 
 
 def test_descriptor_validation_rejects_arbitrary_untyped_leaf(tmp_path, monkeypatch):
@@ -2078,7 +2186,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.8.3"
+    assert manifest["version"] == "0.9.0"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -2178,7 +2286,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "1b8032a4db5bde33090a7c363e5c6e0d079acc8c"
+        == "01dec6553a664e87b072d377d35ef8f030395261"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -2460,7 +2568,7 @@ def test_m3_publish_is_a_read_only_trusted_operator_handoff(tmp_path, monkeypatc
     card = plugin._card_for_command(ctx, "kbpublish")
     assert "trusted operator" in card["text"].lower()
     assert "No publication was attempted." in card["text"]
-    assert [name for name, _args in ctx.calls] == ["mcp_kb_engine_prod_publication_status"]
+    assert ctx.calls == []
     _assert_compact_user_card(card)
 
 
@@ -2727,9 +2835,11 @@ def test_m3_publication_handoff_renders_consequence_state(
         {"mcp_kb_engine_prod_publication_status": [{"result": payload}]}
     )
     card = plugin._render_publish_command(ctx, "kb_engine_prod", "")
-    assert card["status"] == expected_status
-    assert expected_text in card["text"]
+    assert card["status"] == "daily_integration_owned"
+    assert "Clean Daily Integration runs publish automatically" in card["text"]
+    assert "trusted operator" in card["text"]
     assert "No publication was attempted." in card["text"]
+    assert ctx.calls == []
     _assert_compact_user_card(card)
 
 
