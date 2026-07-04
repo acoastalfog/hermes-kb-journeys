@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import socket
 import stat
 import threading
 import time
@@ -83,7 +84,9 @@ SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
 SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
-SYNC_PACKET_TRANSPORT_TOOL = "kb_sync_resume_packet"
+INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
+CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
+CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
 SYNC_PACKET_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
@@ -6080,6 +6083,17 @@ def _format_changed_paths(paths: list[str], *, limit: int = 10) -> list[str]:
 def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
     """Report publication truth and hand off the consequence boundary."""
     del args
+    if _descriptor("publication.status") is None:
+        return {
+            "title": "Publication",
+            "status": "daily_integration_owned",
+            "text": (
+                "*Publication*\n"
+                "Clean Daily Integration runs publish automatically after calendar and Git readback.\n"
+                "Ad hoc publication remains a trusted operator action. No publication was attempted."
+            ),
+            "actions": [],
+        }
     _tool, data, errors = _dispatch_first(ctx, target, [("publication.status", {})])
     if not isinstance(data, dict):
         return _render_error("Publication", target, errors)
@@ -7190,17 +7204,212 @@ def _compact_sync_packet_result(payload: Any, *, run_id: str) -> dict[str, Any]:
     }
 
 
-def _register_sync_packet_transport(ctx: Any) -> None:
+def _managed_plan_digest(envelope: dict[str, Any]) -> str:
+    material = {key: value for key, value in envelope.items() if key != "plan_digest"}
+    canonical = json.dumps(
+        material,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _calendar_live_request(envelope: dict[str, Any], *, mode: str = "execute") -> dict[str, Any]:
+    path = os.getenv("HERMES_CALENDAR_LIVE_SOCKET", CALENDAR_LIVE_SOCKET).strip() or CALENDAR_LIVE_SOCKET
+    request = {
+        "schema_version": 1,
+        "kind": "calendar_live_managed_request",
+        "mode": mode,
+        "envelope": envelope,
+    }
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(240)
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        client.connect(path)
+        client.sendall(json.dumps(request, sort_keys=True).encode("utf-8"))
+        client.shutdown(socket.SHUT_WR)
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > CALENDAR_LIVE_MAX_RESPONSE_BYTES:
+                raise ValueError("calendar.live response exceeded the bounded size")
+            chunks.append(chunk)
+    finally:
+        client.close()
+    try:
+        payload = json.loads(b"".join(chunks))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("calendar.live returned an invalid response") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("calendar.live returned a non-object response")
+    return payload
+
+
+def _daily_integration_morning_brief(
+    sync: dict[str, Any],
+    calendar: dict[str, Any],
+    publication: dict[str, Any],
+) -> str:
+    source_currency = sync.get("source_currency") if isinstance(sync.get("source_currency"), dict) else {}
+    sources = source_currency.get("sources") if isinstance(source_currency.get("sources"), list) else []
+    source_current = sum(
+        1 for row in sources if isinstance(row, dict) and row.get("state") == "current"
+    )
+    accounting = sync.get("semantic_accounting") if isinstance(sync.get("semantic_accounting"), dict) else {}
+    lifecycle = sync.get("lifecycle") if isinstance(sync.get("lifecycle"), dict) else {}
+    counts = calendar.get("counts") if isinstance(calendar.get("counts"), dict) else {}
+    targets = int(accounting.get("integrated_target_count") or 0)
+    changed = int(counts.get("applied") or 0)
+    kept = int(counts.get("kept") or 0)
+    git_status = str(publication.get("status") or "unknown")
+    return "\n".join(
+        (
+            "Daily Integration complete",
+            f"Evidence: {source_current}/5 sources current.",
+            f"KB: {targets} targets integrated; lifecycle {lifecycle.get('status') or 'verified'}.",
+            f"Calendar: {changed} applied, {kept} already current.",
+            f"Git: {git_status} with clean readback.",
+            "Next: open /kb review for the current decision queue.",
+        )
+    )
+
+
+def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) -> dict[str, Any]:
+    target = _mcp_target()
+    _tool, sync, errors = _dispatch_first(
+        ctx, target, [("kb.sync.status", {"run_id": run_id})]
+    )
+    if not isinstance(sync, dict) or sync.get("status") != "completed":
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "integration_readback",
+            "error": _clip("; ".join(errors), 240) or "kb.sync run is not complete",
+        }
+    envelope = args.get("calendar_envelope")
+    if not isinstance(envelope, dict) or str(envelope.get("run_id") or "") != run_id:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "calendar_plan",
+            "error": "calendar envelope must bind the exact completed run",
+        }
+    envelope = dict(envelope)
+    envelope["plan_digest"] = _managed_plan_digest(envelope)
+    try:
+        calendar_result = _calendar_live_request(envelope, mode="execute")
+    except (OSError, ValueError) as exc:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "calendar_execution",
+            "error": _clip(str(exc), 240),
+        }
+    closeout = calendar_result.get("closeout") if isinstance(calendar_result, dict) else None
+    if calendar_result.get("ok") is not True or not isinstance(closeout, dict) or closeout.get("ok") is not True:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "calendar_execution",
+            "error": _clip(calendar_result.get("reason"), 240) or "managed calendar execution failed",
+        }
+    _tool, preview, errors = _dispatch_first(
+        ctx,
+        target,
+        [("publication.daily_integration_preview", {"run_id": run_id, "calendar_receipt": closeout})],
+    )
+    if not isinstance(preview, dict) or preview.get("ok") is not True:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_preview",
+            "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+            "error": _clip("; ".join(errors), 240) or "Git publication is held",
+        }
+    preview_digest = str(preview.get("preview_digest") or "")
+    if not DESCRIPTOR_DIGEST_RE.fullmatch(preview_digest):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_preview",
+            "error": "publication preview did not return an exact digest",
+        }
+    _tool, publication, errors = _dispatch_first(
+        ctx,
+        target,
+        [(
+            "publication.daily_integration_apply",
+            {
+                "run_id": run_id,
+                "calendar_receipt": closeout,
+                "preview_digest": preview_digest,
+                "actor": "hermes-relay",
+                "source": "kb_journeys.daily_integration",
+                "session_id": str(args.get("session_id") or ""),
+            },
+        )],
+    )
+    if not isinstance(publication, dict) or publication.get("ok") is not True \
+       or publication.get("status") not in {"published", "noop"}:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_apply",
+            "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+            "error": _clip("; ".join(errors), 240) or "Git publication did not pass readback",
+        }
+    return {
+        "accepted": True,
+        "complete": True,
+        "run_id": run_id,
+        "status": "completed",
+        "stages": {
+            "integration": "completed",
+            "calendar": str(closeout.get("status") or "completed"),
+            "publication": str(publication.get("status") or "published"),
+        },
+        "source_currency": sync.get("source_currency"),
+        "semantic_accounting": sync.get("semantic_accounting"),
+        "lifecycle": sync.get("lifecycle"),
+        "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+        "publication": {
+            "status": publication.get("status"),
+            "readback": publication.get("readback"),
+        },
+        "morning_brief": _daily_integration_morning_brief(sync, closeout, publication),
+    }
+
+
+def _register_integration_transport(ctx: Any) -> None:
+    if len(_descriptor_allowlist()) > 11:
+        logger.error("kb_journeys: integration transport would exceed the 12-tool cap")
+        return
     schema = {
-        "name": SYNC_PACKET_TRANSPORT_TOOL,
+        "name": INTEGRATION_TRANSPORT_TOOL,
         "description": (
-            "Forward one exact private packet spooled by kb-sync-gather to the "
-            "current kb.sync.resume action without placing source bodies in model "
-            "context. Use only the exact path printed by kb-sync-gather."
+            "Perform one bounded Daily Integration transport action: forward an exact "
+            "private source packet, or close a completed run through the protected "
+            "managed-calendar and clean Git publication contracts."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["resume_packet", "daily_integration_closeout"],
+                },
                 "run_id": {
                     "type": "string",
                     "description": "The exact active kb.sync run id.",
@@ -7212,8 +7421,26 @@ def _register_sync_packet_transport(ctx: Any) -> None:
                         "XDG_STATE_HOME/kb-sync/prepare spool."
                     ),
                 },
+                "calendar_envelope": {
+                    "type": "object",
+                    "description": "Exact kb_managed_event_travel_v1 envelope for this run.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Stable Hermes execution session id for publication provenance.",
+                },
             },
-            "required": ["run_id", "packet_path"],
+            "required": ["operation", "run_id"],
+            "oneOf": [
+                {
+                    "properties": {"operation": {"const": "resume_packet"}},
+                    "required": ["packet_path"],
+                },
+                {
+                    "properties": {"operation": {"const": "daily_integration_closeout"}},
+                    "required": ["calendar_envelope", "session_id"],
+                },
+            ],
             "additionalProperties": False,
         },
     }
@@ -7223,6 +7450,18 @@ def _register_sync_packet_transport(ctx: Any) -> None:
         if not SYNC_PACKET_RUN_ID_RE.fullmatch(run_id):
             return json.dumps(
                 {"accepted": False, "error": "run_id is invalid"},
+                separators=(",", ":"),
+            )
+        operation = str(args.get("operation") or "").strip()
+        if operation == "daily_integration_closeout":
+            return json.dumps(
+                _daily_integration_closeout(ctx, args, run_id=run_id),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        if operation != "resume_packet":
+            return json.dumps(
+                {"accepted": False, "run_id": run_id, "error": "operation is invalid"},
                 separators=(",", ":"),
             )
         try:
@@ -7253,12 +7492,12 @@ def _register_sync_packet_transport(ctx: Any) -> None:
         )
 
     ctx.register_tool(
-        name=SYNC_PACKET_TRANSPORT_TOOL,
+        name=INTEGRATION_TRANSPORT_TOOL,
         toolset="kb_journeys",
         schema=schema,
         handler=_handler,
         description=(
-            "Private local-spool transport for complete kb.sync source packets."
+            "Bounded source-packet and Daily Integration closeout transport."
         ),
         emoji="📦",
     )
@@ -8836,7 +9075,7 @@ def register(ctx: Any) -> None:
             )
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
-    _register_sync_packet_transport(ctx)
+    _register_integration_transport(ctx)
     _activate_probe_telemetry(ctx)
     ctx.register_hook("transform_tool_result", _compact_attention_tool_result)
     ctx.register_hook("pre_gateway_dispatch", build_pre_gateway_dispatch_hook(ctx))
