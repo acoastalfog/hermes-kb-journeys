@@ -125,6 +125,14 @@ prefix until the serialized result fits below the upstream persistence bound.
 The durable semantic frontier, judgment, and accepted response remain owned by
 kb-engine and the Hermes harness.
 
+Version 0.9.2 keeps an individually oversized target dossier fail-closed but
+usable. The first bounded response contains the exact target, object and dossier
+digests, full evidence-ref set, current object context, and a deterministic
+prefix of the exact evidence. When `has_more` is true, the harness repeats the
+same one-target request with the returned `next_evidence_offset` until every
+evidence item has been read. The plugin holds no semantic state and never
+summarizes or drops source evidence.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
