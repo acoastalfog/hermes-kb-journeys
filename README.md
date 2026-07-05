@@ -141,6 +141,13 @@ harness repeats the same one-evidence request with the returned
 `next_text_offset` until the full body has been read. Review tokens, evidence
 identity, revision metadata, and all non-duplicate fields remain on every page.
 
+Version 0.9.4 reuses that exact text-page contract when one evidence row inside
+a target dossier is itself oversized. The harness keeps the same target and
+`target_evidence_offset`, follows `evidence_text_page.next_text_offset` until
+that body is complete, then proceeds to the next evidence row. Current-object
+context, target and dossier digests, the full evidence-ref set, and review token
+remain bound on every page; the plugin still holds no semantic state.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

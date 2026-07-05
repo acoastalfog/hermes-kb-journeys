@@ -7261,6 +7261,8 @@ def _compact_semantic_status_result(
             value = payload[field]
             if field == "selected_evidence":
                 value = _normalize_selected_evidence_for_transport(value)
+            elif field == "target_dossiers":
+                value = _normalize_target_dossiers_for_transport(value)
             result[field] = value
     return result
 
@@ -7282,6 +7284,34 @@ def _normalize_selected_evidence_for_transport(payload: Any) -> Any:
         if isinstance(semantic_text, str) and transcript == semantic_text:
             item.pop("transcript", None)
             omitted += 1
+    if omitted:
+        normalized["transport_normalization"] = {
+            "duplicate_transcript_fields_omitted": omitted,
+        }
+    return normalized
+
+
+def _normalize_target_dossiers_for_transport(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    normalized = copy.deepcopy(payload)
+    dossiers = normalized.get("items")
+    if not isinstance(dossiers, list):
+        return normalized
+    omitted = 0
+    for dossier in dossiers:
+        evidence = dossier.get("evidence") if isinstance(dossier, dict) else None
+        if not isinstance(evidence, list):
+            continue
+        for row in evidence:
+            item = row.get("item") if isinstance(row, dict) else None
+            if not isinstance(item, dict):
+                continue
+            semantic_text = item.get("semantic_text")
+            transcript = item.get("transcript")
+            if isinstance(semantic_text, str) and transcript == semantic_text:
+                item.pop("transcript", None)
+                omitted += 1
     if omitted:
         normalized["transport_normalization"] = {
             "duplicate_transcript_fields_omitted": omitted,
@@ -7328,12 +7358,35 @@ def _semantic_batch_transport(
         }
     raw_target_evidence_offset = args.get("target_evidence_offset")
     raw_evidence_text_offset = args.get("evidence_text_offset")
-    if raw_target_evidence_offset is not None and raw_evidence_text_offset is not None:
+    raw_target_evidence_text_offset = args.get("target_evidence_text_offset")
+    if raw_evidence_text_offset is not None and (
+        raw_target_evidence_offset is not None
+        or raw_target_evidence_text_offset is not None
+    ):
         return {
             "accepted": False,
             "run_id": run_id,
             "error": (
-                "evidence_text_offset and target_evidence_offset are mutually exclusive"
+                "evidence_text_offset and target evidence offsets are mutually exclusive"
+            ),
+        }
+    if raw_target_evidence_text_offset is not None and (
+        selector != "target_refs"
+        or len(selected) != 1
+        or raw_target_evidence_offset is None
+        or isinstance(raw_target_evidence_offset, bool)
+        or not isinstance(raw_target_evidence_offset, int)
+        or raw_target_evidence_offset < 0
+        or isinstance(raw_target_evidence_text_offset, bool)
+        or not isinstance(raw_target_evidence_text_offset, int)
+        or raw_target_evidence_text_offset < 0
+    ):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": (
+                "target_evidence_text_offset requires exactly one target_ref, "
+                "target_evidence_offset, and a non-negative integer"
             ),
         }
     if raw_evidence_text_offset is not None and (
@@ -7368,6 +7421,11 @@ def _semantic_batch_transport(
         }
     target_evidence_offset = int(raw_target_evidence_offset or 0)
     evidence_text_offset = int(raw_evidence_text_offset or 0)
+    target_evidence_text_offset = (
+        int(raw_target_evidence_text_offset)
+        if raw_target_evidence_text_offset is not None
+        else None
+    )
     requested_count = len(selected)
     while selected:
         _tool, payload, errors = _dispatch_first(
@@ -7404,12 +7462,15 @@ def _semantic_batch_transport(
             separators=(",", ":"),
         ).encode("utf-8")
         if selector == "target_refs" and len(selected) == 1 and (
-            target_evidence_offset or len(encoded) > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES
+            raw_target_evidence_offset is not None
+            or raw_target_evidence_text_offset is not None
+            or len(encoded) > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES
         ):
             return _page_target_dossier_result(
                 result,
                 run_id=run_id,
                 evidence_offset=target_evidence_offset,
+                evidence_text_offset=target_evidence_text_offset,
             )
         if selector == "evidence_refs" and len(selected) == 1 and (
             raw_evidence_text_offset is not None
@@ -7500,6 +7561,7 @@ def _page_target_dossier_result(
     *,
     run_id: str,
     evidence_offset: int,
+    evidence_text_offset: int | None = None,
 ) -> dict[str, Any]:
     dossiers = result.get("target_dossiers")
     items = dossiers.get("items") if isinstance(dossiers, dict) else None
@@ -7516,6 +7578,13 @@ def _page_target_dossier_result(
             "run_id": run_id,
             "error": "target_evidence_offset is outside the exact target dossier",
         }
+    if evidence_text_offset is not None:
+        return _page_target_dossier_evidence_text_result(
+            result,
+            run_id=run_id,
+            evidence_offset=evidence_offset,
+            text_offset=evidence_text_offset,
+        )
     evidence_count = len(evidence) - evidence_offset
     while evidence_count:
         paged = copy.deepcopy(result)
@@ -7539,15 +7608,92 @@ def _page_target_dossier_result(
         if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
             return paged
         if evidence_count == 1:
+            return _page_target_dossier_evidence_text_result(
+                result,
+                run_id=run_id,
+                evidence_offset=evidence_offset,
+                text_offset=0,
+            )
+        evidence_count = max(1, evidence_count // 2)
+    raise AssertionError("target dossier page unexpectedly became empty")
+
+
+def _page_target_dossier_evidence_text_result(
+    result: dict[str, Any],
+    *,
+    run_id: str,
+    evidence_offset: int,
+    text_offset: int,
+) -> dict[str, Any]:
+    dossiers = result.get("target_dossiers")
+    items = dossiers.get("items") if isinstance(dossiers, dict) else None
+    dossier = items[0] if isinstance(items, list) and len(items) == 1 else None
+    evidence = dossier.get("evidence") if isinstance(dossier, dict) else None
+    row = (
+        evidence[evidence_offset]
+        if isinstance(evidence, list) and evidence_offset < len(evidence)
+        else None
+    )
+    item = row.get("item") if isinstance(row, dict) else None
+    semantic_text = item.get("semantic_text") if isinstance(item, dict) else None
+    if not isinstance(semantic_text, str) or text_offset >= len(semantic_text):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": (
+                "target_evidence_text_offset is outside the exact target evidence body"
+            ),
+        }
+    text_char_count = len(semantic_text) - text_offset
+    while text_char_count:
+        paged = copy.deepcopy(result)
+        paged_dossiers = paged["target_dossiers"]
+        paged_dossier = paged_dossiers["items"][0]
+        paged_row = copy.deepcopy(evidence[evidence_offset])
+        page_end = text_offset + text_char_count
+        paged_row["item"]["semantic_text"] = semantic_text[text_offset:page_end]
+        paged_dossier["evidence"] = [paged_row]
+        text_has_more = page_end < len(semantic_text)
+        evidence_has_more = evidence_offset + 1 < len(evidence)
+        has_more = text_has_more or evidence_has_more
+        paged_dossiers["page"] = {
+            "evidence_offset": evidence_offset,
+            "evidence_count": 1,
+            "evidence_total_count": len(evidence),
+            "has_more": has_more,
+            "next_evidence_offset": (
+                evidence_offset
+                if text_has_more
+                else evidence_offset + 1
+                if evidence_has_more
+                else None
+            ),
+            "evidence_text_page": {
+                "field": "semantic_text",
+                "text_offset": text_offset,
+                "text_char_count": text_char_count,
+                "text_total_chars": len(semantic_text),
+                "has_more": text_has_more,
+                "next_text_offset": page_end if text_has_more else None,
+            },
+        }
+        encoded = json.dumps(
+            paged,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+            return paged
+        if text_char_count == 1:
             return {
                 "accepted": False,
                 "run_id": run_id,
                 "requested_count": int(result.get("requested_count") or 1),
                 "selected_count": 1,
-                "error": "one target evidence item exceeds the bounded transport result",
+                "error": "one target evidence text page exceeds the bounded transport result",
             }
-        evidence_count = max(1, evidence_count // 2)
-    raise AssertionError("target dossier page unexpectedly became empty")
+        text_char_count = max(1, text_char_count // 2)
+    raise AssertionError("target evidence text page unexpectedly became empty")
 
 
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:
@@ -7810,6 +7956,15 @@ def _register_integration_transport(ctx: Any) -> None:
                     "description": (
                         "For one paged evidence item only, continue at the exact "
                         "next_text_offset returned by the previous page."
+                    ),
+                },
+                "target_evidence_text_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "For one oversized evidence body inside one target dossier, "
+                        "continue at the exact next_text_offset while retaining the "
+                        "same target_evidence_offset."
                     ),
                 },
             },
