@@ -116,6 +116,15 @@ compact stage truth and a six-line morning brief; full calendar and publication
 receipts remain bound to the engine run. With eleven generated engine tools plus
 this one local transport, Hermes stays at the twelve-tool cap.
 
+Version 0.9.1 adds `semantic_batch` to that same transport tool. It forwards
+one exact evidence or target selection through `kb.sync.status`, preserves the
+review token, source content, current candidate state, target dossiers, and
+response schema, and removes only redundant run-wide status fields. Requests
+may contain up to ten refs; the transport deterministically halves an oversized
+prefix until the serialized result fits below the upstream persistence bound.
+The durable semantic frontier, judgment, and accepted response remain owned by
+kb-engine and the Hermes harness.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
