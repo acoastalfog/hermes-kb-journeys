@@ -342,6 +342,203 @@ def test_sync_packet_transport_rejects_unsafe_spool(tmp_path, monkeypatch, unsaf
     assert "private evidence body" not in json.dumps(result)
 
 
+def test_semantic_batch_transport_returns_exact_evidence_without_mcp_envelope_bloat(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-daily"
+    evidence_refs = ["sha256:" + character * 64 for character in ("a", "b")]
+    status = {
+        "schema_version": 1,
+        "kind": "kb_sync_run",
+        "status": "awaiting_action",
+        "run_id": run_id,
+        "source_currency": {"private": "irrelevant-to-review"},
+        "publication": {"status": "not_attempted"},
+        "timing": {"started_at": "2026-07-05T00:00:00Z"},
+        "next_action": {
+            "kind": "exercise_judgment",
+            "action_index": 12,
+            "semantic_stage": "evidence_attribution",
+            "instruction": "Attribute the selected evidence.",
+            "attribution_outcomes": ["integrate", "non_durable"],
+            "response_schema": {"type": "object"},
+            "evidence_sources": [{"source_id": "m365.email"}],
+            "semantic_accounting": {
+                "progress": {
+                    "stage": "evidence_attribution",
+                    "reviewed_ref_count": 10,
+                    "unreviewed_count": 20,
+                    "remaining_refs": ["sha256:" + "c" * 64],
+                    "remaining_refs_truncated": True,
+                    "digest": "sha256:" + "d" * 64,
+                }
+            },
+        },
+        "selected_evidence": {
+            "requested_count": 2,
+            "truncated": False,
+            "review_token": "sha256:" + "e" * 64,
+            "digest": "sha256:" + "f" * 64,
+            "items": [
+                {
+                    "evidence_ref": evidence_ref,
+                    "source_id": "m365.email",
+                    "item": {"semantic_text": f"evidence body {index}"},
+                }
+                for index, evidence_ref in enumerate(evidence_refs)
+            ],
+        },
+        "candidate_state": {
+            "requested_count": 2,
+            "truncated": False,
+            "digest": "sha256:" + "1" * 64,
+            "rows": [],
+        },
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {"result": status}
+
+    plugin._register_integration_transport(ctx)
+    registered = ctx.registered_tools["kb_integration_transport"]
+    result = json.loads(
+        registered["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "evidence_refs": evidence_refs,
+            }
+        )
+    )
+
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "evidence_refs": evidence_refs},
+        )
+    ]
+    assert result["accepted"] is True
+    assert result["selected_evidence"] == status["selected_evidence"]
+    assert result["candidate_state"] == status["candidate_state"]
+    assert result["next_action"]["response_schema"] == {"type": "object"}
+    assert "remaining_refs" not in result["next_action"]["semantic_accounting"]["progress"]
+    assert "source_currency" not in result
+    assert "publication" not in result
+    assert "timing" not in result
+    assert "evidence_sources" not in result["next_action"]
+    assert "semantic_batch" in registered["schema"]["parameters"]["properties"]["operation"]["enum"]
+
+
+def test_semantic_batch_transport_reduces_requested_prefix_until_result_is_bounded(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 1_500)
+    run_id = "hdf-kb_sync-daily"
+    evidence_refs = ["sha256:" + character * 64 for character in ("a", "b", "c", "d")]
+    ctx = FakePacketTransportContext()
+
+    def dispatch(tool_name, args):
+        ctx.calls.append((tool_name, args))
+        selected = args["evidence_refs"]
+        payload = {
+            "schema_version": 1,
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "action_index": 2,
+                "semantic_stage": "evidence_attribution",
+                "instruction": "Attribute.",
+                "response_schema": {"type": "object"},
+                "semantic_accounting": {"progress": {"unreviewed_count": 4}},
+            },
+            "selected_evidence": {
+                "requested_count": len(selected),
+                "truncated": False,
+                "review_token": "sha256:" + "e" * 64,
+                "items": [
+                    {"evidence_ref": ref, "item": {"semantic_text": "x" * 500}}
+                    for ref in selected
+                ],
+            },
+            "candidate_state": {"requested_count": len(selected), "rows": []},
+        }
+        return json.dumps({"result": payload})
+
+    ctx.dispatch_tool = dispatch
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "evidence_refs": evidence_refs,
+            }
+        )
+    )
+
+    assert [len(args["evidence_refs"]) for _tool, args in ctx.calls] == [4, 2, 1]
+    assert result["accepted"] is True
+    assert result["requested_count"] == 4
+    assert result["selected_count"] == 1
+    assert result["reduced"] is True
+    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1_500
+
+
+def test_semantic_batch_transport_returns_exact_target_dossiers(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-daily"
+    target_refs = ["accounts/acme", "projects/launch"]
+    dossiers = {
+        "requested_count": 2,
+        "truncated": False,
+        "review_token": "sha256:" + "a" * 64,
+        "items": [{"target_ref": target_ref} for target_ref in target_refs],
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "schema_version": 1,
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "action_index": 20,
+                "semantic_stage": "target_integration",
+                "instruction": "Synthesize one net result per target.",
+                "response_schema": {"type": "object"},
+                "semantic_accounting": {"progress": {"target_remaining_count": 2}},
+            },
+            "target_dossiers": dossiers,
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "target_refs": target_refs,
+            }
+        )
+    )
+
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "target_refs": target_refs},
+        )
+    ]
+    assert result["accepted"] is True
+    assert result["target_dossiers"] == dossiers
+    assert "selected_evidence" not in result
+
+
 def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     tmp_path, monkeypatch
 ):
@@ -2186,7 +2383,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.0"
+    assert manifest["version"] == "0.9.1"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 

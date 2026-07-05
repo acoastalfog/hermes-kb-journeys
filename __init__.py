@@ -88,6 +88,7 @@ INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
 CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
 CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
+INTEGRATION_TRANSPORT_MAX_RESULT_BYTES = 90 * 1024
 SYNC_PACKET_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
     "semantic_write_receipt",
@@ -7204,6 +7205,148 @@ def _compact_sync_packet_result(payload: Any, *, run_id: str) -> dict[str, Any]:
     }
 
 
+def _compact_semantic_status_result(
+    payload: Any,
+    *,
+    run_id: str,
+    requested_count: int,
+    selected_count: int,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "kb.sync.status returned a non-object response",
+        }
+    status = str(payload.get("status") or "")
+    if status in {"invalid_request", "not_found", "failed", "cancelled"}:
+        return {
+            "accepted": False,
+            "run_id": str(payload.get("run_id") or run_id),
+            "status": status,
+            "error": _clip(payload.get("reason"), 240) or "semantic status selection failed",
+        }
+    next_action = payload.get("next_action")
+    compact_action: dict[str, Any] = {}
+    if isinstance(next_action, dict):
+        for field in (
+            "kind",
+            "action_index",
+            "semantic_stage",
+            "instruction",
+            "response_schema",
+            "attribution_outcomes",
+            "allowed_operations",
+        ):
+            if field in next_action:
+                compact_action[field] = next_action[field]
+        accounting = next_action.get("semantic_accounting")
+        progress = accounting.get("progress") if isinstance(accounting, dict) else None
+        if isinstance(progress, dict):
+            compact_progress = dict(progress)
+            compact_progress.pop("remaining_refs", None)
+            compact_action["semantic_accounting"] = {"progress": compact_progress}
+    result: dict[str, Any] = {
+        "accepted": True,
+        "run_id": str(payload.get("run_id") or run_id),
+        "status": status,
+        "requested_count": requested_count,
+        "selected_count": selected_count,
+        "reduced": selected_count < requested_count,
+        "next_action": compact_action,
+    }
+    for field in ("selected_evidence", "candidate_state", "target_dossiers"):
+        if field in payload:
+            result[field] = payload[field]
+    return result
+
+
+def _semantic_batch_transport(
+    ctx: Any,
+    args: dict[str, Any],
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    evidence_refs = args.get("evidence_refs")
+    target_refs = args.get("target_refs")
+    if (evidence_refs is None) == (target_refs is None):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "semantic_batch requires exactly one selector",
+        }
+    selector = "evidence_refs" if evidence_refs is not None else "target_refs"
+    values = evidence_refs if evidence_refs is not None else target_refs
+    if not isinstance(values, list) or not 1 <= len(values) <= 10:
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": f"{selector} must contain one to ten exact refs",
+        }
+    selected = [str(value or "").strip() for value in values]
+    if len(set(selected)) != len(selected) or any(not value for value in selected):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": f"{selector} must contain unique non-empty refs",
+        }
+    if selector == "evidence_refs" and any(
+        not DESCRIPTOR_DIGEST_RE.fullmatch(value) for value in selected
+    ):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "evidence_refs must be exact sha256 refs",
+        }
+    requested_count = len(selected)
+    while selected:
+        _tool, payload, errors = _dispatch_first(
+            ctx,
+            _mcp_target(),
+            [("kb.sync.status", {"run_id": run_id, selector: selected})],
+        )
+        if payload is None:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "error": _clip("; ".join(errors), 240) or "kb.sync.status failed",
+            }
+        result = _compact_semantic_status_result(
+            payload,
+            run_id=run_id,
+            requested_count=requested_count,
+            selected_count=len(selected),
+        )
+        required_result = (
+            "selected_evidence" if selector == "evidence_refs" else "target_dossiers"
+        )
+        if result.get("accepted") is not True or not isinstance(
+            result.get(required_result), dict
+        ):
+            return {
+                **result,
+                "accepted": False,
+                "error": str(result.get("error") or f"{required_result} is unavailable"),
+            }
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+            return result
+        if len(selected) == 1:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "requested_count": requested_count,
+                "selected_count": 1,
+                "error": "one semantic review item exceeds the bounded transport result",
+            }
+        selected = selected[: max(1, len(selected) // 2)]
+    raise AssertionError("semantic batch selector unexpectedly became empty")
+
+
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:
     material = {key: value for key, value in envelope.items() if key != "plan_digest"}
     canonical = json.dumps(
@@ -7400,15 +7543,20 @@ def _register_integration_transport(ctx: Any) -> None:
         "name": INTEGRATION_TRANSPORT_TOOL,
         "description": (
             "Perform one bounded Daily Integration transport action: forward an exact "
-            "private source packet, or close a completed run through the protected "
-            "managed-calendar and clean Git publication contracts."
+            "private source packet, return one compact semantic review batch, or close "
+            "a completed run through the protected managed-calendar and clean Git "
+            "publication contracts."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["resume_packet", "daily_integration_closeout"],
+                    "enum": [
+                        "resume_packet",
+                        "semantic_batch",
+                        "daily_integration_closeout",
+                    ],
                 },
                 "run_id": {
                     "type": "string",
@@ -7429,6 +7577,22 @@ def _register_integration_transport(ctx: Any) -> None:
                     "type": "string",
                     "description": "Stable Hermes execution session id for publication provenance.",
                 },
+                "evidence_refs": {
+                    "type": "array",
+                    "description": "One to ten exact adequate evidence refs to inspect.",
+                    "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "uniqueItems": True,
+                },
+                "target_refs": {
+                    "type": "array",
+                    "description": "One to ten exact current KB targets to synthesize.",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "uniqueItems": True,
+                },
             },
             "required": ["operation", "run_id"],
             "oneOf": [
@@ -7439,6 +7603,19 @@ def _register_integration_transport(ctx: Any) -> None:
                 {
                     "properties": {"operation": {"const": "daily_integration_closeout"}},
                     "required": ["calendar_envelope", "session_id"],
+                },
+                {
+                    "properties": {"operation": {"const": "semantic_batch"}},
+                    "oneOf": [
+                        {
+                            "required": ["evidence_refs"],
+                            "not": {"required": ["target_refs"]},
+                        },
+                        {
+                            "required": ["target_refs"],
+                            "not": {"required": ["evidence_refs"]},
+                        },
+                    ],
                 },
             ],
             "additionalProperties": False,
@@ -7456,6 +7633,12 @@ def _register_integration_transport(ctx: Any) -> None:
         if operation == "daily_integration_closeout":
             return json.dumps(
                 _daily_integration_closeout(ctx, args, run_id=run_id),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        if operation == "semantic_batch":
+            return json.dumps(
+                _semantic_batch_transport(ctx, args, run_id=run_id),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -7497,7 +7680,7 @@ def _register_integration_transport(ctx: Any) -> None:
         schema=schema,
         handler=_handler,
         description=(
-            "Bounded source-packet and Daily Integration closeout transport."
+            "Bounded source-packet, semantic-review, and Daily Integration closeout transport."
         ),
         emoji="📦",
     )
