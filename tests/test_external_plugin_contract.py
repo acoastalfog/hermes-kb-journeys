@@ -822,6 +822,147 @@ def test_semantic_batch_transport_pages_one_oversized_target_without_dropping_ev
     ] * len(evidence)
 
 
+def test_semantic_batch_transport_pages_one_oversized_target_evidence_body_losslessly(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 2_500)
+    run_id = "hdf-kb_sync-daily"
+    target_ref = "projects/long-review"
+    semantic_text = "target evidence β 🧬 " * 700
+    evidence_ref = "sha256:" + "a" * 64
+    dossier = {
+        "target_ref": target_ref,
+        "object_digest": "sha256:" + "1" * 64,
+        "dossier_digest": "sha256:" + "2" * 64,
+        "evidence_refs": [evidence_ref],
+        "evidence": [
+            {
+                "evidence_ref": evidence_ref,
+                "revision": "meeting-revision-1",
+                "item": {
+                    "semantic_text": semantic_text,
+                    "transcript": semantic_text,
+                    "subject": "Long target review",
+                },
+            }
+        ],
+        "object_context": {"rendered": "current object context"},
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "target_integration",
+                "response_schema": {"type": "object"},
+            },
+            "target_dossiers": {
+                "requested_count": 1,
+                "review_token": "sha256:" + "b" * 64,
+                "digest": "sha256:" + "c" * 64,
+                "items": [dossier],
+            },
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    registered = ctx.registered_tools["kb_integration_transport"]
+    offset_schema = registered["schema"]["parameters"]["properties"][
+        "target_evidence_text_offset"
+    ]
+    assert offset_schema["minimum"] == 0
+    handler = registered["handler"]
+    text_offset = 0
+    seen = []
+    while True:
+        request = {
+            "operation": "semantic_batch",
+            "run_id": run_id,
+            "target_refs": [target_ref],
+        }
+        if text_offset:
+            request["target_evidence_offset"] = 0
+            request["target_evidence_text_offset"] = text_offset
+        result = json.loads(handler(request))
+        assert result["accepted"] is True
+        target_dossiers = result["target_dossiers"]
+        assert target_dossiers["review_token"] == "sha256:" + "b" * 64
+        row = target_dossiers["items"][0]
+        assert row["object_digest"] == dossier["object_digest"]
+        assert row["dossier_digest"] == dossier["dossier_digest"]
+        assert row["evidence_refs"] == [evidence_ref]
+        evidence = row["evidence"][0]
+        assert evidence["evidence_ref"] == evidence_ref
+        assert evidence["revision"] == "meeting-revision-1"
+        assert evidence["item"]["subject"] == "Long target review"
+        assert "transcript" not in evidence["item"]
+        assert len(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ) <= 2_500
+        page = target_dossiers["page"]
+        text_page = page["evidence_text_page"]
+        assert page["evidence_offset"] == 0
+        assert page["evidence_count"] == 1
+        assert text_page["field"] == "semantic_text"
+        assert text_page["text_offset"] == text_offset
+        assert text_page["text_char_count"] == len(evidence["item"]["semantic_text"])
+        assert text_page["text_total_chars"] == len(semantic_text)
+        seen.append(evidence["item"]["semantic_text"])
+        if not text_page["has_more"]:
+            assert page["has_more"] is False
+            break
+        assert page["has_more"] is True
+        assert page["next_evidence_offset"] == 0
+        text_offset = text_page["next_text_offset"]
+
+    assert "".join(seen) == semantic_text
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "target_refs": [target_ref]},
+        )
+    ] * len(seen)
+
+
+@pytest.mark.parametrize(
+    ("selector", "target_offset", "text_offset"),
+    [
+        ({"evidence_refs": ["sha256:" + "a" * 64]}, 0, 0),
+        ({"target_refs": ["projects/a", "projects/b"]}, 0, 0),
+        ({"target_refs": ["projects/a"]}, None, 1),
+        ({"target_refs": ["projects/a"]}, 0, True),
+        ({"target_refs": ["projects/a"]}, 0, -1),
+    ],
+)
+def test_semantic_batch_transport_rejects_invalid_target_evidence_text_offset(
+    tmp_path, monkeypatch, selector, target_offset, text_offset
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+    request = {
+        "operation": "semantic_batch",
+        "run_id": "hdf-kb_sync-daily",
+        **selector,
+        "target_evidence_text_offset": text_offset,
+    }
+    if target_offset is not None:
+        request["target_evidence_offset"] = target_offset
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](request)
+    )
+
+    assert result["accepted"] is False
+    assert ctx.calls == []
+    assert "target_evidence_text_offset" in result["error"]
+
+
 def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     tmp_path, monkeypatch
 ):
@@ -2666,7 +2807,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.3"
+    assert manifest["version"] == "0.9.4"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
