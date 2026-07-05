@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:caf420e5a72c105518fc03ed5561df37f9753e79097db553b3eb41c134054ebe",
+      "input_schema_digest": "sha256:314ba5dc5308c08b26296cb2348d2edf45274474ada716036355d73bcd9971dc",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -21,9 +21,9 @@
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:a4a02e4a37028be84611f3c1edc2039c245ca321f892989de13436057b5f5db2",
-  "engine_source_revision": "8ca4a4eb8b3e159e0079c0f7a668439086954d6c",
-  "engine_version": "0.45.29",
+  "digest": "sha256:b01d6784fb402aab7c49ff4c71646493ad88a5a31ef23ac39603cfbc742894ee",
+  "engine_source_revision": "f4a82313fc8a94d61980ec31a8b912d62edb99e6",
+  "engine_version": "0.45.38",
   "journeys": [
     {
       "confirmation_required": false,
@@ -67,7 +67,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:bd70e384c5f98d9ca948885a787e70cef7f92c0580085f8667a3a96029951826",
+  "source_export_digest": "sha256:0548942393e6259aa6a965a90116151cc3a9de3f731b13f8367b03c74d0c8d31",
   "tools": [
     {
       "annotations": {
@@ -323,6 +323,35 @@
                             },
                             "operation_id": {
                               "const": "meeting.synthesis.reconcile"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "mode": {
+                                  "enum": [
+                                    "legacy",
+                                    "target_grouped"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "mode"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "sync.semantic_integration_mode.set"
                             }
                           },
                           "required": [
@@ -2014,7 +2043,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:caf420e5a72c105518fc03ed5561df37f9753e79097db553b3eb41c134054ebe",
+      "input_schema_digest": "sha256:314ba5dc5308c08b26296cb2348d2edf45274474ada716036355d73bcd9971dc",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -2284,6 +2313,35 @@
                     },
                     "operation_id": {
                       "const": "meeting.synthesis.reconcile"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "enum": [
+                            "legacy",
+                            "target_grouped"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "sync.semantic_integration_mode.set"
                     }
                   },
                   "required": [
@@ -3879,7 +3937,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:b538123e65e828a0b45262bf9fa472a608e86f1061854d86cd27c6c9f0fa82be",
+      "input_schema_digest": "sha256:1e90745826c13914bf794f49dce96c974e3a3e9dd0c40d345b101b5eabc65d02",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -3976,6 +4034,35 @@
                         },
                         "operation_id": {
                           "const": "meeting.synthesis.reconcile"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "mode": {
+                              "enum": [
+                                "legacy",
+                                "target_grouped"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "mode"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "sync.semantic_integration_mode.set"
                         }
                       },
                       "required": [
@@ -5661,7 +5748,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:7c2d565fc3675c55d7c400c8287a6a11b85d5a45d841523dcd22922ce92592f2",
+      "output_schema_digest": "sha256:742f7604bfb81728ef23aa463f031ce231a19fceac48ab0f9087f228c579da62",
       "title": "Preview Exact KB Changes"
     },
     {

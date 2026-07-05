@@ -2200,8 +2200,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.29"
-    assert source["engine_source_revision"] == "8ca4a4eb8b3e159e0079c0f7a668439086954d6c"
+    assert source["engine_version"] == "0.45.38"
+    assert source["engine_source_revision"] == "f4a82313fc8a94d61980ec31a8b912d62edb99e6"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 11
@@ -2826,7 +2826,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.5"
+    assert manifest["version"] == "0.9.6"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -2926,7 +2926,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "8ca4a4eb8b3e159e0079c0f7a668439086954d6c"
+        == "f4a82313fc8a94d61980ec31a8b912d62edb99e6"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
