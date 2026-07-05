@@ -7600,6 +7600,8 @@ def _page_target_dossier_result(
             "has_more": has_more,
             "next_evidence_offset": page_end if has_more else None,
         }
+        if evidence_offset > 0:
+            _compact_target_dossier_continuation(paged)
         encoded = json.dumps(
             paged,
             ensure_ascii=False,
@@ -7677,6 +7679,8 @@ def _page_target_dossier_evidence_text_result(
                 "next_text_offset": page_end if text_has_more else None,
             },
         }
+        if evidence_offset > 0 or text_offset > 0:
+            _compact_target_dossier_continuation(paged)
         encoded = json.dumps(
             paged,
             ensure_ascii=False,
@@ -7694,6 +7698,24 @@ def _page_target_dossier_evidence_text_result(
             }
         text_char_count = max(1, text_char_count // 2)
     raise AssertionError("target evidence text page unexpectedly became empty")
+
+
+def _compact_target_dossier_continuation(result: dict[str, Any]) -> None:
+    """Keep continuation pages exact without repeating page-one invariants."""
+
+    result.pop("next_action", None)
+    dossiers = result.get("target_dossiers")
+    if not isinstance(dossiers, dict):
+        return
+    dossiers["continuation"] = True
+    items = dossiers.get("items")
+    if not isinstance(items, list):
+        return
+    for dossier in items:
+        if not isinstance(dossier, dict):
+            continue
+        dossier.pop("object_context", None)
+        dossier.pop("evidence_refs", None)
 
 
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:

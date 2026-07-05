@@ -790,6 +790,7 @@ def test_semantic_batch_transport_pages_one_oversized_target_without_dropping_ev
     handler = ctx.registered_tools["kb_integration_transport"]["handler"]
     offset = 0
     seen = []
+    page_count = 0
     while True:
         request = {
             "operation": "semantic_batch",
@@ -799,10 +800,20 @@ def test_semantic_batch_transport_pages_one_oversized_target_without_dropping_ev
         if offset:
             request["target_evidence_offset"] = offset
         result = json.loads(handler(request))
+        page_count += 1
         assert result["accepted"] is True
-        assert result["target_dossiers"]["items"][0]["object_digest"] == dossier["object_digest"]
-        assert result["target_dossiers"]["items"][0]["dossier_digest"] == dossier["dossier_digest"]
-        assert result["target_dossiers"]["items"][0]["evidence_refs"] == dossier["evidence_refs"]
+        page_dossier = result["target_dossiers"]["items"][0]
+        assert page_dossier["object_digest"] == dossier["object_digest"]
+        assert page_dossier["dossier_digest"] == dossier["dossier_digest"]
+        if offset == 0:
+            assert result["next_action"]["response_schema"] == {"type": "object"}
+            assert page_dossier["evidence_refs"] == dossier["evidence_refs"]
+            assert page_dossier["object_context"] == dossier["object_context"]
+        else:
+            assert "next_action" not in result
+            assert "evidence_refs" not in page_dossier
+            assert "object_context" not in page_dossier
+            assert result["target_dossiers"]["continuation"] is True
         assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 2_400
         page = result["target_dossiers"]["page"]
         assert page["evidence_offset"] == offset
@@ -819,7 +830,7 @@ def test_semantic_batch_transport_pages_one_oversized_target_without_dropping_ev
             "mcp_kb_engine_prod_kb_sync_status",
             {"run_id": run_id, "target_refs": [target_ref]},
         )
-    ] * len(evidence)
+    ] * page_count
 
 
 def test_semantic_batch_transport_pages_one_oversized_target_evidence_body_losslessly(
@@ -894,7 +905,15 @@ def test_semantic_batch_transport_pages_one_oversized_target_evidence_body_lossl
         row = target_dossiers["items"][0]
         assert row["object_digest"] == dossier["object_digest"]
         assert row["dossier_digest"] == dossier["dossier_digest"]
-        assert row["evidence_refs"] == [evidence_ref]
+        if text_offset == 0:
+            assert result["next_action"]["response_schema"] == {"type": "object"}
+            assert row["evidence_refs"] == [evidence_ref]
+            assert row["object_context"] == dossier["object_context"]
+        else:
+            assert "next_action" not in result
+            assert "evidence_refs" not in row
+            assert "object_context" not in row
+            assert target_dossiers["continuation"] is True
         evidence = row["evidence"][0]
         assert evidence["evidence_ref"] == evidence_ref
         assert evidence["revision"] == "meeting-revision-1"
@@ -2807,7 +2826,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.4"
+    assert manifest["version"] == "0.9.5"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 

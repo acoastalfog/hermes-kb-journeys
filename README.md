@@ -148,6 +148,13 @@ that body is complete, then proceeds to the next evidence row. Current-object
 context, target and dossier digests, the full evidence-ref set, and review token
 remain bound on every page; the plugin still holds no semantic state.
 
+Version 0.9.5 keeps the full response schema, current-object context, and full
+evidence-ref set on page one, then omits those already-read invariants from
+continuation pages. Every continuation still carries the exact target, object,
+dossier, and evidence bindings plus deterministic page offsets. This prevents
+large schemas and object context from being re-injected into the model context
+for every page without dropping evidence or adding plugin state.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
