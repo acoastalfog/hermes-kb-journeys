@@ -9,6 +9,7 @@ Hermes transports and renders the engine-owned run without inventing semantics.
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as _dt
 import hashlib
 import inspect
@@ -7298,6 +7299,23 @@ def _semantic_batch_transport(
             "run_id": run_id,
             "error": "evidence_refs must be exact sha256 refs",
         }
+    raw_target_evidence_offset = args.get("target_evidence_offset")
+    if raw_target_evidence_offset is not None and (
+        selector != "target_refs"
+        or len(selected) != 1
+        or isinstance(raw_target_evidence_offset, bool)
+        or not isinstance(raw_target_evidence_offset, int)
+        or raw_target_evidence_offset < 0
+    ):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": (
+                "target_evidence_offset requires exactly one target_ref and a "
+                "non-negative integer"
+            ),
+        }
+    target_evidence_offset = int(raw_target_evidence_offset or 0)
     requested_count = len(selected)
     while selected:
         _tool, payload, errors = _dispatch_first(
@@ -7333,6 +7351,14 @@ def _semantic_batch_transport(
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
+        if selector == "target_refs" and len(selected) == 1 and (
+            target_evidence_offset or len(encoded) > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES
+        ):
+            return _page_target_dossier_result(
+                result,
+                run_id=run_id,
+                evidence_offset=target_evidence_offset,
+            )
         if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
             return result
         if len(selected) == 1:
@@ -7345,6 +7371,61 @@ def _semantic_batch_transport(
             }
         selected = selected[: max(1, len(selected) // 2)]
     raise AssertionError("semantic batch selector unexpectedly became empty")
+
+
+def _page_target_dossier_result(
+    result: dict[str, Any],
+    *,
+    run_id: str,
+    evidence_offset: int,
+) -> dict[str, Any]:
+    dossiers = result.get("target_dossiers")
+    items = dossiers.get("items") if isinstance(dossiers, dict) else None
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "one exact target dossier is required for evidence paging",
+        }
+    evidence = items[0].get("evidence")
+    if not isinstance(evidence, list) or evidence_offset >= len(evidence):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "target_evidence_offset is outside the exact target dossier",
+        }
+    evidence_count = len(evidence) - evidence_offset
+    while evidence_count:
+        paged = copy.deepcopy(result)
+        paged_dossiers = paged["target_dossiers"]
+        paged_item = paged_dossiers["items"][0]
+        page_end = evidence_offset + evidence_count
+        paged_item["evidence"] = evidence[evidence_offset:page_end]
+        has_more = page_end < len(evidence)
+        paged_dossiers["page"] = {
+            "evidence_offset": evidence_offset,
+            "evidence_count": evidence_count,
+            "evidence_total_count": len(evidence),
+            "has_more": has_more,
+            "next_evidence_offset": page_end if has_more else None,
+        }
+        encoded = json.dumps(
+            paged,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+            return paged
+        if evidence_count == 1:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "requested_count": int(result.get("requested_count") or 1),
+                "selected_count": 1,
+                "error": "one target evidence item exceeds the bounded transport result",
+            }
+        evidence_count = max(1, evidence_count // 2)
+    raise AssertionError("target dossier page unexpectedly became empty")
 
 
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:
@@ -7592,6 +7673,14 @@ def _register_integration_transport(ctx: Any) -> None:
                     "minItems": 1,
                     "maxItems": 10,
                     "uniqueItems": True,
+                },
+                "target_evidence_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "For one paged target dossier only, continue at the exact "
+                        "next_evidence_offset returned by the previous page."
+                    ),
                 },
             },
             "required": ["operation", "run_id"],

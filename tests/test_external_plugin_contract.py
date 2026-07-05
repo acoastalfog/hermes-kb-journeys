@@ -539,6 +539,91 @@ def test_semantic_batch_transport_returns_exact_target_dossiers(tmp_path, monkey
     assert "selected_evidence" not in result
 
 
+def test_semantic_batch_transport_pages_one_oversized_target_without_dropping_evidence(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 2_400)
+    run_id = "hdf-kb_sync-daily"
+    target_ref = "products/platform-bionemo"
+    evidence = [
+        {
+            "evidence_ref": "sha256:" + character * 64,
+            "item": {"semantic_text": character * 700},
+        }
+        for character in ("a", "b", "c", "d")
+    ]
+    dossier = {
+        "target_ref": target_ref,
+        "object_digest": "sha256:" + "1" * 64,
+        "dossier_digest": "sha256:" + "2" * 64,
+        "evidence_refs": [row["evidence_ref"] for row in evidence],
+        "evidence": evidence,
+        "object_context": {"rendered": "current object context"},
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "schema_version": 1,
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "action_index": 20,
+                "semantic_stage": "target_integration",
+                "instruction": "Synthesize one net result per target.",
+                "response_schema": {"type": "object"},
+                "semantic_accounting": {"progress": {"target_remaining_count": 1}},
+            },
+            "target_dossiers": {
+                "requested_count": 1,
+                "truncated": False,
+                "items": [dossier],
+            },
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    offset_schema = ctx.registered_tools["kb_integration_transport"]["schema"]["parameters"][
+        "properties"
+    ]["target_evidence_offset"]
+    assert offset_schema["minimum"] == 0
+    handler = ctx.registered_tools["kb_integration_transport"]["handler"]
+    offset = 0
+    seen = []
+    while True:
+        request = {
+            "operation": "semantic_batch",
+            "run_id": run_id,
+            "target_refs": [target_ref],
+        }
+        if offset:
+            request["target_evidence_offset"] = offset
+        result = json.loads(handler(request))
+        assert result["accepted"] is True
+        assert result["target_dossiers"]["items"][0]["object_digest"] == dossier["object_digest"]
+        assert result["target_dossiers"]["items"][0]["dossier_digest"] == dossier["dossier_digest"]
+        assert result["target_dossiers"]["items"][0]["evidence_refs"] == dossier["evidence_refs"]
+        assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 2_400
+        page = result["target_dossiers"]["page"]
+        assert page["evidence_offset"] == offset
+        page_evidence = result["target_dossiers"]["items"][0]["evidence"]
+        assert page["evidence_count"] == len(page_evidence)
+        seen.extend(page_evidence)
+        if not page["has_more"]:
+            break
+        offset = page["next_evidence_offset"]
+
+    assert seen == evidence
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "target_refs": [target_ref]},
+        )
+    ] * len(evidence)
+
+
 def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     tmp_path, monkeypatch
 ):
@@ -2383,7 +2468,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.1"
+    assert manifest["version"] == "0.9.2"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
