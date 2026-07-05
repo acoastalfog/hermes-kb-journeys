@@ -7258,8 +7258,35 @@ def _compact_semantic_status_result(
     }
     for field in ("selected_evidence", "candidate_state", "target_dossiers"):
         if field in payload:
-            result[field] = payload[field]
+            value = payload[field]
+            if field == "selected_evidence":
+                value = _normalize_selected_evidence_for_transport(value)
+            result[field] = value
     return result
+
+
+def _normalize_selected_evidence_for_transport(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    normalized = copy.deepcopy(payload)
+    items = normalized.get("items")
+    if not isinstance(items, list):
+        return normalized
+    omitted = 0
+    for row in items:
+        item = row.get("item") if isinstance(row, dict) else None
+        if not isinstance(item, dict):
+            continue
+        semantic_text = item.get("semantic_text")
+        transcript = item.get("transcript")
+        if isinstance(semantic_text, str) and transcript == semantic_text:
+            item.pop("transcript", None)
+            omitted += 1
+    if omitted:
+        normalized["transport_normalization"] = {
+            "duplicate_transcript_fields_omitted": omitted,
+        }
+    return normalized
 
 
 def _semantic_batch_transport(
@@ -7300,6 +7327,30 @@ def _semantic_batch_transport(
             "error": "evidence_refs must be exact sha256 refs",
         }
     raw_target_evidence_offset = args.get("target_evidence_offset")
+    raw_evidence_text_offset = args.get("evidence_text_offset")
+    if raw_target_evidence_offset is not None and raw_evidence_text_offset is not None:
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": (
+                "evidence_text_offset and target_evidence_offset are mutually exclusive"
+            ),
+        }
+    if raw_evidence_text_offset is not None and (
+        selector != "evidence_refs"
+        or len(selected) != 1
+        or isinstance(raw_evidence_text_offset, bool)
+        or not isinstance(raw_evidence_text_offset, int)
+        or raw_evidence_text_offset < 0
+    ):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": (
+                "evidence_text_offset requires exactly one evidence_ref and a "
+                "non-negative integer"
+            ),
+        }
     if raw_target_evidence_offset is not None and (
         selector != "target_refs"
         or len(selected) != 1
@@ -7316,6 +7367,7 @@ def _semantic_batch_transport(
             ),
         }
     target_evidence_offset = int(raw_target_evidence_offset or 0)
+    evidence_text_offset = int(raw_evidence_text_offset or 0)
     requested_count = len(selected)
     while selected:
         _tool, payload, errors = _dispatch_first(
@@ -7359,6 +7411,15 @@ def _semantic_batch_transport(
                 run_id=run_id,
                 evidence_offset=target_evidence_offset,
             )
+        if selector == "evidence_refs" and len(selected) == 1 and (
+            raw_evidence_text_offset is not None
+            or len(encoded) > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES
+        ):
+            return _page_selected_evidence_result(
+                result,
+                run_id=run_id,
+                text_offset=evidence_text_offset,
+            )
         if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
             return result
         if len(selected) == 1:
@@ -7371,6 +7432,67 @@ def _semantic_batch_transport(
             }
         selected = selected[: max(1, len(selected) // 2)]
     raise AssertionError("semantic batch selector unexpectedly became empty")
+
+
+def _page_selected_evidence_result(
+    result: dict[str, Any],
+    *,
+    run_id: str,
+    text_offset: int,
+) -> dict[str, Any]:
+    selected_evidence = result.get("selected_evidence")
+    items = (
+        selected_evidence.get("items")
+        if isinstance(selected_evidence, dict)
+        else None
+    )
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "one exact evidence item is required for text paging",
+        }
+    item = items[0].get("item")
+    semantic_text = item.get("semantic_text") if isinstance(item, dict) else None
+    if not isinstance(semantic_text, str) or text_offset >= len(semantic_text):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "evidence_text_offset is outside the exact evidence body",
+        }
+    text_char_count = len(semantic_text) - text_offset
+    while text_char_count:
+        paged = copy.deepcopy(result)
+        paged_evidence = paged["selected_evidence"]
+        paged_item = paged_evidence["items"][0]["item"]
+        page_end = text_offset + text_char_count
+        paged_item["semantic_text"] = semantic_text[text_offset:page_end]
+        has_more = page_end < len(semantic_text)
+        paged_evidence["page"] = {
+            "field": "semantic_text",
+            "text_offset": text_offset,
+            "text_char_count": text_char_count,
+            "text_total_chars": len(semantic_text),
+            "has_more": has_more,
+            "next_text_offset": page_end if has_more else None,
+        }
+        encoded = json.dumps(
+            paged,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+            return paged
+        if text_char_count == 1:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "requested_count": int(result.get("requested_count") or 1),
+                "selected_count": 1,
+                "error": "one evidence text page exceeds the bounded transport result",
+            }
+        text_char_count = max(1, text_char_count // 2)
+    raise AssertionError("evidence text page unexpectedly became empty")
 
 
 def _page_target_dossier_result(
@@ -7680,6 +7802,14 @@ def _register_integration_transport(ctx: Any) -> None:
                     "description": (
                         "For one paged target dossier only, continue at the exact "
                         "next_evidence_offset returned by the previous page."
+                    ),
+                },
+                "evidence_text_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "For one paged evidence item only, continue at the exact "
+                        "next_text_offset returned by the previous page."
                     ),
                 },
             },

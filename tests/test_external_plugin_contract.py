@@ -488,6 +488,204 @@ def test_semantic_batch_transport_reduces_requested_prefix_until_result_is_bound
     assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1_500
 
 
+def test_semantic_batch_transport_omits_only_byte_identical_duplicate_transcript(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-daily"
+    evidence_ref = "sha256:" + "a" * 64
+    distinct_ref = "sha256:" + "d" * 64
+    semantic_text = "speaker: exact transcript body"
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "evidence_attribution",
+            },
+            "selected_evidence": {
+                "requested_count": 2,
+                "review_token": "sha256:" + "b" * 64,
+                "digest": "sha256:" + "c" * 64,
+                "items": [
+                    {
+                        "evidence_ref": evidence_ref,
+                        "source_id": "m365.meeting_artifact",
+                        "item": {
+                            "semantic_text": semantic_text,
+                            "transcript": semantic_text,
+                            "subject": "Review",
+                        },
+                    },
+                    {
+                        "evidence_ref": distinct_ref,
+                        "source_id": "m365.meeting_artifact",
+                        "item": {
+                            "semantic_text": "curated summary",
+                            "transcript": "different source transcript",
+                        },
+                    },
+                ],
+            },
+            "candidate_state": {"requested_count": 2, "rows": []},
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "evidence_refs": [evidence_ref, distinct_ref],
+            }
+        )
+    )
+
+    item = result["selected_evidence"]["items"][0]["item"]
+    assert item["semantic_text"] == semantic_text
+    assert "transcript" not in item
+    assert item["subject"] == "Review"
+    assert result["selected_evidence"]["items"][1]["item"]["transcript"] == (
+        "different source transcript"
+    )
+    assert result["selected_evidence"]["transport_normalization"] == {
+        "duplicate_transcript_fields_omitted": 1
+    }
+
+
+def test_semantic_batch_transport_pages_one_oversized_evidence_body_losslessly(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 2_400)
+    run_id = "hdf-kb_sync-daily"
+    evidence_ref = "sha256:" + "a" * 64
+    semantic_text = "alpha βeta 🧬 " * 700
+    selected_evidence = {
+        "requested_count": 1,
+        "truncated": False,
+        "review_token": "sha256:" + "b" * 64,
+        "digest": "sha256:" + "c" * 64,
+        "items": [
+            {
+                "evidence_ref": evidence_ref,
+                "source_id": "m365.meeting_artifact",
+                "revision": "meeting-revision-1",
+                "item": {
+                    "semantic_text": semantic_text,
+                    "transcript": semantic_text,
+                    "subject": "Long review",
+                },
+            }
+        ],
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "evidence_attribution",
+                "response_schema": {"type": "object"},
+            },
+            "selected_evidence": selected_evidence,
+            "candidate_state": {"requested_count": 1, "rows": []},
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    registered = ctx.registered_tools["kb_integration_transport"]
+    offset_schema = registered["schema"]["parameters"]["properties"][
+        "evidence_text_offset"
+    ]
+    assert offset_schema["minimum"] == 0
+    handler = registered["handler"]
+    offset = 0
+    seen = []
+    while True:
+        request = {
+            "operation": "semantic_batch",
+            "run_id": run_id,
+            "evidence_refs": [evidence_ref],
+        }
+        if offset:
+            request["evidence_text_offset"] = offset
+        result = json.loads(handler(request))
+        assert result["accepted"] is True
+        assert result["selected_evidence"]["review_token"] == selected_evidence["review_token"]
+        assert result["selected_evidence"]["digest"] == selected_evidence["digest"]
+        row = result["selected_evidence"]["items"][0]
+        assert row["evidence_ref"] == evidence_ref
+        assert row["revision"] == "meeting-revision-1"
+        assert row["item"]["subject"] == "Long review"
+        assert "transcript" not in row["item"]
+        assert len(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ) <= 2_400
+        page = result["selected_evidence"]["page"]
+        assert page["field"] == "semantic_text"
+        assert page["text_offset"] == offset
+        assert page["text_char_count"] == len(row["item"]["semantic_text"])
+        assert page["text_total_chars"] == len(semantic_text)
+        seen.append(row["item"]["semantic_text"])
+        if not page["has_more"]:
+            break
+        offset = page["next_text_offset"]
+
+    assert "".join(seen) == semantic_text
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "evidence_refs": [evidence_ref]},
+        )
+    ] * len(seen)
+
+
+@pytest.mark.parametrize(
+    ("selector", "offset", "extra"),
+    [
+        ({"target_refs": ["projects/demo"]}, 0, {}),
+        ({"evidence_refs": ["sha256:" + "a" * 64, "sha256:" + "b" * 64]}, 0, {}),
+        ({"evidence_refs": ["sha256:" + "a" * 64]}, True, {}),
+        ({"evidence_refs": ["sha256:" + "a" * 64]}, -1, {}),
+        (
+            {"evidence_refs": ["sha256:" + "a" * 64]},
+            0,
+            {"target_evidence_offset": 0},
+        ),
+    ],
+)
+def test_semantic_batch_transport_rejects_invalid_evidence_text_offset(
+    tmp_path, monkeypatch, selector, offset, extra
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": "hdf-kb_sync-daily",
+                **selector,
+                "evidence_text_offset": offset,
+                **extra,
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert ctx.calls == []
+    assert "evidence_text_offset" in result["error"]
+
+
 def test_semantic_batch_transport_returns_exact_target_dossiers(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     _install_conforming_descriptor_fixture(plugin, monkeypatch)
@@ -2468,7 +2666,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.9.2"
+    assert manifest["version"] == "0.9.3"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 

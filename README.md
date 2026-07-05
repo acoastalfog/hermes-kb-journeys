@@ -133,6 +133,14 @@ same one-target request with the returned `next_evidence_offset` until every
 evidence item has been read. The plugin holds no semantic state and never
 summarizes or drops source evidence.
 
+Version 0.9.3 applies the same lossless rule to an individually oversized
+source-evidence body. A byte-identical duplicate `transcript` field is omitted
+while the canonical `semantic_text` remains intact. If that canonical text is
+still too large, the response contains a deterministic character page and the
+harness repeats the same one-evidence request with the returned
+`next_text_offset` until the full body has been read. Review tokens, evidence
+identity, revision metadata, and all non-duplicate fields remain on every page.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

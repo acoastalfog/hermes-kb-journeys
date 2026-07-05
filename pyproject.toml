@@ -1,6 +1,6 @@
 [project]
 name = "hermes-kb-journeys"
-version = "0.9.2"
+version = "0.9.3"
 description = "Out-of-tree Hermes plugin for guided KB journeys."
 requires-python = ">=3.11"
 
