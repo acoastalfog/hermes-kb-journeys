@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.9.5
+version: 0.9.6
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -41,3 +41,5 @@ migrations:
     hard_break: "oversized evidence bodies inside target dossiers are exposed through the same exact text pages"
   - version: 0.9.5
     hard_break: "target continuation pages retain exact bindings without repeating page-one schema and object context"
+  - version: 0.9.6
+    hard_break: "generated kb-engine 0.45.38 contracts expose bounded oversized-target evidence-summary checkpoints"

@@ -48,8 +48,8 @@ The loader admits at most 12 tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.45.29 at revision
-`8ca4a4eb8b3e159e0079c0f7a668439086954d6c`, which owns the exact
+The committed export is pinned to kb-engine 0.45.38 at revision
+`f4a82313fc8a94d61980ec31a8b912d62edb99e6`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -154,6 +154,14 @@ continuation pages. Every continuation still carries the exact target, object,
 dossier, and evidence bindings plus deterministic page offsets. This prevents
 large schemas and object context from being re-injected into the model context
 for every page without dropping evidence or adding plugin state.
+
+Version 0.9.6 refreshes the generated contracts to kb-engine 0.45.38. When an
+oversized target reports `evidence_summary_required`, the harness reads the
+exact raw rows in batches of at most ten and checkpoints concise summaries
+bound to the target, evidence ref, and raw-item digest through the existing
+`kb.sync.resume` path. After every row is checkpointed, the engine returns one
+compact `evidence_summaries` dossier for the existing single net target result.
+The plugin adds no model, state, scheduler, or alternate sync path.
 
 ## Local Test
 
