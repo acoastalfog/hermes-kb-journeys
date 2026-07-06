@@ -488,6 +488,7 @@ def test_context_command_rejects_general_shell_execution(tmp_path, monkeypatch):
 def test_context_command_supplies_a_stable_harness_identity(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.delenv("KB_HARNESS_ID", raising=False)
+    monkeypatch.setattr(plugin.shutil, "which", lambda _name: "/usr/bin/calendar-cli")
     seen = {}
 
     def run(argv, **kwargs):
