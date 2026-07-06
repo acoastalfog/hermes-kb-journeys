@@ -6952,6 +6952,52 @@ def _sync_success_state(packet: Any) -> str:
     return ""
 
 
+def _daily_integration_closeout_eligible(packet: Any) -> bool:
+    """Allow only clean runs or fully-accounted item-level insufficiency."""
+
+    success_state = _sync_success_state(packet)
+    if success_state == "completed":
+        return True
+    if success_state != "completed_with_degradation" or not isinstance(packet, dict):
+        return False
+    degradations = packet.get("degradations")
+    if not isinstance(degradations, list) or not degradations:
+        return False
+    for row in degradations:
+        try:
+            insufficient_count = int(row.get("source_insufficient_count") or 0) if isinstance(row, dict) else 0
+        except (TypeError, ValueError):
+            return False
+        if (
+            not isinstance(row, dict)
+            or row.get("reason_code") != "source_content_insufficient"
+            or row.get("retryable") is not False
+            or insufficient_count <= 0
+        ):
+            return False
+    source_currency = (
+        packet.get("source_currency")
+        if isinstance(packet.get("source_currency"), dict)
+        else {}
+    )
+    sources = source_currency.get("sources")
+    if not isinstance(sources, list) or not sources or any(
+        not isinstance(row, dict) or row.get("state") != "current" for row in sources
+    ):
+        return False
+    accounting = (
+        packet.get("semantic_accounting")
+        if isinstance(packet.get("semantic_accounting"), dict)
+        else {}
+    )
+    lifecycle = packet.get("lifecycle") if isinstance(packet.get("lifecycle"), dict) else {}
+    return bool(
+        accounting.get("complete") is True
+        and int(accounting.get("remaining_count") or 0) == 0
+        and lifecycle.get("status") == "fixed_point"
+    )
+
+
 def _sync_publication_is_separate(packet: Any) -> bool:
     if not isinstance(packet, dict):
         return False
@@ -7798,13 +7844,14 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
     _tool, sync, errors = _dispatch_first(
         ctx, target, [("kb.sync.status", {"run_id": run_id})]
     )
-    if not isinstance(sync, dict) or sync.get("status") != "completed":
+    if not _daily_integration_closeout_eligible(sync):
         return {
             "accepted": False,
             "complete": False,
             "run_id": run_id,
             "stage": "integration_readback",
-            "error": _clip("; ".join(errors), 240) or "kb.sync run is not complete",
+            "error": _clip("; ".join(errors), 240)
+            or "kb.sync run is not eligible for Daily Integration closeout",
         }
     envelope = args.get("calendar_envelope")
     if not isinstance(envelope, dict) or str(envelope.get("run_id") or "") != run_id:

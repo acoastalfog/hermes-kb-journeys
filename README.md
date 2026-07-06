@@ -163,6 +163,12 @@ bound to the target, evidence ref, and raw-item digest through the existing
 compact `evidence_summaries` dossier for the existing single net target result.
 The plugin adds no model, state, scheduler, or alternate sync path.
 
+Version 0.9.7 lets Daily Integration continue from a fully accounted degraded
+run only when every degradation is non-retryable item-level source content
+insufficiency, every source is current, semantic review is complete, and
+lifecycle work is at a fixed point. Source-level and retryable failures remain
+held before calendar or Git closeout.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
