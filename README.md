@@ -169,6 +169,19 @@ insufficiency, every source is current, semantic review is complete, and
 lifecycle work is at a fixed point. Source-level and retryable failures remain
 held before calendar or Git closeout.
 
+Version 0.10.0 adds one read-only `context_search` operation to the existing
+`kb_integration_transport` tool for ordinary meeting prep, event planning,
+schedule work, account refreshes, email drafting, and travel reconciliation.
+The operation accepts bounded terms, declared sources, an exact time window,
+and a small result limit. It reads Calendar, Outlook mail, Slack, TripIt, and
+resolved past-meeting artifacts through the relay's isolated source-read
+identity; it cannot write the KB or start an external effect. Calendar's
+date-only connector bounds are filtered back to the requested UTC interval,
+Slack uses one complete window of at most seven days, TripIt returns a current
+snapshot without confirmation details, and every source reports its own typed
+degradation. Source content is clipped before entering model context, and the
+whole result remains under the existing transport result bound.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
