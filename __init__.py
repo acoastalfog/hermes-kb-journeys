@@ -17,8 +17,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import stat
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -90,6 +93,14 @@ CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
 CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
 INTEGRATION_TRANSPORT_MAX_RESULT_BYTES = 90 * 1024
+CONTEXT_SEARCH_MAX_WINDOW_DAYS = 45
+CONTEXT_SEARCH_SLACK_MAX_WINDOW_DAYS = 7
+CONTEXT_SEARCH_MAX_ITEMS_PER_SOURCE = 12
+CONTEXT_SEARCH_DETAIL_LIMIT = 2
+CONTEXT_SEARCH_COMMAND_TIMEOUT_SECONDS = 120
+CONTEXT_SEARCH_SOURCES = frozenset(
+    {"calendar", "mail", "slack", "meeting_artifacts", "tripit"}
+)
 SYNC_PACKET_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEMANTIC_WRITE_RECEIPT_PACKET_TYPES = {
     "semantic_write_receipt",
@@ -7764,6 +7775,516 @@ def _compact_target_dossier_continuation(result: dict[str, Any]) -> None:
         dossier.pop("evidence_refs", None)
 
 
+_CONTEXT_STOPWORDS = frozenset(
+    {
+        "about", "after", "before", "calendar", "context", "event", "from",
+        "meeting", "meetings", "prep", "schedule", "this", "through", "with", "work",
+    }
+)
+
+
+def _context_timestamp(value: Any, *, field: str) -> _dt.datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _context_terms(value: Any) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 12:
+        raise ValueError("terms must contain one to twelve search anchors")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        term = str(item or "").strip()
+        if not term or len(term) > 80 or "\x00" in term:
+            raise ValueError("terms must be non-empty and at most 80 characters")
+        folded = term.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            result.append(term)
+    return result
+
+
+def _context_sources(value: Any) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= len(CONTEXT_SEARCH_SOURCES):
+        raise ValueError("sources must select one to five declared read sources")
+    result = [str(item or "").strip() for item in value]
+    if len(set(result)) != len(result) or any(item not in CONTEXT_SEARCH_SOURCES for item in result):
+        raise ValueError("sources contain an unknown or duplicate read source")
+    return result
+
+
+def _context_query_tokens(terms: list[str]) -> list[str]:
+    tokens: list[str] = []
+    for term in terms:
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]+", term.casefold()):
+            if token not in _CONTEXT_STOPWORDS and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _context_score(value: Any, tokens: list[str]) -> int:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True).casefold()
+    return sum(1 for token in tokens if token in text)
+
+
+def _context_cli_payload(value: Any) -> tuple[bool, Any, str]:
+    if not isinstance(value, dict):
+        return False, None, "connector returned a non-object response"
+    if value.get("success") is not True:
+        error = value.get("error")
+        message = (
+            error.get("message") or error.get("code")
+            if isinstance(error, dict)
+            else error
+        )
+        return False, None, _clip(message, 240) or "connector reported failure"
+    return True, value.get("data"), ""
+
+
+def _run_context_command(
+    argv: list[str],
+    *,
+    timeout: int = CONTEXT_SEARCH_COMMAND_TIMEOUT_SECONDS,
+    discard_stdout: bool = False,
+) -> tuple[int, str, str]:
+    allowed = {"calendar-cli", "outlook-cli", "meeting-cli", "kb-sync-gather"}
+    if not argv or argv[0] not in allowed:
+        raise ValueError("context command is not allowlisted")
+    executable = shutil.which(argv[0])
+    if not executable:
+        return 127, "", f"{argv[0]} is unavailable"
+    env = dict(os.environ)
+    env["AI_PIM_UTILS_SKILL_SYNC_DISABLED"] = "1"
+    env["AI_PIM_UTILS_TELEMETRY_DISABLED"] = "1"
+    env.setdefault("KB_HARNESS_ID", "hermes-context")
+    try:
+        result = subprocess.run(
+            [executable, *argv[1:]],
+            text=True,
+            stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"{argv[0]} timed out"
+    return result.returncode, "" if discard_stdout else result.stdout, result.stderr
+
+
+def _context_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        for key in ("items", "messages", "events", "results"):
+            rows = value.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _context_email_address(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    address = value.get("emailAddress") if isinstance(value.get("emailAddress"), dict) else value
+    return str(address.get("name") or address.get("address") or "").strip()
+
+
+def _context_event_datetime(value: Any) -> _dt.datetime | None:
+    timezone_name = ""
+    if isinstance(value, dict):
+        timezone_name = str(value.get("timeZone") or "").upper()
+        value = value.get("dateTime")
+    try:
+        parsed = _dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        if timezone_name not in {"UTC", "ETC/UTC"}:
+            return None
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _context_calendar_row(row: dict[str, Any]) -> dict[str, Any]:
+    location = row.get("location")
+    if isinstance(location, dict):
+        location = location.get("displayName") or location.get("address")
+    return {
+        "source": "calendar",
+        "ref": str(row.get("id") or ""),
+        "title": _clip(row.get("subject"), 240),
+        "start": row.get("start"),
+        "end": row.get("end"),
+        "location": _clip(location, 180),
+        "organizer": _context_email_address(row.get("organizer")),
+        "preview": _clip(row.get("bodyPreview"), 1200),
+        "is_cancelled": row.get("isCancelled") is True,
+        "is_online": row.get("isOnlineMeeting") is True,
+    }
+
+
+def _context_mail_row(row: dict[str, Any], *, body: Any = "") -> dict[str, Any]:
+    return {
+        "source": "mail",
+        "ref": str(row.get("id") or ""),
+        "conversation_ref": str(row.get("conversationId") or ""),
+        "title": _clip(row.get("subject"), 240),
+        "from": _context_email_address(row.get("from") or row.get("sender")),
+        "received_at": str(row.get("receivedDateTime") or row.get("sentDateTime") or ""),
+        "preview": _clip(row.get("bodyPreview"), 1200),
+        "body": _clip(body, 3500),
+        "has_attachments": row.get("hasAttachments") is True,
+    }
+
+
+def _context_slack_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": "slack",
+        "ref": str(row.get("external_id") or row.get("ts") or ""),
+        "channel": str(row.get("channel") or row.get("channel_id") or ""),
+        "author": str(row.get("user_name") or row.get("user") or ""),
+        "observed_at": str(row.get("date") or row.get("ts") or ""),
+        "text": _clip(row.get("text"), 3000),
+        "reply_count": int(row.get("reply_count") or 0),
+    }
+
+
+def _context_tripit_row(row: dict[str, Any]) -> dict[str, Any]:
+    location = row.get("location")
+    if isinstance(location, dict):
+        location = location.get("name") or location.get("address") or location.get("code")
+    return {
+        "source": "tripit",
+        "ref": str(row.get("external_id") or ""),
+        "kind": str(row.get("type") or ""),
+        "title": _clip(row.get("title"), 240),
+        "trip_name": _clip(row.get("trip_name"), 240),
+        "start": row.get("start"),
+        "end": row.get("end"),
+        "trip_start": row.get("trip_start"),
+        "trip_end": row.get("trip_end"),
+        "location": _clip(location, 240),
+    }
+
+
+def _search_calendar_context(
+    *, start: _dt.datetime, end: _dt.datetime, tokens: list[str], limit: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    code, stdout, stderr = _run_context_command(
+        [
+            "calendar-cli", "find",
+            "--after", start.date().isoformat(),
+            # calendar-cli accepts dates, not timestamps. Expand the connector
+            # read by one date and filter the returned rows to the exact UTC
+            # interval below so travel timezones cannot drop boundary events.
+            "--before", (end.date() + _dt.timedelta(days=1)).isoformat(),
+            "--limit", "200", "--utc", "--json",
+        ]
+    )
+    if code != 0:
+        return {"source": "calendar", "status": "degraded", "error": _clip(stderr, 240)}, []
+    try:
+        raw = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"source": "calendar", "status": "degraded", "error": "invalid connector response"}, []
+    ok, data, error = _context_cli_payload(raw)
+    if not ok:
+        return {"source": "calendar", "status": "degraded", "error": error}, []
+    fetched = _context_rows(data)
+    rows = [
+        row
+        for row in fetched
+        if (
+            (event_start := _context_event_datetime(row.get("start"))) is not None
+            and start <= event_start < end
+        )
+    ]
+    def score(row: dict[str, Any]) -> int:
+        # The user's account/event words in the subject are stronger identity
+        # evidence than a generic mention buried in an invite body.
+        return 4 * _context_score(row.get("subject"), tokens) + _context_score(row, tokens)
+
+    scored = sorted(rows, key=score, reverse=True)
+    positive = [row for row in scored if score(row) > 0]
+    selected = (positive or scored)[:limit]
+    return {
+        "source": "calendar",
+        "status": "ready",
+        "observed_count": len(rows),
+        "fetched_count": len(fetched),
+        "selected_count": len(selected),
+        "bounded": len(rows) >= 200,
+    }, [_context_calendar_row(row) for row in selected]
+
+
+def _context_kql(terms: list[str]) -> str:
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+
+
+def _search_mail_context(
+    *, start: _dt.datetime, end: _dt.datetime, terms: list[str], tokens: list[str], limit: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    fetch_limit = max(limit * 3, 20)
+    code, stdout, stderr = _run_context_command(
+        [
+            "outlook-cli", "message", "find", "--query", _context_kql(terms),
+            "--after", start.isoformat().replace("+00:00", "Z"),
+            "--before", end.isoformat().replace("+00:00", "Z"),
+            "--all-folders", "--limit", str(fetch_limit), "--json",
+        ]
+    )
+    if code != 0:
+        return {"source": "mail", "status": "degraded", "error": _clip(stderr, 240)}, []
+    try:
+        raw = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"source": "mail", "status": "degraded", "error": "invalid connector response"}, []
+    ok, data, error = _context_cli_payload(raw)
+    if not ok:
+        return {"source": "mail", "status": "degraded", "error": error}, []
+    observed = _context_rows(data)
+    rows = sorted(observed, key=lambda row: _context_score(row, tokens), reverse=True)[:limit]
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        body: Any = ""
+        ref = str(row.get("id") or "")
+        if ref and index < CONTEXT_SEARCH_DETAIL_LIMIT:
+            detail_code, detail_stdout, _detail_stderr = _run_context_command(
+                ["outlook-cli", "message", "read", ref, "--json"], timeout=45
+            )
+            if detail_code == 0:
+                try:
+                    detail_raw = json.loads(detail_stdout)
+                    detail_ok, detail, _detail_error = _context_cli_payload(detail_raw)
+                    if detail_ok and isinstance(detail, dict):
+                        raw_body = detail.get("body")
+                        body = (
+                            raw_body.get("content") or raw_body.get("text") or ""
+                            if isinstance(raw_body, dict)
+                            else raw_body
+                        )
+                except json.JSONDecodeError:
+                    pass
+        normalized.append(_context_mail_row(row, body=body))
+    return {
+        "source": "mail",
+        "status": "ready",
+        "observed_count": len(observed),
+        "selected_count": len(normalized),
+        "bounded": len(observed) >= fetch_limit,
+    }, normalized
+
+
+def _search_slack_context(
+    *, start: _dt.datetime, end: _dt.datetime, tokens: list[str], limit: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    requested_start = start
+    max_start = end - _dt.timedelta(days=CONTEXT_SEARCH_SLACK_MAX_WINDOW_DAYS)
+    warning = ""
+    if start < max_start:
+        start = max_start
+        warning = f"Slack search bounded to the latest {CONTEXT_SEARCH_SLACK_MAX_WINDOW_DAYS} days"
+    state_root = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    temp_root = state_root / "kb-sync" / "context"
+    temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=temp_root,
+        prefix="slack-", suffix=".yaml", delete=False,
+    ) as handle:
+        handle.write("channels: {}\n")
+        config_path = Path(handle.name)
+    config_path.chmod(0o600)
+    try:
+        window_seconds = (end - start).total_seconds()
+        window_days = max(1, min(
+            CONTEXT_SEARCH_SLACK_MAX_WINDOW_DAYS,
+            int(window_seconds + 86399) // 86400,
+        ))
+        code, _stdout, stderr = _run_context_command(
+            [
+                "kb-sync-gather", "--source", "slack", "--workspace", str(Path.home()),
+                "--since", start.isoformat().replace("+00:00", "Z"),
+                "--until", end.isoformat().replace("+00:00", "Z"),
+                "--source-config", str(config_path), "--window-days", str(window_days),
+                "--max-items", "5000",
+            ],
+            discard_stdout=True,
+        )
+    finally:
+        config_path.unlink(missing_ok=True)
+    if code != 0:
+        return {"source": "slack", "status": "degraded", "error": _clip(stderr, 240)}, []
+    match = re.search(r"spooled exact response:\s+(\S+\.json)\s+\(no durable KB write\)", stderr)
+    if not match:
+        return {"source": "slack", "status": "degraded", "error": "connector returned no private spool"}, []
+    spool = Path(match.group(1))
+    try:
+        packet = _load_sync_spooled_packet(spool)
+    except (OSError, ValueError) as exc:
+        return {"source": "slack", "status": "degraded", "error": _clip(str(exc), 240)}, []
+    finally:
+        spool.unlink(missing_ok=True)
+    rows = _context_rows(packet.get("items") if isinstance(packet, dict) else None)
+    selected = [row for row in rows if _context_score(row, tokens) > 0][:limit]
+    status: dict[str, Any] = {
+        "source": "slack", "status": "ready", "observed_count": len(rows),
+        "selected_count": len(selected), "bounded": False,
+        "requested_start": requested_start.isoformat().replace("+00:00", "Z"),
+        "observed_start": start.isoformat().replace("+00:00", "Z"),
+    }
+    if warning:
+        status["warning"] = warning
+    return status, [_context_slack_row(row) for row in selected]
+
+
+def _search_tripit_context(
+    *, observed_at: _dt.datetime, tokens: list[str], limit: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    boundary = observed_at.isoformat().replace("+00:00", "Z")
+    code, _stdout, stderr = _run_context_command(
+        [
+            "kb-sync-gather", "--source", "tripit", "--workspace", str(Path.home()),
+            "--since", boundary, "--until", boundary, "--max-items", "1000",
+        ],
+        discard_stdout=True,
+    )
+    if code != 0:
+        return {"source": "tripit", "status": "degraded", "error": _clip(stderr, 240)}, []
+    match = re.search(r"spooled exact response:\s+(\S+\.json)\s+\(no durable KB write\)", stderr)
+    if not match:
+        return {"source": "tripit", "status": "degraded", "error": "connector returned no private spool"}, []
+    spool = Path(match.group(1))
+    try:
+        packet = _load_sync_spooled_packet(spool)
+    except (OSError, ValueError) as exc:
+        return {"source": "tripit", "status": "degraded", "error": _clip(str(exc), 240)}, []
+    finally:
+        spool.unlink(missing_ok=True)
+    rows = _context_rows(packet.get("items") if isinstance(packet, dict) else None)
+    scored = sorted(rows, key=lambda row: _context_score(row, tokens), reverse=True)
+    positive = [row for row in scored if _context_score(row, tokens) > 0]
+    selected = (positive or scored)[:limit]
+    return {
+        "source": "tripit", "status": "ready", "observed_count": len(rows),
+        "selected_count": len(selected), "snapshot_complete": True,
+    }, [_context_tripit_row(row) for row in selected]
+
+
+def _search_meeting_artifacts_context(
+    calendar_rows: list[dict[str, Any]], *, limit: int
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    def ended(row: dict[str, Any]) -> bool:
+        parsed = _context_event_datetime(row.get("end"))
+        return parsed is not None and parsed <= now
+
+    candidates = [row for row in calendar_rows if row.get("ref") and ended(row)][:1]
+    if not candidates:
+        return {
+            "source": "meeting_artifacts", "status": "degraded",
+            "error": "no resolved calendar event was available",
+        }, []
+    items: list[dict[str, Any]] = []
+    for event in candidates:
+        code, stdout, _stderr = _run_context_command(
+            ["meeting-cli", "transcript", "read", "--event-id", str(event["ref"]), "--json"],
+            timeout=60,
+        )
+        if code != 0:
+            continue
+        try:
+            raw = json.loads(stdout)
+        except json.JSONDecodeError:
+            continue
+        ok, data, _error = _context_cli_payload(raw)
+        if ok and data not in (None, [], {}):
+            items.append(
+                {
+                    "source": "meeting_artifacts", "event_ref": event["ref"],
+                    "title": event.get("title"),
+                    "content": _clip(json.dumps(data, ensure_ascii=False), 8000),
+                }
+            )
+    return {
+        "source": "meeting_artifacts",
+        "status": "ready" if items else "empty",
+        "checked_count": len(candidates), "selected_count": len(items),
+    }, items
+
+
+def _context_search(args: dict[str, Any]) -> dict[str, Any]:
+    terms = _context_terms(args.get("terms"))
+    requested_sources = _context_sources(args.get("sources"))
+    start = _context_timestamp(args.get("start"), field="start")
+    end = _context_timestamp(args.get("end"), field="end")
+    if end <= start:
+        raise ValueError("end must be after start")
+    if end - start > _dt.timedelta(days=CONTEXT_SEARCH_MAX_WINDOW_DAYS):
+        raise ValueError(f"context search window cannot exceed {CONTEXT_SEARCH_MAX_WINDOW_DAYS} days")
+    limit = args.get("limit_per_source", 5)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CONTEXT_SEARCH_MAX_ITEMS_PER_SOURCE:
+        raise ValueError(f"limit_per_source must be between 1 and {CONTEXT_SEARCH_MAX_ITEMS_PER_SOURCE}")
+    tokens = _context_query_tokens(terms)
+    statuses: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    calendar_items: list[dict[str, Any]] = []
+    # Calendar anchors meeting-artifact lookup. Keep execution deterministic even
+    # when the model presents the declared sources in a different order.
+    sources = [
+        source
+        for source in ("calendar", "tripit", "mail", "slack", "meeting_artifacts")
+        if source in requested_sources
+    ]
+    for source in sources:
+        if source == "calendar":
+            status, rows = _search_calendar_context(start=start, end=end, tokens=tokens, limit=limit)
+            calendar_items = rows
+        elif source == "tripit":
+            status, rows = _search_tripit_context(observed_at=end, tokens=tokens, limit=limit)
+        elif source == "mail":
+            status, rows = _search_mail_context(
+                start=start, end=end, terms=terms, tokens=tokens, limit=limit
+            )
+        elif source == "slack":
+            status, rows = _search_slack_context(start=start, end=end, tokens=tokens, limit=limit)
+        else:
+            status, rows = _search_meeting_artifacts_context(calendar_items, limit=limit)
+        statuses.append(status)
+        items.extend(rows)
+    result = {
+        "accepted": True,
+        "kind": "hermes_context_search",
+        "terms": terms,
+        "window": {
+            "start": start.isoformat().replace("+00:00", "Z"),
+            "end": end.isoformat().replace("+00:00", "Z"),
+        },
+        "sources": statuses,
+        "requested_sources": requested_sources,
+        "items": items,
+        "item_count": len(items),
+        "external_effect_started": False,
+        "durable_kb_write_started": False,
+    }
+    if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+        for item in items:
+            for field in ("body", "content", "text", "preview"):
+                if field in item:
+                    item[field] = _clip(item[field], 800)
+        result["transport_reduced"] = True
+    return result
+
+
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:
     material = {key: value for key, value in envelope.items() if key != "plan_digest"}
     canonical = json.dumps(
@@ -7963,7 +8484,8 @@ def _register_integration_transport(ctx: Any) -> None:
             "Perform one bounded Daily Integration transport action: forward an exact "
             "private source packet, return one compact semantic review batch, or close "
             "a completed run through the protected managed-calendar and clean Git "
-            "publication contracts."
+            "publication contracts. Also perform one explicitly requested, read-only "
+            "Calendar, Outlook, Slack, TripIt, and meeting-context search for ordinary prep and planning."
         ),
         "parameters": {
             "type": "object",
@@ -7974,6 +8496,7 @@ def _register_integration_transport(ctx: Any) -> None:
                         "resume_packet",
                         "semantic_batch",
                         "daily_integration_closeout",
+                        "context_search",
                     ],
                 },
                 "run_id": {
@@ -8036,19 +8559,53 @@ def _register_integration_transport(ctx: Any) -> None:
                         "same target_evidence_offset."
                     ),
                 },
+                "terms": {
+                    "type": "array",
+                    "description": "One to twelve concrete names, topics, or event anchors to find.",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "uniqueItems": True,
+                },
+                "sources": {
+                    "type": "array",
+                    "description": "Declared read-only context sources.",
+                    "items": {
+                        "type": "string",
+                        "enum": ["calendar", "mail", "slack", "meeting_artifacts", "tripit"],
+                    },
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "uniqueItems": True,
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Timezone-aware ISO-8601 lower bound for context search.",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "Timezone-aware ISO-8601 upper bound for context search.",
+                },
+                "limit_per_source": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "default": 5,
+                },
             },
-            "required": ["operation", "run_id"],
+            "required": ["operation"],
             "oneOf": [
                 {
                     "properties": {"operation": {"const": "resume_packet"}},
-                    "required": ["packet_path"],
+                    "required": ["run_id", "packet_path"],
                 },
                 {
                     "properties": {"operation": {"const": "daily_integration_closeout"}},
-                    "required": ["calendar_envelope", "session_id"],
+                    "required": ["run_id", "calendar_envelope", "session_id"],
                 },
                 {
                     "properties": {"operation": {"const": "semantic_batch"}},
+                    "required": ["run_id"],
                     "oneOf": [
                         {
                             "required": ["evidence_refs"],
@@ -8060,19 +8617,37 @@ def _register_integration_transport(ctx: Any) -> None:
                         },
                     ],
                 },
+                {
+                    "properties": {"operation": {"const": "context_search"}},
+                    "required": ["terms", "sources", "start", "end"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["packet_path"]},
+                            {"required": ["calendar_envelope"]},
+                            {"required": ["evidence_refs"]},
+                            {"required": ["target_refs"]}
+                        ]
+                    }
+                },
             ],
             "additionalProperties": False,
         },
     }
 
     def _handler(args: dict[str, Any], **_: Any) -> str:
+        operation = str(args.get("operation") or "").strip()
+        if operation == "context_search":
+            try:
+                payload = _context_search(args)
+            except (OSError, ValueError) as exc:
+                payload = {"accepted": False, "error": _clip(str(exc), 240)}
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         run_id = str(args.get("run_id") or "").strip()
         if not SYNC_PACKET_RUN_ID_RE.fullmatch(run_id):
             return json.dumps(
                 {"accepted": False, "error": "run_id is invalid"},
                 separators=(",", ":"),
             )
-        operation = str(args.get("operation") or "").strip()
         if operation == "daily_integration_closeout":
             return json.dumps(
                 _daily_integration_closeout(ctx, args, run_id=run_id),
@@ -8123,7 +8698,7 @@ def _register_integration_transport(ctx: Any) -> None:
         schema=schema,
         handler=_handler,
         description=(
-            "Bounded source-packet, semantic-review, and Daily Integration closeout transport."
+            "Bounded read-only context, source-packet, semantic-review, and Daily Integration closeout transport."
         ),
         emoji="📦",
     )

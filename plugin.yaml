@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.9.7
+version: 0.10.0
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -45,3 +45,5 @@ migrations:
     hard_break: "generated kb-engine 0.45.38 contracts expose bounded oversized-target evidence-summary checkpoints"
   - version: 0.9.7
     hard_break: "Daily Integration closeout accepts only fully accounted non-retryable item-level source insufficiency"
+  - version: 0.10.0
+    hard_break: "the existing integration transport adds bounded read-only context search for ordinary prep and planning"
