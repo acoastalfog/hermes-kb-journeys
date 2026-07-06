@@ -982,8 +982,25 @@ def test_semantic_batch_transport_rejects_invalid_target_evidence_text_offset(
     assert "target_evidence_text_offset" in result["error"]
 
 
+@pytest.mark.parametrize(
+    ("sync_status", "degradations"),
+    [
+        ("completed", []),
+        (
+            "completed_with_degradation",
+            [
+                {
+                    "source_id": "m365.email",
+                    "reason_code": "source_content_insufficient",
+                    "retryable": False,
+                    "source_insufficient_count": 2,
+                }
+            ],
+        ),
+    ],
+)
 def test_daily_integration_closeout_composes_calendar_publication_and_brief(
-    tmp_path, monkeypatch
+    sync_status, degradations, tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     _install_conforming_descriptor_fixture(plugin, monkeypatch)
@@ -1008,15 +1025,21 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     )
     sync = {
         "kind": "kb_sync_receipt",
-        "status": "completed",
+        "status": sync_status,
+        "terminal_state": sync_status,
         "run_id": run_id,
+        "degradations": degradations,
         "source_currency": {
             "sources": [
                 {"source_id": source_id, "state": "current"}
                 for source_id in ("mail", "calendar", "slack", "meetings", "tripit")
             ]
         },
-        "semantic_accounting": {"integrated_target_count": 3},
+        "semantic_accounting": {
+            "complete": True,
+            "remaining_count": 0,
+            "integrated_target_count": 3,
+        },
         "lifecycle": {"status": "fixed_point"},
     }
     preview = {
@@ -1076,6 +1099,44 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     apply_args = ctx.calls[-1][1]
     assert apply_args["calendar_receipt"] == closeout
     assert apply_args["session_id"] == "hermes-cron-daily"
+
+
+@pytest.mark.parametrize(
+    "degradation",
+    [
+        {
+            "source_id": "travel.tripit",
+            "reason_code": "source_transport_failed",
+            "retryable": True,
+        },
+        {
+            "source_id": "m365.email",
+            "reason_code": "source_content_insufficient",
+            "retryable": True,
+            "source_insufficient_count": 1,
+        },
+        {
+            "source_id": "m365.email",
+            "reason_code": "source_content_insufficient",
+            "retryable": False,
+            "source_insufficient_count": "unknown",
+        },
+    ],
+)
+def test_daily_integration_closeout_rejects_source_level_degradation(
+    degradation, tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = {
+        "status": "completed_with_degradation",
+        "terminal_state": "completed_with_degradation",
+        "degradations": [degradation],
+        "source_currency": {"sources": [{"state": "current"}]},
+        "semantic_accounting": {"complete": True, "remaining_count": 0},
+        "lifecycle": {"status": "fixed_point"},
+    }
+
+    assert plugin._daily_integration_closeout_eligible(packet) is False
 
 
 def test_user_plugin_loads_from_standard_plugin_directory(tmp_path, monkeypatch):
