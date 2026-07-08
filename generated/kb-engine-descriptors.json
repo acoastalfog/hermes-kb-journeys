@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:314ba5dc5308c08b26296cb2348d2edf45274474ada716036355d73bcd9971dc",
+      "input_schema_digest": "sha256:0f114aeda1ed789a92e9d4d2132696a9db68c73cfc9bf39129544462440d1538",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -16,14 +16,19 @@
       "output_schema_digest": "sha256:ee8b3da71d7fdf8abec97df89d4b3b50db4e209af49fe04c9ef37948da2910a1"
     },
     {
+      "input_schema_digest": "sha256:7187814cd345595f5653b8f108d60646f3207af37d608aa3d0b52e47d89d415c",
+      "name": "publication.commit_confirmed",
+      "output_schema_digest": "sha256:537e42ece8af93536fb8af1fdefbe007a08c68e7553eac7f1f6ef9f0cd509823"
+    },
+    {
       "input_schema_digest": "sha256:92bd72c07c9765f2166e97ef8292d441028f2615115a6f85bc4356e1ace1f728",
       "name": "publication.daily_integration_apply",
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:b01d6784fb402aab7c49ff4c71646493ad88a5a31ef23ac39603cfbc742894ee",
-  "engine_source_revision": "f4a82313fc8a94d61980ec31a8b912d62edb99e6",
-  "engine_version": "0.45.38",
+  "digest": "sha256:c8645db7676b202dba641011c583a19809a4a7c50097367af6eeb83ff8795a52",
+  "engine_source_revision": "3861a32c939691c9a7d98f70015918204b782ca2",
+  "engine_version": "0.45.54",
   "journeys": [
     {
       "confirmation_required": false,
@@ -62,12 +67,23 @@
       ],
       "status": "ready",
       "title": "Read-only orientation and trust"
+    },
+    {
+      "confirmation_required": true,
+      "journey_id": "publication",
+      "required_resources": [],
+      "required_tools": [
+        "publication.commit_confirmed",
+        "publication.preview_commit"
+      ],
+      "status": "ready",
+      "title": "Git publication status, commit, and push"
     }
   ],
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:0548942393e6259aa6a965a90116151cc3a9de3f731b13f8367b03c74d0c8d31",
+  "source_export_digest": "sha256:a70a8e624e3b4ac00c81d66e9c29459517c2f445c35bcddfcb68de8b05f27327",
   "tools": [
     {
       "annotations": {
@@ -273,7 +289,6 @@
                         "before_exists",
                         "before_digest",
                         "after_digest",
-                        "after_text",
                         "diff"
                       ],
                       "type": "object"
@@ -282,6 +297,9 @@
                   },
                   "kind": {
                     "const": "kb.exact_changes"
+                  },
+                  "materialization": {
+                    "const": "recompile_at_apply"
                   },
                   "operations": {
                     "items": {
@@ -1913,6 +1931,9 @@
                     },
                     "type": "array"
                   },
+                  "rendered_at": {
+                    "type": "string"
+                  },
                   "schema_version": {
                     "const": 1
                   },
@@ -2043,7 +2064,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:314ba5dc5308c08b26296cb2348d2edf45274474ada716036355d73bcd9971dc",
+      "input_schema_digest": "sha256:0f114aeda1ed789a92e9d4d2132696a9db68c73cfc9bf39129544462440d1538",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -3984,7 +4005,6 @@
                     "before_exists",
                     "before_digest",
                     "after_digest",
-                    "after_text",
                     "diff"
                   ],
                   "type": "object"
@@ -3993,6 +4013,9 @@
               },
               "kind": {
                 "const": "kb.exact_changes"
+              },
+              "materialization": {
+                "const": "recompile_at_apply"
               },
               "operations": {
                 "items": {
@@ -5624,6 +5647,9 @@
                 },
                 "type": "array"
               },
+              "rendered_at": {
+                "type": "string"
+              },
               "schema_version": {
                 "const": 1
               },
@@ -5748,7 +5774,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:742f7604bfb81728ef23aa463f031ce231a19fceac48ab0f9087f228c579da62",
+      "output_schema_digest": "sha256:694b48f072eaebe7491e8f7d576ef83008a0fdfcabb5d4b24060a5f749794206",
       "title": "Preview Exact KB Changes"
     },
     {
@@ -6413,6 +6439,176 @@
         },
         "readOnlyHint": false
       },
+      "description": "Commit current workspace changes after explicit harness/user confirmation, optionally pushing afterward.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Human or agent actor requesting the confirmed publication.",
+            "type": "string"
+          },
+          "expected_change_set_digest": {
+            "description": "Optional complete change-set digest from a fresh publication preview.",
+            "type": "string"
+          },
+          "expected_changed_paths": {
+            "description": "Optional changed-path list from a fresh publication preview.",
+            "items": {
+              "description": "Changed path expected from a fresh publication preview.",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expected_git_head": {
+            "description": "Optional Git head from a fresh publication preview.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Commit message to use. Defaults to a generic KB update.",
+            "type": "string"
+          },
+          "push": {
+            "description": "Push after committing if the commit succeeds.",
+            "type": "boolean"
+          },
+          "run_id": {
+            "description": "Optional workflow run id whose publication state this commit resolves.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Stable harness session id for provenance.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Harness or channel provenance, such as Hermes / Telegram.",
+            "type": "string"
+          },
+          "user_confirmation": {
+            "additionalProperties": true,
+            "description": "Explicit confirmation payload with confirmed=true.",
+            "type": "object"
+          },
+          "workflow_run_id": {
+            "description": "Alias for run_id when a harness wants explicit workflow provenance.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "source",
+          "session_id",
+          "user_confirmation"
+        ],
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:7187814cd345595f5653b8f108d60646f3207af37d608aa3d0b52e47d89d415c",
+      "name": "publication.commit_confirmed",
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "publication": {
+            "additionalProperties": true,
+            "properties": {
+              "changed_paths": {
+                "description": "Published paths.",
+                "items": {
+                  "description": "Workspace-relative path.",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "commit": {
+                "type": "string"
+              },
+              "git": {
+                "additionalProperties": true,
+                "properties": {
+                  "ahead": {
+                    "type": "integer"
+                  },
+                  "behind": {
+                    "type": "integer"
+                  },
+                  "clean": {
+                    "type": "boolean"
+                  },
+                  "head": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "pushed": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "ok",
+          "actor",
+          "source",
+          "session_id",
+          "publication"
+        ],
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:537e42ece8af93536fb8af1fdefbe007a08c68e7553eac7f1f6ef9f0cd509823",
+      "title": "Commit Confirmed KB Changes"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": false
+      },
       "description": "Commit and push one exactly previewed clean Daily Integration change set under the standing workflow policy; resumes a failed push without a second commit.",
       "input_schema": {
         "additionalProperties": false,
@@ -6826,6 +7022,136 @@
       },
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e",
       "title": "Preview Daily Integration Publication"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "kbSurface": {
+          "replacement": "",
+          "surface": "primary",
+          "visibleIn": {
+            "compat": true,
+            "journey_first_strict": true
+          }
+        },
+        "readOnlyHint": true
+      },
+      "description": "Preview the changed paths and commit message for a workspace publication without mutating Git state.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "description": "Optional commit message preview. Defaults to a generic KB update.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema_digest": "sha256:ae8f443f716a6b663de553a1b62be327a932520c91a959791cded913f64c030b",
+      "name": "publication.preview_commit",
+      "output_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "change_set_digest": {
+            "description": "Digest of the complete working-tree change set.",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "changed_paths": {
+            "description": "Complete changed path binding.",
+            "items": {
+              "description": "Workspace-relative path.",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "git": {
+            "additionalProperties": true,
+            "properties": {
+              "ahead": {
+                "type": "integer"
+              },
+              "behind": {
+                "type": "integer"
+              },
+              "changed_count": {
+                "type": "integer"
+              },
+              "clean": {
+                "type": "boolean"
+              },
+              "head": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "clean",
+              "head",
+              "ahead",
+              "behind",
+              "changed_count"
+            ],
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "preflight": {
+            "additionalProperties": true,
+            "properties": {
+              "git_diff_check": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "safe_fix_count": {
+                "type": "integer"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "ok",
+              "git_diff_check",
+              "safe_fix_count"
+            ],
+            "type": "object"
+          },
+          "recommended_next_action": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "ok",
+          "message",
+          "changed_paths",
+          "change_set_digest",
+          "git",
+          "preflight"
+        ],
+        "type": "object"
+      },
+      "output_schema_digest": "sha256:e9343b0c9caf72de0d7fdd6ede446f62cd5ae35aa727f82f4b9e378e48c67c2f",
+      "title": "Preview Publication Commit"
     },
     {
       "annotations": {

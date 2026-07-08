@@ -44,12 +44,12 @@ of the kb-engine `journey_first_strict` export. Regenerate it with:
 KB_ENGINE_SOURCE=/path/to/kb-engine scripts/refresh-descriptors.sh
 ```
 
-The loader admits at most 12 tools, requires concrete input and output schemas,
+The loader admits at most 13 generated tools, requires concrete input and output schemas,
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.45.38 at revision
-`f4a82313fc8a94d61980ec31a8b912d62edb99e6`, which owns the exact
+The committed export is pinned to kb-engine 0.45.54 at revision
+`3861a32c939691c9a7d98f70015918204b782ca2`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -67,8 +67,11 @@ remain deterministic shortcuts.
 
 Normal cards show at most five items in about eight lines and omit private
 paths, integrity digests, MCP names, source bodies, and workflow internals.
-`kb publish` reads publication status and hands the consequence to a trusted
-operator surface; the relay never commits or pushes.
+`kb publish` previews and stores one exact path/head/digest binding. A separate
+`kb publish confirm` call revalidates that binding and asks kb-engine to commit
+and push it. Hermes receives no Git, shell, SSH, NOC, filesystem, or publication
+credential capability; the engine performs the governed effect and returns the
+readback receipt.
 
 Version 0.8.1 also exposes aggregate model-call, kb-engine-call, and context-size
 metrics only to an isolated NOC probe that supplies a valid inherited pipe and
@@ -113,8 +116,8 @@ completed-run readback, the protected local `calendar.live` socket, and the two
 generated clean-publication calls. The plugin never receives a Graph credential
 or connector path and never claims per-run human confirmation. It returns only
 compact stage truth and a six-line morning brief; full calendar and publication
-receipts remain bound to the engine run. With eleven generated engine tools plus
-this one local transport, Hermes stays at the twelve-tool cap.
+receipts remain bound to the engine run. With thirteen generated engine tools plus
+this one local transport, Hermes stays at the fourteen-tool cap.
 
 Version 0.9.1 adds `semantic_batch` to that same transport tool. It forwards
 one exact evidence or target selection through `kb.sync.status`, preserves the
