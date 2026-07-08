@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import json
 import importlib.util
 from copy import deepcopy
@@ -232,7 +233,12 @@ class FakePacketTransportContext:
         return json.dumps(self.dispatch_result)
 
 
-def _spooled_source_packet(root: Path, *, mode: int = 0o600) -> tuple[Path, dict]:
+def _spooled_source_packet(
+    root: Path,
+    *,
+    mode: int = 0o600,
+    directory_mode: int = 0o700,
+) -> tuple[Path, dict]:
     packet = {
         "schema_version": 1,
         "kind": "kb.source_evidence",
@@ -268,22 +274,39 @@ def _spooled_source_packet(root: Path, *, mode: int = 0o600) -> tuple[Path, dict
         "privacy": {"classification": "private"},
     }
     canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    spool = root / "kb-sync" / "prepare" / "run-1"
-    spool.mkdir(parents=True)
-    path = spool / f"m365.email-{digest}.json"
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    prepare = root / "kb-sync" / "prepare"
+    prepare.mkdir(parents=True)
+    prepare.chmod(0o700)
+    spool = prepare / "run-1"
+    spool.mkdir()
+    spool.chmod(directory_mode)
+    path = spool / f"m365.email-{digest[:16]}.json"
     path.write_text(json.dumps(packet, indent=2) + "\n", encoding="utf-8")
     path.chmod(mode)
     return path, packet
 
 
-def test_sync_packet_transport_forwards_exact_private_spool_without_rendering_body(
+def _packet_transport(path: Path, packet: dict) -> dict:
+    canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "kind": "private_spool",
+        "packet_path": str(path),
+        "packet_digest": f"sha256:{digest}",
+        "byte_count": path.stat().st_size,
+    }
+
+
+def test_sync_packet_transport_forwards_verified_descriptor_and_cleans_exact_spool(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     state_root = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     packet_path, packet = _spooled_source_packet(state_root)
+    packet_transport = _packet_transport(packet_path, packet)
+    spool_dir = packet_path.parent
     ctx = FakePacketTransportContext()
 
     plugin._register_integration_transport(ctx)
@@ -291,6 +314,107 @@ def test_sync_packet_transport_forwards_exact_private_spool_without_rendering_bo
     registered = ctx.registered_tools["kb_integration_transport"]
     result = json.loads(
         registered["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": packet_transport,
+            }
+        )
+    )
+
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_resume",
+            {"run_id": "hdf-kb_sync-test", "response": packet},
+        )
+    ]
+    assert result["accepted"] is True
+    assert result["retryable"] is False
+    assert result["run_id"] == "hdf-kb_sync-test"
+    assert result["next_action"] == {
+        "kind": "gather_evidence",
+        "action_index": 1,
+        "source_id": "m365.calendar",
+    }
+    assert result["cleanup"] == {"directory": "removed", "packet": "deleted"}
+    assert not packet_path.exists()
+    assert not spool_dir.exists()
+    assert "private evidence body" not in json.dumps(result)
+    assert str(packet_path) not in json.dumps(result)
+    assert packet_transport["packet_digest"] not in json.dumps(result)
+
+
+def test_sync_packet_transport_accepts_harness_capacity_sibling_and_removes_only_packet_dir(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    prepare = state_root / "kb-sync" / "prepare"
+    harness_root = prepare / "source-access-harness"
+    harness_root.mkdir(mode=0o700)
+    capacity_lock = harness_root / ".capacity.lock"
+    capacity_lock.write_text("", encoding="utf-8")
+    capacity_lock.chmod(0o600)
+    packet_dir = harness_root / "packet-1"
+    packet_path.parent.rename(packet_dir)
+    packet_path = packet_dir / packet_path.name
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is True
+    assert result["cleanup"] == {"directory": "removed", "packet": "deleted"}
+    assert harness_root.is_dir()
+    assert capacity_lock.is_file()
+    assert not packet_dir.exists()
+
+
+def test_sync_packet_transport_schema_prefers_exact_descriptor_and_marks_path_deprecated(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    parameters = ctx.registered_tools["kb_integration_transport"]["schema"]["parameters"]
+    transport = parameters["properties"]["packet_transport"]
+    assert transport["type"] == "object"
+    assert transport["required"] == [
+        "kind",
+        "packet_path",
+        "packet_digest",
+        "byte_count",
+    ]
+    assert transport["additionalProperties"] is False
+    assert transport["properties"]["kind"] == {"const": "private_spool"}
+    assert transport["properties"]["packet_digest"]["pattern"] == "^sha256:[0-9a-f]{64}$"
+    assert transport["properties"]["byte_count"]["maximum"] == 64 * 1024 * 1024
+    assert "deprecated" in parameters["properties"]["packet_path"]["description"].lower()
+
+
+def test_sync_packet_transport_keeps_explicit_deprecated_path_compatibility(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
             {
                 "operation": "resume_packet",
                 "run_id": "hdf-kb_sync-test",
@@ -306,24 +430,46 @@ def test_sync_packet_transport_forwards_exact_private_spool_without_rendering_bo
         )
     ]
     assert result["accepted"] is True
-    assert result["run_id"] == "hdf-kb_sync-test"
-    assert result["next_action"] == {
-        "kind": "gather_evidence",
-        "action_index": 1,
-        "source_id": "m365.calendar",
-    }
+    assert result["compatibility"] == "deprecated_packet_path"
+    assert result["cleanup"]["packet"] == "deleted"
     assert "private evidence body" not in json.dumps(result)
 
 
-@pytest.mark.parametrize("unsafe", ["outside", "permissive"])
-def test_sync_packet_transport_rejects_unsafe_spool(tmp_path, monkeypatch, unsafe):
+@pytest.mark.parametrize(
+    ("mutation", "error_code"),
+    [
+        ("wrong_digest", "packet_digest_mismatch"),
+        ("prefix_only_digest", "packet_digest_mismatch"),
+        ("wrong_byte_count", "packet_byte_count_mismatch"),
+        ("wrong_kind", "packet_transport_invalid"),
+        ("extra_field", "packet_transport_invalid"),
+        ("wrong_source_filename", "packet_filename_invalid"),
+    ],
+)
+def test_sync_packet_transport_rejects_invalid_descriptor_without_dispatch(
+    tmp_path, monkeypatch, mutation, error_code
+):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     state_root = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
-    if unsafe == "outside":
-        packet_path, _ = _spooled_source_packet(tmp_path / "outside")
-    else:
-        packet_path, _ = _spooled_source_packet(state_root, mode=0o644)
+    packet_path, packet = _spooled_source_packet(state_root)
+    transport = _packet_transport(packet_path, packet)
+    if mutation == "wrong_digest":
+        transport["packet_digest"] = "sha256:" + "f" * 64
+    elif mutation == "prefix_only_digest":
+        actual = transport["packet_digest"].removeprefix("sha256:")
+        transport["packet_digest"] = "sha256:" + actual[:16] + "0" * 48
+    elif mutation == "wrong_byte_count":
+        transport["byte_count"] += 1
+    elif mutation == "wrong_kind":
+        transport["kind"] = "inline"
+    elif mutation == "extra_field":
+        transport["evidence"] = "private evidence body"
+    elif mutation == "wrong_source_filename":
+        moved = packet_path.with_name(packet_path.name.replace("m365.email", "slack.message"))
+        packet_path.rename(moved)
+        packet_path = moved
+        transport["packet_path"] = str(moved)
     ctx = FakePacketTransportContext()
     plugin._register_integration_transport(ctx)
 
@@ -332,14 +478,333 @@ def test_sync_packet_transport_rejects_unsafe_spool(tmp_path, monkeypatch, unsaf
             {
                 "operation": "resume_packet",
                 "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert result["error_code"] == error_code
+    assert result["cleanup"]["packet"] == "unmanaged"
+    assert packet_path.exists()
+    assert ctx.calls == []
+    assert "private evidence body" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("unsafe", "error_code"),
+    [
+        ("outside", "packet_path_outside_spool"),
+        ("file_mode", "packet_file_unsafe"),
+        ("directory_mode", "packet_parent_unsafe"),
+        ("spool_root_mode", "packet_parent_unsafe"),
+        ("file_symlink", "packet_file_unsafe"),
+        ("parent_symlink", "packet_parent_unsafe"),
+        ("hardlink", "packet_file_unsafe"),
+        ("owner", "packet_parent_unsafe"),
+        ("over_limit", "packet_size_invalid"),
+    ],
+)
+def test_sync_packet_transport_rejects_unsafe_descriptor_spool(
+    tmp_path, monkeypatch, unsafe, error_code
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_root = tmp_path / "outside" if unsafe == "outside" else state_root
+    packet_path, packet = _spooled_source_packet(
+        packet_root,
+        mode=0o644 if unsafe == "file_mode" else 0o600,
+        directory_mode=0o755 if unsafe == "directory_mode" else 0o700,
+    )
+    transport = _packet_transport(packet_path, packet)
+    if unsafe == "file_symlink":
+        target = packet_path.with_name("target.json")
+        packet_path.rename(target)
+        packet_path.symlink_to(target)
+    elif unsafe == "spool_root_mode":
+        (state_root / "kb-sync" / "prepare").chmod(0o755)
+    elif unsafe == "parent_symlink":
+        real_parent = packet_path.parent.with_name("real-run")
+        packet_path.parent.rename(real_parent)
+        packet_path.parent.symlink_to(real_parent, target_is_directory=True)
+    elif unsafe == "hardlink":
+        os.link(packet_path, packet_path.with_name("second-link.json"))
+    elif unsafe == "owner":
+        current_uid = os.geteuid()
+        monkeypatch.setattr(plugin.os, "geteuid", lambda: current_uid + 1)
+    elif unsafe == "over_limit":
+        with packet_path.open("r+b") as handle:
+            handle.truncate(plugin.SYNC_PACKET_MAX_BYTES + 1)
+        transport["byte_count"] = packet_path.stat().st_size
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert result["error_code"] == error_code
+    assert ctx.calls == []
+    assert "private evidence body" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("body", "error_code"),
+    [
+        (b"\xff", "packet_json_invalid"),
+        (b"not-json", "packet_json_invalid"),
+        (b"[]", "packet_schema_invalid"),
+        (b'{"schema_version":1,"kind":"wrong"}', "packet_schema_invalid"),
+        (
+            b'{"schema_version":1,"kind":"kb.source_evidence","source_id":"m365.email"}',
+            "packet_source_identity_invalid",
+        ),
+    ],
+)
+def test_sync_packet_transport_rejects_invalid_packet_body_without_rendering_it(
+    tmp_path, monkeypatch, body, error_code
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    packet_path.write_bytes(body)
+    packet_path.chmod(0o600)
+    transport = _packet_transport(packet_path, packet)
+    transport["byte_count"] = len(body)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["error_code"] == error_code
+    assert ctx.calls == []
+    assert body.decode("utf-8", "replace") not in json.dumps(result)
+
+
+def test_sync_packet_transport_rejects_descriptor_and_legacy_path_together(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
                 "packet_path": str(packet_path),
             }
         )
     )
 
     assert result["accepted"] is False
+    assert result["error_code"] == "packet_transport_invalid"
     assert ctx.calls == []
+
+
+def test_sync_packet_transport_retains_packet_on_retryable_dispatch_failure(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    transport = _packet_transport(packet_path, packet)
+
+    class RetryContext(FakePacketTransportContext):
+        def dispatch_tool(self, tool_name, args):
+            self.calls.append((tool_name, args))
+            raise RuntimeError("private evidence body must not escape through errors")
+
+    ctx = RetryContext()
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is True
+    assert result["error_code"] == "kb_sync_resume_transport_failed"
+    assert result["cleanup"] == {"directory": "retained", "packet": "retained"}
+    assert packet_path.exists()
     assert "private evidence body" not in json.dumps(result)
+
+
+def test_sync_packet_transport_classifies_engine_failed_as_nonretryable(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    ctx = FakePacketTransportContext(
+        {"result": {"status": "failed", "run_id": "hdf-kb_sync-test"}}
+    )
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is False
+    assert result["error_code"] == "kb_sync_resume_transport_failed"
+    assert result["cleanup"]["packet"] == "retained"
+    assert packet_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("engine_result", "retryable"),
+    [
+        ({"status": "invalid_response", "run_id": "hdf-kb_sync-test"}, False),
+        (
+            {
+                "status": "temporarily_unavailable",
+                "run_id": "hdf-kb_sync-test",
+                "retryable": True,
+            },
+            True,
+        ),
+        ({"status": "awaiting_action", "run_id": "another-run"}, False),
+    ],
+)
+def test_sync_packet_transport_retains_packet_when_engine_does_not_accept(
+    tmp_path, monkeypatch, engine_result, retryable
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    ctx = FakePacketTransportContext({"result": engine_result})
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is retryable
+    assert result["error_code"] == "kb_sync_resume_not_accepted"
+    assert result["cleanup"]["packet"] == "retained"
+    assert packet_path.exists()
+    assert "private evidence body" not in json.dumps(result)
+
+
+def test_sync_packet_transport_does_not_unlink_when_name_changes_inode(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    opened_inode_path = packet_path.with_name("opened-inode.json")
+
+    class SwapContext(FakePacketTransportContext):
+        def dispatch_tool(self, tool_name, args):
+            self.calls.append((tool_name, args))
+            packet_path.rename(opened_inode_path)
+            packet_path.write_text("replacement", encoding="utf-8")
+            packet_path.chmod(0o600)
+            return json.dumps(self.dispatch_result)
+
+    ctx = SwapContext()
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is True
+    assert result["cleanup"] == {
+        "directory": "retained",
+        "packet": "retained_inode_changed",
+    }
+    assert packet_path.exists()
+    assert opened_inode_path.exists()
+    assert "private evidence body" not in json.dumps(result)
+
+
+def test_sync_packet_transport_does_not_unlink_when_open_inode_content_changes(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+
+    class RewriteContext(FakePacketTransportContext):
+        def dispatch_tool(self, tool_name, args):
+            self.calls.append((tool_name, args))
+            packet_path.write_text("replacement content", encoding="utf-8")
+            packet_path.chmod(0o600)
+            return json.dumps(self.dispatch_result)
+
+    ctx = RewriteContext()
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is True
+    assert result["cleanup"] == {
+        "directory": "retained",
+        "packet": "retained_content_changed",
+    }
+    assert packet_path.read_text(encoding="utf-8") == "replacement content"
 
 
 def test_context_search_reuses_the_single_transport_without_a_sync_run(
@@ -3167,10 +3632,15 @@ def test_install_evidence_rejects_unowned_caller_shape(tmp_path, monkeypatch):
 def test_readme_and_manifest_define_real_rollback_contract():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     manifest = yaml.safe_load((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.1"
+    assert manifest["version"] == "0.10.2"
+    assert project["project"]["version"] == manifest["version"]
+    assert manifest["migrations"][-1]["version"] == "0.10.2"
+    assert "packet_transport" in readme
+    assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 

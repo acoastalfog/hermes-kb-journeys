@@ -185,6 +185,19 @@ snapshot without confirmation details, and every source reports its own typed
 degradation. Source content is clipped before entering model context, and the
 whole result remains under the existing transport result bound.
 
+Version 0.10.2 makes the complete Source Access `packet_transport` object the
+preferred `resume_packet` contract. The caller passes `kind`, absolute private
+path, full canonical SHA-256 digest, and actual byte count unchanged. The
+plugin opens the confined spool and every in-spool parent without following
+links, validates owner and private modes, keeps the verified file descriptor
+open through the existing `kb.sync.resume` call, and deletes only that exact
+inode after an accepted engine response. Invalid and retryable responses retain
+the packet with compact cleanup state; the private packet body and its transport
+path and digest never appear in the result. The old bare `packet_path` input
+remains an explicitly deprecated compatibility branch for the current
+`kb-sync-gather` guidance and must be removed after those callers migrate to the
+descriptor.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
