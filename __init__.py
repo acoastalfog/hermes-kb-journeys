@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import datetime as _dt
+import errno
 import hashlib
 import inspect
 import json
@@ -93,6 +94,10 @@ INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
 CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
 CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
+SYNC_PACKET_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SYNC_PACKET_ACCEPTED_STATUSES = frozenset(
+    {"awaiting_action", "ready_to_apply", "applying", "completed", "completed_with_degradation"}
+)
 INTEGRATION_TRANSPORT_MAX_RESULT_BYTES = 90 * 1024
 CONTEXT_SEARCH_MAX_WINDOW_DAYS = 45
 CONTEXT_SEARCH_SLACK_MAX_WINDOW_DAYS = 7
@@ -7328,47 +7333,349 @@ def _sync_packet_spool_root() -> Path:
     state_root = Path(
         os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
     ).expanduser()
-    return (state_root / "kb-sync" / "prepare").resolve()
+    return state_root / "kb-sync" / "prepare"
 
 
-def _load_sync_spooled_packet(packet_path: Any) -> dict[str, Any]:
-    raw_path = str(packet_path or "").strip()
-    if not raw_path or "\x00" in raw_path or "\n" in raw_path or "\r" in raw_path:
-        raise ValueError("packet_path is required")
-    requested_path = Path(raw_path).expanduser()
-    if not requested_path.is_absolute() or requested_path.is_symlink():
-        raise ValueError("packet_path must be an absolute regular spool file")
-    spool_root = _sync_packet_spool_root()
-    resolved_path = requested_path.resolve(strict=True)
-    try:
-        resolved_path.relative_to(spool_root)
-    except ValueError as exc:
-        raise ValueError("packet_path is outside the private sync spool") from exc
-    info = resolved_path.stat()
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError("packet_path is not a regular file")
-    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
-        raise ValueError("packet_path ownership or mode is unsafe")
-    if info.st_size <= 0 or info.st_size > SYNC_PACKET_MAX_BYTES:
-        raise ValueError("packet_path size is outside the safe transport bound")
-    try:
-        packet = json.loads(resolved_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("packet_path does not contain valid UTF-8 JSON") from exc
-    if not isinstance(packet, dict):
-        raise ValueError("spooled packet must be a JSON object")
-    if packet.get("schema_version") != 1 or packet.get("kind") != "kb.source_evidence":
-        raise ValueError("spooled packet is not kb.source_evidence schema v1")
-    if not all(
-        isinstance(packet.get(field), str) and str(packet[field]).strip()
-        for field in ("source_id", "connector_id", "harness_id")
+class _SyncPacketTransportError(ValueError):
+    """Content-free rejection for an untrusted private-spool descriptor."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class _LoadedSyncPacket:
+    """An opened packet and the descriptors needed for exact-inode cleanup."""
+
+    __slots__ = (
+        "compatibility",
+        "file_fd",
+        "file_name",
+        "file_stat",
+        "packet",
+        "parent_fd",
+        "parent_is_spool_root",
+        "parent_name",
+        "parent_parent_fd",
+        "parent_stat",
+    )
+
+    def __init__(
+        self,
+        *,
+        compatibility: str,
+        file_fd: int,
+        file_name: str,
+        file_stat: os.stat_result,
+        packet: dict[str, Any],
+        parent_fd: int,
+        parent_is_spool_root: bool,
+        parent_name: str,
+        parent_parent_fd: int,
+        parent_stat: os.stat_result,
+    ) -> None:
+        self.compatibility = compatibility
+        self.file_fd = file_fd
+        self.file_name = file_name
+        self.file_stat = file_stat
+        self.packet = packet
+        self.parent_fd = parent_fd
+        self.parent_is_spool_root = parent_is_spool_root
+        self.parent_name = parent_name
+        self.parent_parent_fd = parent_parent_fd
+        self.parent_stat = parent_stat
+
+    def close(self) -> None:
+        for field in ("file_fd", "parent_fd", "parent_parent_fd"):
+            descriptor = getattr(self, field)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                setattr(self, field, -1)
+
+    def cleanup_after_accept(self) -> dict[str, str]:
+        """Delete only the still-named inode opened and verified above."""
+        try:
+            current = os.stat(
+                self.file_name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            return {"directory": "retained", "packet": "not_found_after_accept"}
+        if (
+            current.st_dev != self.file_stat.st_dev
+            or current.st_ino != self.file_stat.st_ino
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != self.file_stat.st_uid
+            or stat.S_IMODE(current.st_mode) != 0o600
+        ):
+            return {"directory": "retained", "packet": "retained_inode_changed"}
+        if (
+            current.st_size != self.file_stat.st_size
+            or current.st_mtime_ns != self.file_stat.st_mtime_ns
+        ):
+            return {"directory": "retained", "packet": "retained_content_changed"}
+        try:
+            os.unlink(self.file_name, dir_fd=self.parent_fd)
+        except OSError:
+            return {"directory": "retained", "packet": "retained_cleanup_failed"}
+
+        directory = "retained"
+        if not self.parent_is_spool_root:
+            try:
+                current_parent = os.stat(
+                    self.parent_name,
+                    dir_fd=self.parent_parent_fd,
+                    follow_symlinks=False,
+                )
+                same_parent = (
+                    current_parent.st_dev == self.parent_stat.st_dev
+                    and current_parent.st_ino == self.parent_stat.st_ino
+                    and stat.S_ISDIR(current_parent.st_mode)
+                    and current_parent.st_uid == self.parent_stat.st_uid
+                    and stat.S_IMODE(current_parent.st_mode) == 0o700
+                )
+                if same_parent:
+                    os.rmdir(self.parent_name, dir_fd=self.parent_parent_fd)
+                    directory = "removed"
+            except OSError as exc:
+                if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                    directory = "retained"
+        return {"directory": directory, "packet": "deleted"}
+
+
+def _packet_transport_descriptor(
+    packet_transport: Any,
+    legacy_packet_path: Any,
+) -> tuple[dict[str, Any], str]:
+    has_transport = packet_transport is not None
+    has_legacy = legacy_packet_path is not None and str(legacy_packet_path).strip() != ""
+    if has_transport == has_legacy:
+        raise _SyncPacketTransportError("packet_transport_invalid")
+    if has_transport:
+        if not isinstance(packet_transport, dict) or set(packet_transport) != {
+            "kind",
+            "packet_path",
+            "packet_digest",
+            "byte_count",
+        }:
+            raise _SyncPacketTransportError("packet_transport_invalid")
+        if packet_transport.get("kind") != "private_spool":
+            raise _SyncPacketTransportError("packet_transport_invalid")
+        digest = packet_transport.get("packet_digest")
+        byte_count = packet_transport.get("byte_count")
+        if not isinstance(digest, str) or not SYNC_PACKET_DIGEST_RE.fullmatch(digest):
+            raise _SyncPacketTransportError("packet_transport_invalid")
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count <= 0
+        ):
+            raise _SyncPacketTransportError("packet_transport_invalid")
+        if byte_count > SYNC_PACKET_MAX_BYTES:
+            raise _SyncPacketTransportError("packet_size_invalid")
+        return packet_transport, ""
+    return {"packet_path": legacy_packet_path}, "deprecated_packet_path"
+
+
+def _open_sync_packet_parent(
+    requested_path: Path,
+    spool_root: Path,
+    *,
+    strict_descriptor: bool,
+) -> tuple[int, os.stat_result, int, str, bool]:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise _SyncPacketTransportError("packet_parent_unsafe")
+    if (
+        not requested_path.is_absolute()
+        or not spool_root.is_absolute()
+        or ".." in requested_path.parts
+        or ".." in spool_root.parts
     ):
-        raise ValueError("spooled packet is missing its source identity")
-    canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
-    digest_prefix = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    if not resolved_path.name.endswith(f"-{digest_prefix}.json"):
-        raise ValueError("spooled packet filename does not bind its content digest")
-    return packet
+        raise _SyncPacketTransportError("packet_path_outside_spool")
+    requested_parts = requested_path.parts
+    root_parts = spool_root.parts
+    if (
+        requested_parts[: len(root_parts)] != root_parts
+        or len(requested_parts) <= len(root_parts) + 1
+    ):
+        raise _SyncPacketTransportError("packet_path_outside_spool")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+    current_fd = os.open("/", directory_flags)
+    parent_parent_fd = -1
+    current_path = Path("/")
+    secure_parent = False
+    components = list(requested_path.parent.parts[1:])
+    try:
+        for index, component in enumerate(components):
+            if not component or component in {".", ".."}:
+                raise _SyncPacketTransportError("packet_parent_unsafe")
+            if index == len(components) - 1:
+                parent_parent_fd = os.dup(current_fd)
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise _SyncPacketTransportError("packet_parent_unsafe") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+            current_path = current_path / component
+            metadata = os.fstat(current_fd)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise _SyncPacketTransportError("packet_parent_unsafe")
+            if current_path == spool_root:
+                secure_parent = True
+            if secure_parent:
+                mode = stat.S_IMODE(metadata.st_mode)
+                mode_safe = mode == 0o700 if strict_descriptor else mode & 0o022 == 0
+                if metadata.st_uid != os.geteuid() or not mode_safe:
+                    raise _SyncPacketTransportError("packet_parent_unsafe")
+        if not secure_parent or parent_parent_fd < 0:
+            raise _SyncPacketTransportError("packet_parent_unsafe")
+        parent_stat = os.fstat(current_fd)
+        return (
+            current_fd,
+            parent_stat,
+            parent_parent_fd,
+            components[-1],
+            requested_path.parent == spool_root,
+        )
+    except Exception:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+        if parent_parent_fd >= 0:
+            try:
+                os.close(parent_parent_fd)
+            except OSError:
+                pass
+        raise
+
+
+def _read_sync_packet(file_fd: int, expected_size: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    os.lseek(file_fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(file_fd, min(1024 * 1024, expected_size + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > expected_size or total > SYNC_PACKET_MAX_BYTES:
+            raise _SyncPacketTransportError("packet_size_invalid")
+    if total != expected_size:
+        raise _SyncPacketTransportError("packet_size_invalid")
+    return b"".join(chunks)
+
+
+def _load_sync_spooled_packet(
+    packet_transport: Any,
+    legacy_packet_path: Any = None,
+) -> _LoadedSyncPacket:
+    descriptor, compatibility = _packet_transport_descriptor(
+        packet_transport,
+        legacy_packet_path,
+    )
+    raw_path = str(descriptor.get("packet_path") or "").strip()
+    if not raw_path or any(control in raw_path for control in ("\x00", "\n", "\r")):
+        raise _SyncPacketTransportError("packet_transport_invalid")
+    requested_path = Path(raw_path).expanduser()
+    spool_root = _sync_packet_spool_root()
+    strict_descriptor = not compatibility
+    parent_fd = -1
+    parent_parent_fd = -1
+    file_fd = -1
+    try:
+        (
+            parent_fd,
+            parent_stat,
+            parent_parent_fd,
+            parent_name,
+            parent_is_spool_root,
+        ) = _open_sync_packet_parent(
+            requested_path,
+            spool_root,
+            strict_descriptor=strict_descriptor,
+        )
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            file_flags |= os.O_CLOEXEC
+        try:
+            file_fd = os.open(requested_path.name, file_flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise _SyncPacketTransportError("packet_file_unsafe") from exc
+        initial = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or initial.st_uid != os.geteuid()
+            or stat.S_IMODE(initial.st_mode) != 0o600
+        ):
+            raise _SyncPacketTransportError("packet_file_unsafe")
+        if initial.st_size <= 0 or initial.st_size > SYNC_PACKET_MAX_BYTES:
+            raise _SyncPacketTransportError("packet_size_invalid")
+        if strict_descriptor and descriptor["byte_count"] != initial.st_size:
+            raise _SyncPacketTransportError("packet_byte_count_mismatch")
+        raw = _read_sync_packet(file_fd, initial.st_size)
+        after_read = os.fstat(file_fd)
+        if (
+            after_read.st_dev != initial.st_dev
+            or after_read.st_ino != initial.st_ino
+            or after_read.st_size != initial.st_size
+            or after_read.st_mtime_ns != initial.st_mtime_ns
+        ):
+            raise _SyncPacketTransportError("packet_file_changed")
+        try:
+            packet = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise _SyncPacketTransportError("packet_json_invalid") from exc
+        if not isinstance(packet, dict):
+            raise _SyncPacketTransportError("packet_schema_invalid")
+        if packet.get("schema_version") != 1 or packet.get("kind") != "kb.source_evidence":
+            raise _SyncPacketTransportError("packet_schema_invalid")
+        if not all(
+            isinstance(packet.get(field), str) and str(packet[field]).strip()
+            for field in ("source_id", "connector_id", "harness_id")
+        ):
+            raise _SyncPacketTransportError("packet_source_identity_invalid")
+        canonical = json.dumps(packet, sort_keys=True, ensure_ascii=False)
+        full_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if strict_descriptor and descriptor["packet_digest"] != f"sha256:{full_digest}":
+            raise _SyncPacketTransportError("packet_digest_mismatch")
+        safe_source = re.sub(
+            r"[^A-Za-z0-9_.-]",
+            "-",
+            str(packet["source_id"]),
+        )
+        if requested_path.name != f"{safe_source}-{full_digest[:16]}.json":
+            raise _SyncPacketTransportError("packet_filename_invalid")
+        return _LoadedSyncPacket(
+            compatibility=compatibility,
+            file_fd=file_fd,
+            file_name=requested_path.name,
+            file_stat=initial,
+            packet=packet,
+            parent_fd=parent_fd,
+            parent_is_spool_root=parent_is_spool_root,
+            parent_name=parent_name,
+            parent_parent_fd=parent_parent_fd,
+            parent_stat=parent_stat,
+        )
+    except Exception:
+        for descriptor_fd in (file_fd, parent_fd, parent_parent_fd):
+            if descriptor_fd >= 0:
+                try:
+                    os.close(descriptor_fd)
+                except OSError:
+                    pass
+        raise
 
 
 def _compact_sync_packet_result(payload: Any, *, run_id: str) -> dict[str, Any]:
@@ -7395,12 +7702,63 @@ def _compact_sync_packet_result(payload: Any, *, run_id: str) -> dict[str, Any]:
             compact_action["evidence_ref_count"] = len(evidence_refs)
     return {
         "accepted": True,
+        "retryable": False,
         "run_id": str(payload.get("run_id") or run_id),
         "status": payload.get("status"),
         "next_action": compact_action,
         "source_currency": payload.get("source_currency"),
         "publication": payload.get("publication"),
         "instruction": "Continue with kb.sync.status for this exact run.",
+    }
+
+
+def _sync_packet_engine_acceptance(
+    payload: Any,
+    *,
+    run_id: str,
+) -> tuple[bool, bool]:
+    """Return accepted/retryable without echoing an engine packet."""
+    if not isinstance(payload, dict):
+        return False, False
+    observed_run_id = str(payload.get("run_id") or "").strip()
+    status = str(payload.get("status") or "").strip().lower()
+    if observed_run_id != run_id:
+        return False, False
+    if status in SYNC_PACKET_ACCEPTED_STATUSES:
+        return True, False
+    return False, payload.get("retryable") is True
+
+
+def _sync_packet_dispatch_is_retryable(errors: list[str]) -> bool:
+    """Keep transient dispatch failures distinct from contract rejections."""
+    joined = " ".join(errors).lower()
+    nonretryable_markers = (
+        "runtime output violates generated schema",
+        "not present in generated descriptor allowlist",
+        ".status=failed",
+        ".status=cancelled",
+        ".status=canceled",
+    )
+    return not any(marker in joined for marker in nonretryable_markers)
+
+
+def _sync_packet_failure(
+    *,
+    run_id: str,
+    error_code: str,
+    retryable: bool,
+    managed: bool,
+) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "retryable": retryable,
+        "run_id": run_id,
+        "error": "private packet transport was not accepted",
+        "error_code": error_code,
+        "cleanup": {
+            "directory": "retained" if managed else "unchanged",
+            "packet": "retained" if managed else "unmanaged",
+        },
     }
 
 
@@ -8268,12 +8626,16 @@ def _search_slack_context(
     if not match:
         return {"source": "slack", "status": "degraded", "error": "connector returned no private spool"}, []
     spool = Path(match.group(1))
+    loaded: _LoadedSyncPacket | None = None
     try:
-        packet = _load_sync_spooled_packet(spool)
+        loaded = _load_sync_spooled_packet(None, spool)
+        packet = loaded.packet
+        loaded.cleanup_after_accept()
     except (OSError, ValueError) as exc:
         return {"source": "slack", "status": "degraded", "error": _clip(str(exc), 240)}, []
     finally:
-        spool.unlink(missing_ok=True)
+        if loaded is not None:
+            loaded.close()
     rows = _context_rows(packet.get("items") if isinstance(packet, dict) else None)
     selected = [row for row in rows if _context_score(row, tokens) > 0][:limit]
     status: dict[str, Any] = {
@@ -8304,12 +8666,16 @@ def _search_tripit_context(
     if not match:
         return {"source": "tripit", "status": "degraded", "error": "connector returned no private spool"}, []
     spool = Path(match.group(1))
+    loaded: _LoadedSyncPacket | None = None
     try:
-        packet = _load_sync_spooled_packet(spool)
+        loaded = _load_sync_spooled_packet(None, spool)
+        packet = loaded.packet
+        loaded.cleanup_after_accept()
     except (OSError, ValueError) as exc:
         return {"source": "tripit", "status": "degraded", "error": _clip(str(exc), 240)}, []
     finally:
-        spool.unlink(missing_ok=True)
+        if loaded is not None:
+            loaded.close()
     rows = _context_rows(packet.get("items") if isinstance(packet, dict) else None)
     scored = sorted(rows, key=lambda row: _context_score(row, tokens), reverse=True)
     positive = [row for row in scored if _context_score(row, tokens) > 0]
@@ -8644,11 +9010,41 @@ def _register_integration_transport(ctx: Any) -> None:
                     "type": "string",
                     "description": "The exact active kb.sync run id.",
                 },
+                "packet_transport": {
+                    "type": "object",
+                    "description": (
+                        "The exact compact descriptor returned by "
+                        "source_gather(delivery=private_spool). Pass it unchanged."
+                    ),
+                    "properties": {
+                        "kind": {"const": "private_spool"},
+                        "packet_path": {
+                            "type": "string",
+                            "pattern": "^/",
+                        },
+                        "packet_digest": {
+                            "type": "string",
+                            "pattern": "^sha256:[0-9a-f]{64}$",
+                        },
+                        "byte_count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": SYNC_PACKET_MAX_BYTES,
+                        },
+                    },
+                    "required": [
+                        "kind",
+                        "packet_path",
+                        "packet_digest",
+                        "byte_count",
+                    ],
+                    "additionalProperties": False,
+                },
                 "packet_path": {
                     "type": "string",
                     "description": (
-                        "Absolute mode-0600 file beneath the private "
-                        "XDG_STATE_HOME/kb-sync/prepare spool."
+                        "Deprecated compatibility input for existing kb-sync-gather callers. "
+                        "Use packet_transport for new Source Access gathers."
                     ),
                 },
                 "calendar_envelope": {
@@ -8738,7 +9134,17 @@ def _register_integration_transport(ctx: Any) -> None:
             "oneOf": [
                 {
                     "properties": {"operation": {"const": "resume_packet"}},
-                    "required": ["run_id", "packet_path"],
+                    "required": ["run_id"],
+                    "oneOf": [
+                        {
+                            "required": ["packet_transport"],
+                            "not": {"required": ["packet_path"]},
+                        },
+                        {
+                            "required": ["packet_path"],
+                            "not": {"required": ["packet_transport"]},
+                        },
+                    ],
                 },
                 {
                     "properties": {"operation": {"const": "daily_integration_closeout"}},
@@ -8764,6 +9170,7 @@ def _register_integration_transport(ctx: Any) -> None:
                     "not": {
                         "anyOf": [
                             {"required": ["packet_path"]},
+                            {"required": ["packet_transport"]},
                             {"required": ["calendar_envelope"]},
                             {"required": ["evidence_refs"]},
                             {"required": ["target_refs"]}
@@ -8786,7 +9193,12 @@ def _register_integration_transport(ctx: Any) -> None:
         run_id = str(args.get("run_id") or "").strip()
         if not SYNC_PACKET_RUN_ID_RE.fullmatch(run_id):
             return json.dumps(
-                {"accepted": False, "error": "run_id is invalid"},
+                {
+                    "accepted": False,
+                    "retryable": False,
+                    "error": "run_id is invalid",
+                    "error_code": "run_id_invalid",
+                },
                 separators=(",", ":"),
             )
         if operation == "daily_integration_closeout":
@@ -8803,35 +9215,79 @@ def _register_integration_transport(ctx: Any) -> None:
             )
         if operation != "resume_packet":
             return json.dumps(
-                {"accepted": False, "run_id": run_id, "error": "operation is invalid"},
-                separators=(",", ":"),
-            )
-        try:
-            packet = _load_sync_spooled_packet(args.get("packet_path"))
-        except (OSError, ValueError) as exc:
-            return json.dumps(
-                {"accepted": False, "run_id": run_id, "error": str(exc)},
-                separators=(",", ":"),
-            )
-        _tool, payload, errors = _dispatch_first(
-            ctx,
-            _mcp_target(),
-            [("kb.sync.resume", {"run_id": run_id, "response": packet})],
-        )
-        if payload is None:
-            return json.dumps(
                 {
                     "accepted": False,
+                    "retryable": False,
                     "run_id": run_id,
-                    "error": _clip("; ".join(errors), 240) or "kb.sync.resume failed",
+                    "error": "operation is invalid",
+                    "error_code": "operation_invalid",
                 },
                 separators=(",", ":"),
             )
-        return json.dumps(
-            _compact_sync_packet_result(payload, run_id=run_id),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        loaded: _LoadedSyncPacket | None = None
+        try:
+            loaded = _load_sync_spooled_packet(
+                args.get("packet_transport"),
+                args.get("packet_path"),
+            )
+        except _SyncPacketTransportError as exc:
+            return json.dumps(
+                _sync_packet_failure(
+                    run_id=run_id,
+                    error_code=exc.code,
+                    retryable=False,
+                    managed=False,
+                ),
+                separators=(",", ":"),
+            )
+        except OSError:
+            return json.dumps(
+                _sync_packet_failure(
+                    run_id=run_id,
+                    error_code="packet_file_unsafe",
+                    retryable=False,
+                    managed=False,
+                ),
+                separators=(",", ":"),
+            )
+        try:
+            _tool, payload, errors = _dispatch_first(
+                ctx,
+                _mcp_target(),
+                [("kb.sync.resume", {"run_id": run_id, "response": loaded.packet})],
+            )
+            if payload is None:
+                return json.dumps(
+                    _sync_packet_failure(
+                        run_id=run_id,
+                        error_code="kb_sync_resume_transport_failed",
+                        retryable=_sync_packet_dispatch_is_retryable(errors),
+                        managed=True,
+                    ),
+                    separators=(",", ":"),
+                )
+            accepted, retryable = _sync_packet_engine_acceptance(payload, run_id=run_id)
+            if not accepted:
+                return json.dumps(
+                    _sync_packet_failure(
+                        run_id=run_id,
+                        error_code="kb_sync_resume_not_accepted",
+                        retryable=retryable,
+                        managed=True,
+                    ),
+                    separators=(",", ":"),
+                )
+            result = _compact_sync_packet_result(payload, run_id=run_id)
+            result["cleanup"] = loaded.cleanup_after_accept()
+            if loaded.compatibility:
+                result["compatibility"] = loaded.compatibility
+            return json.dumps(
+                result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        finally:
+            loaded.close()
 
     ctx.register_tool(
         name=INTEGRATION_TRANSPORT_TOOL,
