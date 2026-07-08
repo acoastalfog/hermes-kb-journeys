@@ -48,8 +48,8 @@ source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 if source.get("selection") != "primary_chat":
     raise SystemExit("exporter did not return the primary_chat selection")
 tools = source.get("tools")
-if not isinstance(tools, list) or not 1 <= len(tools) <= 12:
-    raise SystemExit("primary_chat must export between one and twelve tools")
+if not isinstance(tools, list) or not 1 <= len(tools) <= 13:
+    raise SystemExit("primary_chat must export between one and thirteen tools")
 tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
 if tool_names.intersection(legacy_names) or any(str(name).startswith("kb_sync.") for name in tool_names):
     raise SystemExit("primary_chat export contains a forbidden legacy tool")

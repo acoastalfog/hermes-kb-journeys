@@ -11,7 +11,7 @@ permissions:
 jobs:
   contract:
     env:
-      KB_ENGINE_DESCRIPTOR_REF: f4a82313fc8a94d61980ec31a8b912d62edb99e6
+      KB_ENGINE_DESCRIPTOR_REF: 3861a32c939691c9a7d98f70015918204b782ca2
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

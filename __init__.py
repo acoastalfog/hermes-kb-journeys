@@ -85,6 +85,7 @@ QUEUE_REPLY_STATE_TTL_SECONDS = 15 * 60
 QUEUE_SCOPE_STATE_TTL_SECONDS = 15 * 60
 MEETING_HANDOFF_STATE_TTL_SECONDS = 15 * 60
 SYNC_PREVIEW_STATE_TTL_SECONDS = 15 * 60
+PUBLICATION_PREVIEW_STATE_TTL_SECONDS = 15 * 60
 SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
@@ -644,8 +645,8 @@ def _validate_descriptor_bundle(value: Any) -> tuple[dict[str, Any], dict[str, d
     if not isinstance(source_digest, str) or not DESCRIPTOR_DIGEST_RE.fullmatch(source_digest):
         raise ValueError("descriptor bundle has no valid exporter digest")
     tools = body.get("tools")
-    if not isinstance(tools, list) or not tools or len(tools) > 12:
-        raise ValueError("descriptor bundle must select between one and twelve tools")
+    if not isinstance(tools, list) or not tools or len(tools) > 13:
+        raise ValueError("descriptor bundle must select between one and thirteen tools")
     tool_map: dict[str, dict[str, Any]] = {}
     for descriptor in tools:
         if not isinstance(descriptor, dict):
@@ -713,7 +714,7 @@ _DESCRIPTOR_BUNDLE, _DESCRIPTOR_TOOLS, _DESCRIPTOR_ERROR = _load_descriptor_bund
 
 
 def _descriptor_allowlist() -> frozenset[str]:
-    if not 1 <= len(_DESCRIPTOR_TOOLS) <= 12:
+    if not 1 <= len(_DESCRIPTOR_TOOLS) <= 13:
         return frozenset()
     return frozenset(_DESCRIPTOR_TOOLS)
 
@@ -1077,6 +1078,10 @@ def _sync_preview_state_path():
     return _hermes_state_path("kb_sync_preview_state.json")
 
 
+def _publication_preview_state_path():
+    return _hermes_state_path("kb_publication_preview_state.json")
+
+
 def _load_queue_reply_states() -> dict[str, Any]:
     path = _queue_reply_state_path()
     try:
@@ -1148,6 +1153,36 @@ def _save_sync_preview_states(states: dict[str, Any]) -> None:
         path.chmod(0o600)
     except OSError:
         logger.debug("kb_journeys: failed to persist sync preview state", exc_info=True)
+
+
+def _load_publication_preview_states() -> dict[str, Any]:
+    path = _publication_preview_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_publication_preview_states(states: dict[str, Any]) -> None:
+    path = _publication_preview_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(states, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+    except OSError:
+        logger.debug("kb_journeys: failed to persist publication preview state", exc_info=True)
+
+
+def _clear_publication_preview_state(session_id: str) -> None:
+    if not session_id:
+        return
+    states = _load_publication_preview_states()
+    if states.pop(session_id, None) is not None:
+        _save_publication_preview_states(states)
 
 
 def _clear_meeting_handoff_state(session_id: str) -> None:
@@ -6093,112 +6128,218 @@ def _format_changed_paths(paths: list[str], *, limit: int = 10) -> list[str]:
     return lines
 
 
-def _render_publish_command(ctx: Any, target: str, args: str) -> dict[str, Any]:
-    """Report publication truth and hand off the consequence boundary."""
-    del args
-    if _descriptor("publication.status") is None:
+def _publication_preview_binding(data: dict[str, Any]) -> dict[str, Any]:
+    git_state = data.get("git") if isinstance(data.get("git"), dict) else {}
+    return {
+        "message": str(data.get("message") or ""),
+        "git_head": str(git_state.get("head") or ""),
+        "changed_paths": _changed_paths(data),
+        "change_set_digest": str(data.get("change_set_digest") or ""),
+        "status": str(data.get("status") or ""),
+    }
+
+
+def _store_publication_preview_state(
+    session_id: str,
+    *,
+    source: Any,
+    target: str,
+    binding: dict[str, Any],
+) -> bool:
+    if not session_id:
+        return False
+    states = _load_publication_preview_states()
+    states[session_id] = {
+        "schema_version": 1,
+        "recorded_at": time.time(),
+        "actor_id": _short(getattr(source, "user_id", ""), ""),
+        "target": target,
+        "binding": binding,
+    }
+    _save_publication_preview_states(states)
+    return True
+
+
+def _get_publication_preview_state(
+    session_id: str, *, source: Any, target: str
+) -> tuple[dict[str, Any] | None, str]:
+    if not session_id:
+        return None, "missing_session"
+    state = _load_publication_preview_states().get(session_id)
+    if not isinstance(state, dict):
+        return None, "missing"
+    recorded_at = float(state.get("recorded_at") or 0.0)
+    if not recorded_at or time.time() - recorded_at > PUBLICATION_PREVIEW_STATE_TTL_SECONDS:
+        _clear_publication_preview_state(session_id)
+        return None, "stale"
+    actor_id = _short(state.get("actor_id"), "")
+    current_actor = _short(getattr(source, "user_id", ""), "")
+    if actor_id and current_actor and actor_id != current_actor:
+        return None, "wrong_actor"
+    if state.get("target") != target or not isinstance(state.get("binding"), dict):
+        return None, "invalid"
+    return state, ""
+
+
+def _publication_message(args: str) -> tuple[bool, str]:
+    text = str(args or "").strip()
+    head, _, tail = text.partition(" ")
+    confirm = head.lower() in {"confirm", "confirmed", "yes"}
+    message = tail.strip() if confirm else text
+    return confirm, message or "kb: publish reviewed knowledge changes"
+
+
+def _render_publication_result(data: dict[str, Any], *, changed_count: int) -> dict[str, Any]:
+    publication = data.get("publication") if isinstance(data.get("publication"), dict) else {}
+    git_state = publication.get("git") if isinstance(publication.get("git"), dict) else {}
+    pushed = publication.get("pushed") is True
+    clean = git_state.get("clean") is True
+    ahead = int(git_state.get("ahead") or 0)
+    if data.get("ok") is True and pushed and clean and ahead == 0:
+        commit = _short(publication.get("commit") or git_state.get("head"), "")[:8]
+        detail = f" Commit {commit}." if commit else ""
         return {
             "title": "Publication",
-            "status": "daily_integration_owned",
+            "status": "published",
             "text": (
-                "*Publication*\n"
-                "Clean Daily Integration runs publish automatically after calendar and Git readback.\n"
-                "Ad hoc publication remains a trusted operator action. No publication was attempted."
+                f"*Publication*\nPublished {changed_count} reviewed paths.{detail}\n"
+                "Git readback is clean and current."
             ),
             "actions": [],
         }
-    _tool, data, errors = _dispatch_first(ctx, target, [("publication.status", {})])
-    if not isinstance(data, dict):
-        return _render_error("Publication", target, errors)
-
-    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
-    git_state = data.get("git") if isinstance(data.get("git"), dict) else {}
-    raw_status = str(data.get("status") or "").strip().lower()
-    scope_state = str(scope.get("publication_state") or "").strip().lower()
-    try:
-        ahead = int(git_state.get("ahead") or 0)
-        behind = int(git_state.get("behind") or 0)
-    except (TypeError, ValueError):
-        ahead = behind = 0
-
-    blocked = (
-        data.get("ok") is False
-        or behind > 0
-        or raw_status in {"blocked", "error", "failed", "not_git_repo", "unavailable"}
-        or scope_state in {"blocked", "publication_blocked", "publication_unavailable"}
-    )
-    dirty = (
-        not blocked
-        and (
-            git_state.get("clean") is False
-            or raw_status == "dirty"
-            or scope_state in {"publication_pending", "manual_publication_expected"}
-        )
-    )
-    push_pending = (
-        not blocked
-        and not dirty
-        and (
-            ahead > 0
-            or raw_status in {"ahead", "unpushed"}
-            or scope_state == "push_expected"
-        )
-    )
-    published = (
-        not blocked
-        and not dirty
-        and not push_pending
-        and data.get("ok") is True
-        and git_state.get("clean") is True
-        and raw_status in {"clean", "ready", "published"}
-    )
-
-    lines = [_emphasis_headline("Publication")]
-    if blocked:
-        posture = "blocked"
-        lines.extend(
-            [
-                "Publication is blocked by the current workspace state.",
-                "Next: resolve the blocker on a trusted operator surface.",
-            ]
-        )
-    elif dirty:
-        posture = "dirty"
-        lines.extend(
-            [
-                "Reviewed changes are ready for publication.",
-                "Next: approve one publish operation on a trusted operator surface.",
-            ]
-        )
-    elif push_pending:
-        posture = "ahead"
-        lines.extend(
-            [
-                "The reviewed commit exists but has not been pushed.",
-                "Next: approve one push and replica convergence on a trusted operator surface.",
-            ]
-        )
-    elif published:
-        posture = "published"
-        lines.extend(
-            [
-                "Reviewed changes are already published.",
-                "Next: no publication action is needed.",
-            ]
-        )
-    else:
-        posture = "unknown"
-        lines.extend(
-            [
-                "Publication state could not be verified.",
-                "Next: check it on a trusted operator surface.",
-            ]
-        )
-    lines.insert(-1, "No publication was attempted.")
     return {
         "title": "Publication",
-        "status": posture,
-        "text": "\n".join(lines[:6]),
+        "status": "blocked",
+        "text": (
+            "*Publication*\nPublication did not complete.\n"
+            "No success is claimed; run /kb publish for a fresh exact preview."
+        ),
+        "actions": [],
+    }
+
+
+def _render_publish_command(
+    ctx: Any,
+    target: str,
+    args: str,
+    *,
+    session_id: str = "",
+    source: Any = None,
+) -> dict[str, Any]:
+    """Preview and confirm one exact ad hoc publication through kb-engine."""
+    required = ("publication.preview_commit", "publication.commit_confirmed")
+    if any(_descriptor(name) is None for name in required):
+        return _capability_unavailable("Publication", required)
+
+    confirm, message = _publication_message(args)
+    state = None
+    if confirm:
+        state, reason = _get_publication_preview_state(
+            session_id, source=source, target=target
+        )
+        if state is None:
+            return {
+                "title": "Publication",
+                "status": "preview_required",
+                "text": (
+                    "*Publication*\nNo current exact preview is bound to this conversation.\n"
+                    "Run /kb publish, review the count, then confirm."
+                ),
+                "actions": [],
+                "reason": reason,
+            }
+        message = str(state["binding"].get("message") or message)
+
+    _tool, preview, errors = _dispatch_first(
+        ctx, target, [("publication.preview_commit", {"message": message})]
+    )
+    if not isinstance(preview, dict):
+        return _render_error("Publication", target, errors)
+    binding = _publication_preview_binding(preview)
+    git_state = preview.get("git") if isinstance(preview.get("git"), dict) else {}
+    changed_count = int(git_state.get("changed_count") or len(binding["changed_paths"]))
+    preview_status = str(preview.get("status") or "")
+
+    if confirm:
+        if binding != state["binding"]:
+            _clear_publication_preview_state(session_id)
+            return {
+                "title": "Publication",
+                "status": "preview_stale",
+                "text": (
+                    "*Publication*\nThe publication set changed since the preview.\n"
+                    "Nothing was published. Run /kb publish and review the fresh count."
+                ),
+                "actions": [],
+            }
+        actor_id = _short(getattr(source, "user_id", ""), "operator")
+        _confirmed_tool, confirmed, confirm_errors = _dispatch_first(
+            ctx,
+            target,
+            [
+                (
+                    "publication.commit_confirmed",
+                    {
+                        "message": binding["message"],
+                        "expected_git_head": binding["git_head"],
+                        "expected_changed_paths": binding["changed_paths"],
+                        "expected_change_set_digest": binding["change_set_digest"],
+                        "push": True,
+                        "actor": f"telegram:{actor_id}",
+                        "source": "Hermes Telegram",
+                        "session_id": session_id,
+                        "user_confirmation": {
+                            "confirmed": True,
+                            "confirmed_by": actor_id,
+                            "confirmation_text": "/kb publish confirm",
+                            "preview_status": binding["status"],
+                        },
+                    },
+                )
+            ],
+        )
+        _clear_publication_preview_state(session_id)
+        if not isinstance(confirmed, dict):
+            return _render_error("Publication", target, confirm_errors)
+        return _render_publication_result(confirmed, changed_count=changed_count)
+
+    if preview.get("ok") is not True or preview_status == "blocked":
+        _clear_publication_preview_state(session_id)
+        return {
+            "title": "Publication",
+            "status": "blocked",
+            "text": (
+                "*Publication*\nPublication preflight is blocked.\n"
+                "No publication was attempted; resolve the reported workspace issue first."
+            ),
+            "actions": [],
+        }
+    if preview_status == "noop":
+        _clear_publication_preview_state(session_id)
+        return {
+            "title": "Publication",
+            "status": "published",
+            "text": "*Publication*\nThe reviewed KB is already published.\nNo action is needed.",
+            "actions": [],
+        }
+    if preview_status not in {"ready", "push_pending"}:
+        return _render_error("Publication", target, [f"unexpected preview status: {preview_status}"])
+    if not _store_publication_preview_state(
+        session_id, source=source, target=target, binding=binding
+    ):
+        return _render_error("Publication", target, ["conversation binding unavailable"])
+    consequence = (
+        f"{changed_count} reviewed paths are ready to commit and push."
+        if preview_status == "ready"
+        else "The reviewed commit is ready to push; no second commit will be created."
+    )
+    return {
+        "title": "Publication",
+        "status": "ready_to_confirm",
+        "text": (
+            f"*Publication*\n{consequence}\nPreflight passed. No publication was attempted.\n"
+            "Reply /kb publish confirm to publish this exact set."
+        ),
         "actions": [],
     }
 
@@ -8475,8 +8616,8 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
 
 
 def _register_integration_transport(ctx: Any) -> None:
-    if len(_descriptor_allowlist()) > 11:
-        logger.error("kb_journeys: integration transport would exceed the 12-tool cap")
+    if len(_descriptor_allowlist()) > 13:
+        logger.error("kb_journeys: integration transport would exceed the 14-tool cap")
         return
     schema = {
         "name": INTEGRATION_TRANSPORT_TOOL,
@@ -8983,6 +9124,7 @@ def _kb_command_help() -> dict[str, Any]:
                 "/kb status - prove lane, runtime, transport, publication, review, sync, dirtiness, and next action",
                 "/kb sync - start or resume the canonical harness-driven knowledge update",
                 "/kb review - lifecycle and proposal judgment inbox",
+                "/kb publish - preview an exact KB publication; add confirm only after review",
                 "Retired sync aliases return migration guidance only; they never dispatch a tool.",
             ]
         ),
@@ -9118,7 +9260,13 @@ def _card_for_command(
     if command == "kblifecycle":
         return _render_lifecycle_review_command(ctx, target, args)
     if command == "kbpublish":
-        return _render_publish_command(ctx, target, args)
+        return _render_publish_command(
+            ctx,
+            target,
+            args,
+            session_id=queue_session_id,
+            source=source,
+        )
     if command == "kbsync_run":
         return _render_sync_command(
             ctx,

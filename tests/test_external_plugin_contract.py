@@ -1371,7 +1371,7 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     }
     assert "Evidence: 5/5 sources current." in result["morning_brief"]
     assert "KB: 3 targets integrated" in result["morning_brief"]
-    assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 12
+    assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 14
     assert [name for name, _args in ctx.calls] == [
         "mcp_kb_engine_prod_kb_sync_status",
         "mcp_kb_engine_prod_publication_daily_integration_preview",
@@ -1455,7 +1455,7 @@ def test_pinned_upstream_has_no_bundled_kb_journeys_fallback():
     assert tracked == []
 
 
-def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
+def test_kb_help_exposes_publication_as_a_primary_verb(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
 
     card = plugin._kb_command_help()
@@ -1465,7 +1465,7 @@ def test_kb_help_exposes_only_three_primary_verbs(tmp_path, monkeypatch):
     assert "/kb sync" in text
     assert "/kb review" in text
     assert "/kb queue" not in text
-    assert "/kb publish" not in text
+    assert "/kb publish" in text
 
 
 def test_kb_sync_starts_canonical_prepare_and_renders_next_action(tmp_path, monkeypatch):
@@ -2542,11 +2542,11 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.38"
-    assert source["engine_source_revision"] == "f4a82313fc8a94d61980ec31a8b912d62edb99e6"
+    assert source["engine_version"] == "0.45.54"
+    assert source["engine_source_revision"] == "3861a32c939691c9a7d98f70015918204b782ca2"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
-    assert len(source["tools"]) == 11
+    assert len(source["tools"]) == 13
     serialized = json.dumps(source, sort_keys=True)
     assert "kb_sync.preview" not in serialized
     assert "kb_sync.confirmed" not in serialized
@@ -2555,6 +2555,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
         tool["name"] for tool in source["tools"]
     }
     assert {
+        "publication.preview_commit",
+        "publication.commit_confirmed",
         "publication.daily_integration_preview",
         "publication.daily_integration_apply",
     } <= {tool["name"] for tool in source["tools"]}
@@ -2563,7 +2565,7 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     )["confirmation_required"] is False
     assert plugin._DESCRIPTOR_BUNDLE == source
     assert plugin._DESCRIPTOR_ERROR == ""
-    assert len(plugin._descriptor_allowlist()) == 11
+    assert len(plugin._descriptor_allowlist()) == 13
 
 
 def test_descriptor_validation_rejects_arbitrary_untyped_leaf(tmp_path, monkeypatch):
@@ -3008,12 +3010,12 @@ def test_bare_successful_restore_preview_never_renders_confirm_action(tmp_path, 
     assert "Confirm restore" not in card["text"]
 
 
-def test_runtime_rejects_more_than_twelve_effective_tools(tmp_path, monkeypatch):
+def test_runtime_rejects_more_than_thirteen_generated_tools(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.setattr(
         plugin,
         "_DESCRIPTOR_TOOLS",
-        {f"tool.{index}": {"name": f"tool.{index}"} for index in range(13)},
+        {f"tool.{index}": {"name": f"tool.{index}"} for index in range(14)},
     )
     ctx = FakeContext({"mcp_kb_engine_prod_tool_0": [{"status": "must-not-run"}]})
     assert plugin._descriptor_allowlist() == frozenset()
@@ -3168,7 +3170,7 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.0"
+    assert manifest["version"] == "0.10.1"
     assert manifest["install_receipt"]["owner"] == "noc"
     assert manifest["install_receipt"]["rollback_ref_field"] == "previous_ref"
 
@@ -3268,7 +3270,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "f4a82313fc8a94d61980ec31a8b912d62edb99e6"
+        == "3861a32c939691c9a7d98f70015918204b782ca2"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -3526,31 +3528,29 @@ def test_m3_compact_attention_transform_fails_closed_without_exact_generated_pac
         )
 
 
-def test_m3_publish_is_a_read_only_trusted_operator_handoff(tmp_path, monkeypatch):
+def test_m3_publish_routes_to_governed_preview_without_committing(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_KB_MCP_TARGET", "kb_engine_prod")
     ctx = FakeContext(
         {
-            "mcp_kb_engine_prod_publication_status": [
-                {
-                    "result": {
-                        "schema_version": 1,
-                        "status": "ready",
-                        "ok": True,
-                        "git": {"status": "dirty", "clean": False},
-                        "scope": {
-                            "publication_state": "pending_reviewed_changes",
-                            "unrelated_workspace_dirty": False,
-                        },
-                    }
-                }
+            "mcp_kb_engine_prod_publication_preview_commit": [
+                {"result": _publication_preview()}
             ]
         }
     )
-    card = plugin._card_for_command(ctx, "kbpublish")
-    assert "trusted operator" in card["text"].lower()
-    assert "No publication was attempted." in card["text"]
-    assert ctx.calls == []
+    source = type(
+        "Source",
+        (),
+        {"platform": "telegram", "chat_id": "chat-1", "thread_id": "", "user_id": "42"},
+    )()
+
+    card = plugin._card_for_command(ctx, "kbpublish", source=source)
+
+    assert card["status"] == "ready_to_confirm"
+    assert "No publication was attempted" in card["text"]
+    assert [tool for tool, _args in ctx.calls] == [
+        "mcp_kb_engine_prod_publication_preview_commit"
+    ]
     _assert_compact_user_card(card)
 
 
@@ -3763,65 +3763,131 @@ def test_m3_mapping_sections_preserve_descriptor_actions(tmp_path, monkeypatch):
     assert card["actions"][0].metadata["target_ref"] == "situations/lilly-ai-lab"
 
 
-@pytest.mark.parametrize(
-    ("payload", "expected_status", "expected_text"),
-    [
-        (
-            {
-                "status": "blocked",
-                "ok": False,
-                "git": {"status": "ready", "clean": True, "behind": 1, "ahead": 0},
-                "scope": {"publication_state": "publication_blocked"},
-            },
-            "blocked",
-            "Publication is blocked",
-        ),
-        (
-            {
-                "status": "dirty",
-                "ok": True,
-                "git": {"status": "ready", "clean": False, "behind": 0, "ahead": 0},
-                "scope": {"publication_state": "publication_pending"},
-            },
-            "dirty",
-            "Reviewed changes are ready for publication",
-        ),
-        (
-            {
-                "status": "ahead",
-                "ok": True,
-                "git": {"status": "ready", "clean": True, "behind": 0, "ahead": 1},
-                "scope": {"publication_state": "publication_applied"},
-            },
-            "ahead",
-            "has not been pushed",
-        ),
-        (
-            {
-                "status": "clean",
-                "ok": True,
-                "git": {"status": "ready", "clean": True, "behind": 0, "ahead": 0},
-                "scope": {"publication_state": "publication_applied"},
-            },
-            "published",
-            "already published",
-        ),
-    ],
-)
-def test_m3_publication_handoff_renders_consequence_state(
-    payload, expected_status, expected_text, tmp_path, monkeypatch
-):
+def _publication_preview(*, digest="a" * 64, paths=None, status="ready"):
+    changed_paths = ["accounts/acme/log.md", "todos.jsonl"] if paths is None else paths
+    ahead = 1 if status == "push_pending" else 0
+    return {
+        "schema_version": 1,
+        "status": status,
+        "ok": True,
+        "message": "kb: publish reviewed knowledge changes",
+        "changed_paths": changed_paths,
+        "change_set_digest": digest,
+        "git": {
+            "status": "ready",
+            "clean": not changed_paths,
+            "head": "abcdef12",
+            "ahead": ahead,
+            "behind": 0,
+            "changed_count": len(changed_paths),
+        },
+        "preflight": {
+            "status": "pending_publication" if changed_paths else "ready",
+            "ok": True,
+            "git_diff_check": "pass",
+            "safe_fix_count": 0,
+        },
+    }
+
+
+def test_m3_publication_preview_binds_exact_set_without_mutation(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    source = type("Source", (), {"user_id": "42"})()
     ctx = FakeContext(
-        {"mcp_kb_engine_prod_publication_status": [{"result": payload}]}
+        {"mcp_kb_engine_prod_publication_preview_commit": [{"result": _publication_preview()}]}
     )
-    card = plugin._render_publish_command(ctx, "kb_engine_prod", "")
-    assert card["status"] == "daily_integration_owned"
-    assert "Clean Daily Integration runs publish automatically" in card["text"]
-    assert "trusted operator" in card["text"]
-    assert "No publication was attempted." in card["text"]
-    assert ctx.calls == []
+
+    card = plugin._render_publish_command(
+        ctx, "kb_engine_prod", "", session_id="session-1", source=source
+    )
+
+    assert card["status"] == "ready_to_confirm"
+    assert "2 reviewed paths" in card["text"]
+    assert "No publication was attempted" in card["text"]
+    assert "/kb publish confirm" in card["text"]
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_publication_preview_commit",
+            {"message": "kb: publish reviewed knowledge changes"},
+        )
+    ]
+    _assert_compact_user_card(card)
+
+
+def test_m3_publication_confirm_uses_stored_binding_and_pushes(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    source = type("Source", (), {"user_id": "42"})()
+    preview = _publication_preview()
+    confirmed = {
+        "schema_version": 1,
+        "status": "committed",
+        "ok": True,
+        "actor": "telegram:42",
+        "source": "Hermes Telegram",
+        "session_id": "session-1",
+        "publication": {
+            "status": "committed",
+            "ok": True,
+            "commit": "12345678",
+            "pushed": True,
+            "changed_paths": preview["changed_paths"],
+            "git": {"status": "ready", "clean": True, "ahead": 0, "behind": 0},
+        },
+    }
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_publication_preview_commit": [
+                {"result": preview},
+                {"result": preview},
+            ],
+            "mcp_kb_engine_prod_publication_commit_confirmed": [{"result": confirmed}],
+        }
+    )
+    plugin._render_publish_command(
+        ctx, "kb_engine_prod", "", session_id="session-1", source=source
+    )
+
+    card = plugin._render_publish_command(
+        ctx, "kb_engine_prod", "confirm", session_id="session-1", source=source
+    )
+
+    assert card["status"] == "published"
+    assert "Published 2 reviewed paths" in card["text"]
+    tool, args = ctx.calls[-1]
+    assert tool == "mcp_kb_engine_prod_publication_commit_confirmed"
+    assert args["expected_git_head"] == "abcdef12"
+    assert args["expected_changed_paths"] == preview["changed_paths"]
+    assert args["expected_change_set_digest"] == "a" * 64
+    assert args["push"] is True
+    assert args["user_confirmation"]["confirmed"] is True
+    _assert_compact_user_card(card)
+
+
+def test_m3_publication_confirm_fails_closed_when_preview_drifted(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    source = type("Source", (), {"user_id": "42"})()
+    ctx = FakeContext(
+        {
+            "mcp_kb_engine_prod_publication_preview_commit": [
+                {"result": _publication_preview()},
+                {"result": _publication_preview(digest="b" * 64)},
+            ],
+        }
+    )
+    plugin._render_publish_command(
+        ctx, "kb_engine_prod", "", session_id="session-1", source=source
+    )
+
+    card = plugin._render_publish_command(
+        ctx, "kb_engine_prod", "confirm", session_id="session-1", source=source
+    )
+
+    assert card["status"] == "preview_stale"
+    assert "changed since the preview" in card["text"]
+    assert all("commit_confirmed" not in tool for tool, _args in ctx.calls)
     _assert_compact_user_card(card)
 
 
