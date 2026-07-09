@@ -882,8 +882,31 @@ def _mcp_target() -> str:
     return os.getenv("HERMES_KB_MCP_TARGET", DEFAULT_MCP_TARGET).strip() or DEFAULT_MCP_TARGET
 
 
+def _host_mcp_tool_name(target: str, tool_name: str) -> str | None:
+    """Use the running Hermes release's canonical MCP name builder when present."""
+    try:
+        from tools.mcp_tool import mcp_prefixed_tool_name
+    except (ImportError, AttributeError):
+        return None
+    return mcp_prefixed_tool_name(target, tool_name)
+
+
 def _mcp_tool_name(target: str, tool_name: str) -> str:
+    host_name = _host_mcp_tool_name(target, tool_name)
+    if host_name:
+        return host_name
+    # Hermes Agent v2026.6.19 and older releases used this unambiguous-for-
+    # our-fixed-target compatibility form. Newer hosts supply their own builder
+    # above, so plugin dispatch always follows the registry convention actually
+    # installed alongside the plugin.
     return f"mcp_{_sanitize_component(target)}_{_sanitize_component(tool_name)}"
+
+
+def _mcp_tool_prefix(target: str) -> str:
+    host_prefix = _host_mcp_tool_name(target, "")
+    if host_prefix:
+        return host_prefix
+    return f"mcp_{_sanitize_component(target)}_"
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +973,7 @@ class _ProbeTelemetry:
                 )
 
     def _matches_engine_tool(self, tool_name: Any) -> bool:
-        prefix = f"mcp_{_sanitize_component(_mcp_target())}_"
+        prefix = _mcp_tool_prefix(_mcp_target())
         return str(tool_name or "").startswith(prefix)
 
     def record_observed_tool(self, **kwargs: Any) -> None:
@@ -7742,14 +7765,40 @@ def _sync_packet_dispatch_is_retryable(errors: list[str]) -> bool:
     return not any(marker in joined for marker in nonretryable_markers)
 
 
+def _sync_packet_dispatch_reason_code(errors: list[str]) -> str:
+    """Classify a failed host dispatch without returning its error text."""
+    joined = " ".join(errors).lower()
+    if "unknown tool:" in joined:
+        return "route_not_registered"
+    if "timed out" in joined or "timeout" in joined:
+        return "route_timeout"
+    if any(
+        marker in joined
+        for marker in (
+            "is not connected",
+            "transport is down",
+            "event loop is not running",
+            "event loop unavailable",
+            "reconnect requested",
+        )
+    ):
+        return "route_unavailable"
+    if "runtime output violates generated schema" in joined:
+        return "output_contract_invalid"
+    if "upstream tool failure" in joined:
+        return "upstream_rejected"
+    return "dispatch_failed"
+
+
 def _sync_packet_failure(
     *,
     run_id: str,
     error_code: str,
     retryable: bool,
     managed: bool,
+    dispatch_reason_code: str = "",
 ) -> dict[str, Any]:
-    return {
+    result = {
         "accepted": False,
         "retryable": retryable,
         "run_id": run_id,
@@ -7760,6 +7809,9 @@ def _sync_packet_failure(
             "packet": "retained" if managed else "unmanaged",
         },
     }
+    if dispatch_reason_code:
+        result["dispatch_reason_code"] = dispatch_reason_code
+    return result
 
 
 def _compact_semantic_status_result(
@@ -9263,6 +9315,7 @@ def _register_integration_transport(ctx: Any) -> None:
                         error_code="kb_sync_resume_transport_failed",
                         retryable=_sync_packet_dispatch_is_retryable(errors),
                         managed=True,
+                        dispatch_reason_code=_sync_packet_dispatch_reason_code(errors),
                     ),
                     separators=(",", ":"),
                 )

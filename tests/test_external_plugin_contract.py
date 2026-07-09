@@ -54,8 +54,18 @@ def _enable_kb_journeys(hermes_home: Path) -> None:
     )
 
 
-def _load_plugin_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def _load_plugin_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    use_host_mcp_naming: bool = False,
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Keep ordinary unit tests deterministic even after an upstream-manager
+    # test imports Hermes modules into this pytest process. The dedicated host
+    # registry integration test below opts into the running upstream helper.
+    if not use_host_mcp_naming:
+        monkeypatch.setitem(sys.modules, "tools.mcp_tool", None)  # type: ignore[arg-type]
     spec = importlib.util.spec_from_file_location("kb_journeys_external_under_test", ROOT / "__init__.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -342,6 +352,86 @@ def test_sync_packet_transport_forwards_verified_descriptor_and_cleans_exact_spo
     assert "private evidence body" not in json.dumps(result)
     assert str(packet_path) not in json.dumps(result)
     assert packet_transport["packet_digest"] not in json.dumps(result)
+
+
+def test_sync_packet_transport_uses_the_host_canonical_mcp_registry_name(
+    tmp_path, monkeypatch
+):
+    repo = _hermes_repo()
+    monkeypatch.syspath_prepend(str(repo))
+
+    from hermes_cli.plugins import PluginContext, PluginManifest
+    from tools import registry as registry_module
+    from tools import mcp_tool
+
+    plugin = _load_plugin_module(
+        monkeypatch,
+        tmp_path,
+        use_host_mcp_naming=True,
+    )
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+
+    isolated_registry = registry_module.ToolRegistry()
+    monkeypatch.setattr(registry_module, "registry", isolated_registry)
+    builder = getattr(mcp_tool, "mcp_prefixed_tool_name", None)
+    canonical_name = (
+        builder("kb_engine_prod", "kb.sync.resume")
+        if builder is not None
+        else "mcp_kb_engine_prod_kb_sync_resume"
+    )
+    assert plugin._mcp_tool_name("kb_engine_prod", "kb.sync.resume") == canonical_name
+    isolated_registry.register(
+        name=canonical_name,
+        toolset="mcp-kb_engine_prod",
+        schema={"name": canonical_name, "parameters": {"type": "object"}},
+        handler=lambda _args, **_kwargs: json.dumps(
+            {
+                "result": {
+                    "schema_version": 1,
+                    "kind": "kb_sync_run",
+                    "status": "awaiting_action",
+                    "run_id": "hdf-kb_sync-test",
+                    "next_action": {
+                        "kind": "gather_evidence",
+                        "action_index": 1,
+                        "source_id": "m365.calendar",
+                    },
+                    "source_currency": {
+                        "target_through": "2026-07-04T00:00:00Z"
+                    },
+                    "publication": {"status": "not_attempted"},
+                }
+            }
+        ),
+    )
+    manager = type(
+        "Manager",
+        (),
+        {"_cli_ref": None, "_plugin_tool_names": set()},
+    )()
+    ctx = PluginContext(
+        PluginManifest(name="kb_journeys", source="user"),
+        manager,
+    )
+    plugin._register_integration_transport(ctx)
+
+    registered = isolated_registry.get_entry("kb_integration_transport")
+    assert registered is not None
+    result = json.loads(
+        registered.handler(
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is True
+    assert result["cleanup"] == {"directory": "removed", "packet": "deleted"}
+    assert not packet_path.exists()
 
 
 def test_sync_packet_transport_accepts_harness_capacity_sibling_and_removes_only_packet_dir(
@@ -656,9 +746,59 @@ def test_sync_packet_transport_retains_packet_on_retryable_dispatch_failure(
     assert result["accepted"] is False
     assert result["retryable"] is True
     assert result["error_code"] == "kb_sync_resume_transport_failed"
+    assert result["dispatch_reason_code"] == "dispatch_failed"
     assert result["cleanup"] == {"directory": "retained", "packet": "retained"}
     assert packet_path.exists()
     assert "private evidence body" not in json.dumps(result)
+
+
+def test_sync_packet_transport_classifies_missing_registered_route_without_error_text(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+
+    class MissingRouteContext(FakePacketTransportContext):
+        def dispatch_tool(self, tool_name, args):
+            self.calls.append((tool_name, args))
+            return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+    ctx = MissingRouteContext()
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": _packet_transport(packet_path, packet),
+            }
+        )
+    )
+
+    assert result["accepted"] is False
+    assert result["retryable"] is True
+    assert result["error_code"] == "kb_sync_resume_transport_failed"
+    assert result["dispatch_reason_code"] == "route_not_registered"
+    assert result["cleanup"] == {"directory": "retained", "packet": "retained"}
+    assert packet_path.exists()
+    assert "Unknown tool" not in json.dumps(result)
+    assert "private evidence body" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("error", "reason_code"),
+    [
+        ("MCP call timed out after 30s", "route_timeout"),
+        ("MCP server transport is down; reconnect requested", "route_unavailable"),
+        ("runtime output violates generated schema", "output_contract_invalid"),
+        ("upstream tool failure: $.error: rejected", "upstream_rejected"),
+    ],
+)
+def test_sync_packet_dispatch_reason_codes_are_bounded(error, reason_code, tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    assert plugin._sync_packet_dispatch_reason_code([error]) == reason_code
 
 
 def test_sync_packet_transport_classifies_engine_failed_as_nonretryable(
@@ -3636,9 +3776,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.2"
+    assert manifest["version"] == "0.10.3"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.2"
+    assert manifest["migrations"][-1]["version"] == "0.10.3"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
