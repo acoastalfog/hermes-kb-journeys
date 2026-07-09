@@ -1525,6 +1525,7 @@ def test_semantic_batch_transport_pages_one_oversized_evidence_body_losslessly(
         offset = page["next_text_offset"]
 
     assert "".join(seen) == semantic_text
+    assert "".join(seen).encode("utf-8") == semantic_text.encode("utf-8")
     assert ctx.calls == [
         (
             "mcp_kb_engine_prod_kb_sync_status",
@@ -1831,6 +1832,332 @@ def test_semantic_batch_transport_pages_one_oversized_target_evidence_body_lossl
             {"run_id": run_id, "target_refs": [target_ref]},
         )
     ] * len(seen)
+
+
+def test_semantic_batch_transport_pages_target_context_before_direct_evidence(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 5_000)
+    run_id = "hdf-kb_sync-daily"
+    target_ref = "projects/bounded-review"
+    evidence_ref = "sha256:" + "a" * 64
+    semantic_text = "lossless evidence beta 🧬 " * 500
+    recipient_metadata = [
+        {"emailAddress": {"address": f"reviewer-{index}@example.invalid"}}
+        for index in range(24)
+    ]
+    dossier = {
+        "target_ref": target_ref,
+        "object_digest": "sha256:" + "1" * 64,
+        "dossier_digest": "sha256:" + "2" * 64,
+        "evidence_refs": [evidence_ref],
+        "evidence": [
+            {
+                "evidence_ref": evidence_ref,
+                "item_digest": "sha256:" + "3" * 64,
+                "source_id": "m365.email",
+                "item": {
+                    "semantic_text": semantic_text,
+                    "subject": "Bounded review fixture",
+                    "toRecipients": recipient_metadata,
+                },
+            }
+        ],
+        "object_context": {
+            "context": "current target context " * 70,
+            "current_state": {"state_summary": "durable state " * 40},
+            "allowed_operations": [{"operation_id": "object.yaml.set"}],
+        },
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "target_integration",
+                "response_schema": {"type": "object"},
+            },
+            "target_dossiers": {
+                "requested_count": 1,
+                "review_token": "sha256:" + "4" * 64,
+                "digest": "sha256:" + "5" * 64,
+                "items": [dossier],
+            },
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    handler = ctx.registered_tools["kb_integration_transport"]["handler"]
+    context_page = json.loads(
+        handler(
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "target_refs": [target_ref],
+            }
+        )
+    )
+
+    assert context_page["accepted"] is True
+    context_dossiers = context_page["target_dossiers"]
+    context_dossier = context_dossiers["items"][0]
+    assert context_dossiers["review_token"] == "sha256:" + "4" * 64
+    assert context_dossiers["digest"] == "sha256:" + "5" * 64
+    assert context_dossier["object_digest"] == dossier["object_digest"]
+    assert context_dossier["dossier_digest"] == dossier["dossier_digest"]
+    assert context_dossier["evidence_refs"] == [evidence_ref]
+    assert context_dossier["object_context"] == dossier["object_context"]
+    assert context_dossier["evidence"] == []
+    assert context_page["next_action"]["response_schema"] == {"type": "object"}
+    assert context_dossiers["page"] == {
+        "context_only": True,
+        "judgment_ready": False,
+        "evidence_offset": 0,
+        "evidence_count": 0,
+        "evidence_total_count": 1,
+        "has_more": True,
+        "next_evidence_offset": 0,
+    }
+    assert len(
+        json.dumps(context_page, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= 5_000
+
+    text_offset = 0
+    seen = []
+    while True:
+        request = {
+            "operation": "semantic_batch",
+            "run_id": run_id,
+            "target_refs": [target_ref],
+            "target_evidence_offset": 0,
+        }
+        if text_offset:
+            request["target_evidence_text_offset"] = text_offset
+        evidence_page = json.loads(handler(request))
+        assert evidence_page["accepted"] is True
+        evidence_dossiers = evidence_page["target_dossiers"]
+        evidence_dossier = evidence_dossiers["items"][0]
+        assert evidence_dossiers["review_token"] == "sha256:" + "4" * 64
+        assert evidence_dossiers["digest"] == "sha256:" + "5" * 64
+        assert evidence_dossier["object_digest"] == dossier["object_digest"]
+        assert evidence_dossier["dossier_digest"] == dossier["dossier_digest"]
+        assert "evidence_refs" not in evidence_dossier
+        assert "object_context" not in evidence_dossier
+        assert "next_action" not in evidence_page
+        assert evidence_dossiers["continuation"] is True
+        evidence = evidence_dossier["evidence"][0]
+        assert evidence["evidence_ref"] == evidence_ref
+        assert evidence["item_digest"] == "sha256:" + "3" * 64
+        assert evidence["item"]["toRecipients"] == recipient_metadata
+        assert evidence["item"]["subject"] == "Bounded review fixture"
+        assert len(
+            json.dumps(
+                evidence_page, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        ) <= 5_000
+        page = evidence_dossiers["page"]
+        text_page = page["evidence_text_page"]
+        assert page["evidence_offset"] == 0
+        assert page["evidence_count"] == 1
+        assert text_page["text_offset"] == text_offset
+        assert text_page["text_total_chars"] == len(semantic_text)
+        assert text_page["text_char_count"] == len(
+            evidence["item"]["semantic_text"]
+        )
+        seen.append(evidence["item"]["semantic_text"])
+        if not text_page["has_more"]:
+            assert page["has_more"] is False
+            break
+        assert page["next_evidence_offset"] == 0
+        text_offset = text_page["next_text_offset"]
+
+    assert "".join(seen) == semantic_text
+    assert "".join(seen).encode("utf-8") == semantic_text.encode("utf-8")
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_status",
+            {"run_id": run_id, "target_refs": [target_ref]},
+        )
+    ] * (len(seen) + 1)
+
+
+def test_semantic_batch_transport_pages_context_before_non_semantic_text_row(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 6_000)
+    run_id = "hdf-kb_sync-daily"
+    target_ref = "projects/thread-review"
+    evidence_ref = "sha256:" + "a" * 64
+    second_evidence_ref = "sha256:" + "b" * 64
+    evidence = {
+        "evidence_ref": evidence_ref,
+        "item_digest": "sha256:" + "3" * 64,
+        "source_id": "slack.message",
+        "item": {
+            "text": "root message " * 160,
+            "thread_replies": [
+                {"text": "reply one " * 40},
+                {"text": "reply two " * 40},
+            ],
+        },
+    }
+    second_evidence = {
+        "evidence_ref": second_evidence_ref,
+        "item_digest": "sha256:" + "6" * 64,
+        "source_id": "slack.message",
+        "item": {"text": "second exact message"},
+    }
+    dossier = {
+        "target_ref": target_ref,
+        "object_digest": "sha256:" + "1" * 64,
+        "dossier_digest": "sha256:" + "2" * 64,
+        "evidence_refs": [evidence_ref, second_evidence_ref],
+        "evidence": [evidence, second_evidence],
+        "object_context": {"context": "current object state " * 180},
+    }
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "target_integration",
+                "response_schema": {"type": "object"},
+            },
+            "target_dossiers": {
+                "requested_count": 1,
+                "review_token": "sha256:" + "4" * 64,
+                "digest": "sha256:" + "5" * 64,
+                "items": [dossier],
+            },
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    handler = ctx.registered_tools["kb_integration_transport"]["handler"]
+    context_page = json.loads(
+        handler(
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "target_refs": [target_ref],
+            }
+        )
+    )
+    assert context_page["accepted"] is True
+    assert context_page["target_dossiers"]["page"]["context_only"] is True
+    assert context_page["target_dossiers"]["page"]["judgment_ready"] is False
+    assert context_page["target_dossiers"]["page"]["next_evidence_offset"] == 0
+    assert context_page["target_dossiers"]["items"][0]["evidence"] == []
+    assert len(
+        json.dumps(context_page, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= 6_000
+
+    evidence_page = json.loads(
+        handler(
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "target_refs": [target_ref],
+                # Presence is meaningful even though the exact offset is zero.
+                "target_evidence_offset": 0,
+            }
+        )
+    )
+    assert evidence_page["accepted"] is True
+    evidence_dossiers = evidence_page["target_dossiers"]
+    evidence_dossier = evidence_dossiers["items"][0]
+    assert evidence_dossiers["continuation"] is True
+    assert evidence_dossier["object_digest"] == dossier["object_digest"]
+    assert evidence_dossier["dossier_digest"] == dossier["dossier_digest"]
+    assert evidence_dossier["evidence"] == [evidence, second_evidence]
+    assert evidence_dossier["evidence"][0]["item_digest"] == evidence["item_digest"]
+    assert evidence_dossier["evidence"][1]["item_digest"] == second_evidence[
+        "item_digest"
+    ]
+    assert "object_context" not in evidence_dossier
+    assert "evidence_refs" not in evidence_dossier
+    assert evidence_dossiers["page"]["has_more"] is False
+    assert len(
+        json.dumps(evidence_page, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) <= 6_000
+    assert len(ctx.calls) == 2
+
+
+def test_semantic_batch_transport_fails_closed_when_target_context_page_is_oversized(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(plugin, "INTEGRATION_TRANSPORT_MAX_RESULT_BYTES", 1_500)
+    run_id = "hdf-kb_sync-daily"
+    target_ref = "projects/irreducible-context"
+    evidence_ref = "sha256:" + "a" * 64
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {
+        "result": {
+            "status": "awaiting_action",
+            "run_id": run_id,
+            "next_action": {
+                "kind": "exercise_judgment",
+                "semantic_stage": "target_integration",
+                "response_schema": {"type": "object"},
+            },
+            "target_dossiers": {
+                "requested_count": 1,
+                "review_token": "sha256:" + "4" * 64,
+                "items": [
+                    {
+                        "target_ref": target_ref,
+                        "object_digest": "sha256:" + "1" * 64,
+                        "dossier_digest": "sha256:" + "2" * 64,
+                        "evidence_refs": [evidence_ref],
+                        "evidence": [
+                            {
+                                "evidence_ref": evidence_ref,
+                                "item_digest": "sha256:" + "3" * 64,
+                                "item": {"semantic_text": "bounded evidence"},
+                            }
+                        ],
+                        "object_context": {"context": "state " * 1_000},
+                    }
+                ],
+            },
+        }
+    }
+
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "semantic_batch",
+                "run_id": run_id,
+                "target_refs": [target_ref],
+            }
+        )
+    )
+
+    assert result == {
+        "accepted": False,
+        "run_id": run_id,
+        "requested_count": 1,
+        "selected_count": 1,
+        "error": "one target review context page exceeds the bounded transport result",
+    }
+    assert len(ctx.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -3776,9 +4103,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.3"
+    assert manifest["version"] == "0.10.4"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.3"
+    assert manifest["migrations"][-1]["version"] == "0.10.4"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
