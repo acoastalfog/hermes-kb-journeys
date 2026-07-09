@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.10.3
+version: 0.10.4
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -53,3 +53,5 @@ migrations:
     hard_break: "Source Access packet transport makes the complete digest-and-size descriptor authoritative; bare kb-sync-gather paths remain explicitly deprecated compatibility only"
   - version: 0.10.3
     hard_break: "generated kb-engine dispatch follows the running Hermes MCP registry naming convention while preserving exact accepted-packet cleanup"
+  - version: 0.10.4
+    hard_break: "oversized target review invariants use a bounded context-only proof page before direct evidence continuation at the returned offset"

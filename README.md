@@ -205,6 +205,22 @@ builder exported by the running Hermes release. This follows Hermes 0.18.2's
 bounded reason code; they never return packet contents or raw error text.
 Accepted packet resumes retain the same exact-inode cleanup contract.
 
+Version 0.10.4 handles the case where exact target review invariants fit under
+the transport ceiling but leave no room for even one evidence-text character.
+The first response becomes a bounded context-only proof page: it retains the
+current object context, complete evidence-ref set, review token, and exact
+object and dossier digests while returning no evidence body. The harness then
+continues at the returned `next_evidence_offset`, which may be zero. Direct
+evidence pages omit only those already-read page-one invariants and retain the
+target, object, dossier, evidence, and item digests plus every evidence field.
+Semantic text remains losslessly character-paged when needed; the plugin adds
+no hidden state and never summarizes or truncates source content. A
+`context_only` page is proof and context, not sufficient input for judgment;
+the harness must continue until `has_more` is false before resuming the engine.
+If the exact context-only proof page or one evidence row's non-text metadata is
+itself larger than the ceiling, the transport still fails closed instead of
+dropping a field. General metadata paging remains a separate future extension.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

@@ -8079,6 +8079,10 @@ def _semantic_batch_transport(
                 run_id=run_id,
                 evidence_offset=target_evidence_offset,
                 evidence_text_offset=target_evidence_text_offset,
+                continuation=(
+                    raw_target_evidence_offset is not None
+                    or raw_target_evidence_text_offset is not None
+                ),
             )
         if selector == "evidence_refs" and len(selected) == 1 and (
             raw_evidence_text_offset is not None
@@ -8170,6 +8174,7 @@ def _page_target_dossier_result(
     run_id: str,
     evidence_offset: int,
     evidence_text_offset: int | None = None,
+    continuation: bool = False,
 ) -> dict[str, Any]:
     dossiers = result.get("target_dossiers")
     items = dossiers.get("items") if isinstance(dossiers, dict) else None
@@ -8192,6 +8197,7 @@ def _page_target_dossier_result(
             run_id=run_id,
             evidence_offset=evidence_offset,
             text_offset=evidence_text_offset,
+            continuation=True,
         )
     evidence_count = len(evidence) - evidence_offset
     while evidence_count:
@@ -8208,7 +8214,7 @@ def _page_target_dossier_result(
             "has_more": has_more,
             "next_evidence_offset": page_end if has_more else None,
         }
-        if evidence_offset > 0:
+        if continuation or evidence_offset > 0:
             _compact_target_dossier_continuation(paged)
         encoded = json.dumps(
             paged,
@@ -8223,6 +8229,7 @@ def _page_target_dossier_result(
                 run_id=run_id,
                 evidence_offset=evidence_offset,
                 text_offset=0,
+                continuation=continuation,
             )
         evidence_count = max(1, evidence_count // 2)
     raise AssertionError("target dossier page unexpectedly became empty")
@@ -8234,6 +8241,7 @@ def _page_target_dossier_evidence_text_result(
     run_id: str,
     evidence_offset: int,
     text_offset: int,
+    continuation: bool,
 ) -> dict[str, Any]:
     dossiers = result.get("target_dossiers")
     items = dossiers.get("items") if isinstance(dossiers, dict) else None
@@ -8247,6 +8255,12 @@ def _page_target_dossier_evidence_text_result(
     item = row.get("item") if isinstance(row, dict) else None
     semantic_text = item.get("semantic_text") if isinstance(item, dict) else None
     if not isinstance(semantic_text, str) or text_offset >= len(semantic_text):
+        if not continuation and evidence_offset == 0 and text_offset == 0:
+            return _page_target_dossier_context_result(
+                result,
+                run_id=run_id,
+                evidence_offset=evidence_offset,
+            )
         return {
             "accepted": False,
             "run_id": run_id,
@@ -8287,7 +8301,7 @@ def _page_target_dossier_evidence_text_result(
                 "next_text_offset": page_end if text_has_more else None,
             },
         }
-        if evidence_offset > 0 or text_offset > 0:
+        if continuation or evidence_offset > 0 or text_offset > 0:
             _compact_target_dossier_continuation(paged)
         encoded = json.dumps(
             paged,
@@ -8297,6 +8311,12 @@ def _page_target_dossier_evidence_text_result(
         if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
             return paged
         if text_char_count == 1:
+            if not continuation and evidence_offset == 0 and text_offset == 0:
+                return _page_target_dossier_context_result(
+                    result,
+                    run_id=run_id,
+                    evidence_offset=evidence_offset,
+                )
             return {
                 "accepted": False,
                 "run_id": run_id,
@@ -8306,6 +8326,58 @@ def _page_target_dossier_evidence_text_result(
             }
         text_char_count = max(1, text_char_count // 2)
     raise AssertionError("target evidence text page unexpectedly became empty")
+
+
+def _page_target_dossier_context_result(
+    result: dict[str, Any],
+    *,
+    run_id: str,
+    evidence_offset: int,
+) -> dict[str, Any]:
+    """Return exact page-one review proof before direct evidence continuation.
+
+    A large current-object context can leave too little room for even one byte of
+    evidence text.  Keep that context and the complete evidence-ref binding on a
+    dedicated page, then let the caller continue from the returned (possibly
+    zero) evidence offset.  The explicit offset marks subsequent evidence pages
+    as continuations, so already-read invariants are not repeated.
+    """
+
+    paged = copy.deepcopy(result)
+    dossiers = paged.get("target_dossiers")
+    items = dossiers.get("items") if isinstance(dossiers, dict) else None
+    dossier = items[0] if isinstance(items, list) and len(items) == 1 else None
+    evidence = dossier.get("evidence") if isinstance(dossier, dict) else None
+    if not isinstance(evidence, list) or evidence_offset >= len(evidence):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "one exact target dossier is required for context paging",
+        }
+    dossier["evidence"] = []
+    dossiers["page"] = {
+        "context_only": True,
+        "judgment_ready": False,
+        "evidence_offset": evidence_offset,
+        "evidence_count": 0,
+        "evidence_total_count": len(evidence),
+        "has_more": True,
+        "next_evidence_offset": evidence_offset,
+    }
+    encoded = json.dumps(
+        paged,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+        return paged
+    return {
+        "accepted": False,
+        "run_id": run_id,
+        "requested_count": int(result.get("requested_count") or 1),
+        "selected_count": 1,
+        "error": "one target review context page exceeds the bounded transport result",
+    }
 
 
 def _compact_target_dossier_continuation(result: dict[str, Any]) -> None:
@@ -9128,7 +9200,9 @@ def _register_integration_transport(ctx: Any) -> None:
                     "minimum": 0,
                     "description": (
                         "For one paged target dossier only, continue at the exact "
-                        "next_evidence_offset returned by the previous page."
+                        "next_evidence_offset returned by the previous page, including "
+                        "zero after a context-only proof page. A context-only page is "
+                        "not sufficient for judgment; continue until has_more is false."
                     ),
                 },
                 "evidence_text_offset": {
