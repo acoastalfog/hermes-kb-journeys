@@ -198,6 +198,13 @@ remains an explicitly deprecated compatibility branch for the current
 `kb-sync-gather` guidance and must be removed after those callers migrate to the
 descriptor.
 
+Version 0.10.3 resolves generated engine tools with the canonical MCP name
+builder exported by the running Hermes release. This follows Hermes 0.18.2's
+`mcp__server__tool` registry convention while retaining the older
+`mcp_server_tool` fallback for v2026.6.19. Failed host dispatches expose only a
+bounded reason code; they never return packet contents or raw error text.
+Accepted packet resumes retain the same exact-inode cleanup contract.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
