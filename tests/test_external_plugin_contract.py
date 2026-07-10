@@ -2405,11 +2405,18 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     }
     assert "Evidence: 5/5 sources current." in result["morning_brief"]
     assert "KB: 3 targets integrated" in result["morning_brief"]
-    assert result["session_binding"] == {
-        "kind": "hermes_runtime_session_binding",
+    assert result["execution_session_binding"] == {
+        "kind": "hermes_runtime_execution_session_binding",
         "source": "runtime_dispatch",
         "session_sha256": "sha256:"
         + hashlib.sha256(b"hermes-cron-daily").hexdigest(),
+    }
+    assert result["publication"]["session_binding"] == {
+        "kind": "daily_integration_publication_session_binding",
+        "source": "kb_engine_publication_receipt",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"hermes-cron-daily").hexdigest(),
+        "idempotent_replay": False,
     }
     assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 14
     assert [name for name, _args in ctx.calls] == [
@@ -2435,7 +2442,7 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     assert apply_args["session_id"] == "hermes-cron-daily"
 
     responses = iter((sync, preview, publication))
-    cross_session = json.loads(
+    fresh_mismatch = json.loads(
         ctx.registered_tools["kb_integration_transport"]["handler"](
             {
                 "operation": "daily_integration_closeout",
@@ -2445,11 +2452,17 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
             session_id="hermes-cron-other",
         )
     )
-    assert cross_session["accepted"] is False
-    assert cross_session["stage"] == "publication_apply"
-    assert cross_session["error"] == (
-        "publication runtime session binding does not match"
-    )
+    assert fresh_mismatch["accepted"] is False
+    assert fresh_mismatch["stage"] == "publication_apply"
+    assert fresh_mismatch["error"] == "publication session binding is invalid"
+    assert fresh_mismatch["execution_session_binding"] == {
+        "kind": "hermes_runtime_execution_session_binding",
+        "source": "runtime_dispatch",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"hermes-cron-other").hexdigest(),
+    }
+    assert "hermes-cron-daily" not in json.dumps(fresh_mismatch)
+    assert "hermes-cron-other" not in json.dumps(fresh_mismatch)
 
 
 def _eligible_daily_sync(run_id):
@@ -2703,6 +2716,48 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
     assert aggregate["calendar_observation"] == result["calendar"]["calendar_observation"]
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
 
+    events.clear()
+    replay_publication = {
+        **publication,
+        "idempotent_replay": True,
+    }
+    responses = iter((sync, preview, replay_publication))
+    replay = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": run_id,
+                "calendar_envelopes": raw_envelopes,
+            },
+            session_id="hermes-cron-multi-recovery",
+        )
+    )
+
+    assert replay["accepted"] is True and replay["complete"] is True
+    assert replay["execution_session_binding"] == {
+        "kind": "hermes_runtime_execution_session_binding",
+        "source": "runtime_dispatch",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"hermes-cron-multi-recovery").hexdigest(),
+    }
+    assert replay["publication"]["session_binding"] == {
+        "kind": "daily_integration_publication_session_binding",
+        "source": "kb_engine_publication_receipt",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"hermes-cron-multi").hexdigest(),
+        "idempotent_replay": True,
+    }
+    assert events == [
+        "mcp_kb_engine_prod_kb_sync_status",
+        "calendar_batch",
+        "mcp_kb_engine_prod_publication_daily_integration_preview",
+        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "calendar_ack",
+    ]
+    assert ctx.calls[-1][1]["session_id"] == "hermes-cron-multi-recovery"
+    assert "hermes-cron-multi" not in json.dumps(replay)
+    assert "hermes-cron-multi-recovery" not in json.dumps(replay)
+
 
 def test_calendar_aggregate_not_required_binds_canonical_empty_provenance(
     tmp_path, monkeypatch
@@ -2872,8 +2927,8 @@ def test_daily_integration_closeout_binds_runtime_session_not_model_argument(
         )
     )
     assert captured["session_id"] == "cron_job-1_20260710_170020"
-    assert result["session_binding"] == {
-        "kind": "hermes_runtime_session_binding",
+    assert result["execution_session_binding"] == {
+        "kind": "hermes_runtime_execution_session_binding",
         "source": "runtime_dispatch",
         "session_sha256": "sha256:"
         + hashlib.sha256(b"cron_job-1_20260710_170020").hexdigest(),

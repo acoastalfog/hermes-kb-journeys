@@ -257,8 +257,13 @@ acknowledged tombstone and performs no additional connector or Graph-bound call.
 Version 0.10.8 removes the model-supplied closeout session ID. Hermes injects
 the actual runtime session into every tool handler; the plugin now binds that
 value to publication provenance, fails closed when it is absent, and returns a
-privacy-safe SHA-256 session attestation for operational verification. A model
-argument can neither invent nor override the provenance binding.
+privacy-safe SHA-256 `execution_session_binding` for operational verification.
+The nested `publication.session_binding` separately attests the session stored
+in kb-engine's durable publication receipt. A fresh publication must return the
+current execution session; an idempotent replay may retain the original
+publication session while a later Hermes session completes recovery cleanup.
+Neither binding exposes a raw session ID, and a model argument can neither
+invent nor override the execution binding.
 
 Before these plans are authored, an unbound TripIt anchor group is merged into
 the unique existing bound Event when the provider source ID matches exactly and
