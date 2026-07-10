@@ -21,14 +21,14 @@
       "output_schema_digest": "sha256:537e42ece8af93536fb8af1fdefbe007a08c68e7553eac7f1f6ef9f0cd509823"
     },
     {
-      "input_schema_digest": "sha256:ea574e88eec260ce97b009109ecebb6157846d56c4bda8817dd775380e301a01",
+      "input_schema_digest": "sha256:ae5bc345105f384e2b9dc918b3b9125041957a2707c115cf00c050c6684d555f",
       "name": "publication.daily_integration_apply",
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:2d4e987a1547ddab4e9961756ed7951ccde1ae5d72a81c088068581397a42124",
-  "engine_source_revision": "1321393b0a4bf87e47d237d068092f51e50f8c6e",
-  "engine_version": "0.45.60",
+  "digest": "sha256:b5af6dd76c9648d547c796c88f899d44e8c8f17d6c59cc40f9be90e05940d16b",
+  "engine_source_revision": "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526",
+  "engine_version": "0.45.61",
   "journeys": [
     {
       "confirmation_required": false,
@@ -83,7 +83,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:1c50aad890da2d321291ee17f19b5e7ace6e0b3db621b5f8588c04e32544ce64",
+  "source_export_digest": "sha256:2555113fc5040a6651c1591d98e1033d020b0c16280e49b702ec6578a388729e",
   "tools": [
     {
       "annotations": {
@@ -7583,6 +7583,54 @@
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "type": "string"
               },
+              "calendar_observation": {
+                "additionalProperties": false,
+                "properties": {
+                  "attendee_violation_count": {
+                    "description": "Final owned events whose attendee count is not zero.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "event_type_violation_count": {
+                    "description": "Final owned events whose Graph type is not singleInstance.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "final_owned_calendar_digest": {
+                    "description": "Privacy-safe digest of the complete final owned-calendar projection.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "final_owned_count": {
+                    "description": "Complete owned-calendar count after execution.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "const": "managed_calendar_terminal_observation",
+                    "type": "string"
+                  },
+                  "pre_execution_owned_count": {
+                    "description": "Complete owned-calendar count before execution.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "kind",
+                  "pre_execution_owned_count",
+                  "final_owned_count",
+                  "final_owned_calendar_digest",
+                  "attendee_violation_count",
+                  "event_type_violation_count"
+                ],
+                "type": "object"
+              },
               "child_receipts": {
                 "description": "Ordered per-plan managed-calendar execution receipts.",
                 "items": {
@@ -7757,7 +7805,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:ea574e88eec260ce97b009109ecebb6157846d56c4bda8817dd775380e301a01",
+      "input_schema_digest": "sha256:ae5bc345105f384e2b9dc918b3b9125041957a2707c115cf00c050c6684d555f",
       "name": "publication.daily_integration_apply",
       "output_schema": {
         "additionalProperties": true,
@@ -7834,6 +7882,54 @@
                 "description": "Digest binding the run id and ordered child plan digests.",
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "type": "string"
+              },
+              "calendar_observation": {
+                "additionalProperties": false,
+                "properties": {
+                  "attendee_violation_count": {
+                    "description": "Final owned events whose attendee count is not zero.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "event_type_violation_count": {
+                    "description": "Final owned events whose Graph type is not singleInstance.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "final_owned_calendar_digest": {
+                    "description": "Privacy-safe digest of the complete final owned-calendar projection.",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "final_owned_count": {
+                    "description": "Complete owned-calendar count after execution.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "const": "managed_calendar_terminal_observation",
+                    "type": "string"
+                  },
+                  "pre_execution_owned_count": {
+                    "description": "Complete owned-calendar count before execution.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "kind",
+                  "pre_execution_owned_count",
+                  "final_owned_count",
+                  "final_owned_calendar_digest",
+                  "attendee_violation_count",
+                  "event_type_violation_count"
+                ],
+                "type": "object"
               },
               "child_receipts": {
                 "description": "Ordered per-plan managed-calendar execution receipts.",
@@ -7990,7 +8086,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:8cf3829e32c441e8a92d85beb7389a7808635adc73485c5a29e28394791ce9ed",
+      "input_schema_digest": "sha256:f5880171f5347fad2c60e1ec33bb3720a8e6e58707e455d3fef74cd951c5ea3d",
       "name": "publication.daily_integration_preview",
       "output_schema": {
         "additionalProperties": true,

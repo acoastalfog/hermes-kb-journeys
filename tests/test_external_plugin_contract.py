@@ -2451,6 +2451,15 @@ def _eligible_daily_sync(run_id):
 
 
 def _noc_batch_success(plugin, envelopes, closeouts):
+    observation = {
+        "schema_version": 1,
+        "kind": "managed_calendar_terminal_observation",
+        "pre_execution_owned_count": 3,
+        "final_owned_count": 4,
+        "final_owned_calendar_digest": "sha256:" + "c" * 64,
+        "attendee_violation_count": 0,
+        "event_type_violation_count": 0,
+    }
     result = {
         "schema_version": 1,
         "kind": "calendar_live_batch_executor_receipt",
@@ -2465,7 +2474,12 @@ def _noc_batch_success(plugin, envelopes, closeouts):
             for envelope, closeout in zip(envelopes, closeouts, strict=True)
         ],
         "side_effect_state": "complete",
-        "aggregate_safety": {"allowed": True},
+        "aggregate_safety": {
+            "allowed": True,
+            "owned_count": 3,
+            "pre_execution_owned_count": 3,
+        },
+        "calendar_observation": observation,
     }
     result["receipt_digest"] = plugin._managed_closeout_digest(result)
     return result
@@ -2484,6 +2498,76 @@ def _noc_batch_ack(plugin, envelopes, *, removed=True, compacted=True):
     }
     result["receipt_digest"] = plugin._managed_closeout_digest(result)
     return result
+
+
+def test_calendar_batch_result_dual_reads_legacy_without_terminal_observation(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    run_id = "hdf-kb_sync-legacy-observation"
+    envelope = _managed_calendar_plan(run_id, "events/legacy-observation")
+    envelope["plan_digest"] = plugin._managed_plan_digest(envelope)
+    closeout = _managed_calendar_closeout(plugin, run_id)
+    result = _noc_batch_success(plugin, [envelope], [closeout])
+    result.pop("calendar_observation")
+    result["aggregate_safety"].pop("pre_execution_owned_count")
+    result["receipt_digest"] = plugin._managed_closeout_digest(result)
+
+    closeouts, observation, error = plugin._validated_calendar_batch_result(
+        result,
+        envelopes=[envelope],
+        run_id=run_id,
+    )
+
+    assert error == ""
+    assert closeouts == [closeout]
+    assert observation is None
+
+
+def test_calendar_batch_result_rejects_new_safety_without_terminal_observation(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    run_id = "hdf-kb_sync-missing-observation"
+    envelope = _managed_calendar_plan(run_id, "events/missing-observation")
+    envelope["plan_digest"] = plugin._managed_plan_digest(envelope)
+    closeout = _managed_calendar_closeout(plugin, run_id)
+    result = _noc_batch_success(plugin, [envelope], [closeout])
+    result.pop("calendar_observation")
+    result["receipt_digest"] = plugin._managed_closeout_digest(result)
+
+    closeouts, observation, error = plugin._validated_calendar_batch_result(
+        result,
+        envelopes=[envelope],
+        run_id=run_id,
+    )
+
+    assert closeouts == [] and observation is None
+    assert error == "managed calendar terminal observation is missing"
+
+
+def test_morning_brief_keeps_attendee_and_type_violation_dimensions_separate(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    brief = plugin._daily_integration_morning_brief(
+        {
+            "source_currency": {"sources": []},
+            "semantic_accounting": {},
+            "lifecycle": {},
+        },
+        {
+            "counts": {"applied": 0, "kept": 1},
+            "calendar_observation": {
+                "final_owned_count": 2,
+                "attendee_violation_count": 1,
+                "event_type_violation_count": 1,
+            },
+        },
+        {"status": "noop"},
+    )
+
+    assert "2 managed events verified, 1 attendee / 1 type violations" in brief
 
 
 def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publication(
@@ -2555,6 +2639,16 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
 
     assert result["accepted"] is True and result["complete"] is True
     assert result["calendar"]["entity_count"] == 2
+    assert result["calendar"]["calendar_observation"] == {
+        "schema_version": 1,
+        "kind": "managed_calendar_terminal_observation",
+        "pre_execution_owned_count": 3,
+        "final_owned_count": 4,
+        "final_owned_calendar_digest": "sha256:" + "c" * 64,
+        "attendee_violation_count": 0,
+        "event_type_violation_count": 0,
+    }
+    assert "4 managed events verified, 0 attendee / 0 type violations" in result["morning_brief"]
     assert result["calendar"]["counts"] == {
         "planned": 5,
         "applied": 3,
@@ -2581,6 +2675,7 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
         }
         for envelope, child in zip(envelopes, closeouts, strict=True)
     ]
+    assert aggregate["calendar_observation"] == result["calendar"]["calendar_observation"]
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
 
 
@@ -3865,8 +3960,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.60"
-    assert source["engine_source_revision"] == "1321393b0a4bf87e47d237d068092f51e50f8c6e"
+    assert source["engine_version"] == "0.45.61"
+    assert source["engine_source_revision"] == "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 13
@@ -4537,9 +4632,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.6"
+    assert manifest["version"] == "0.10.7"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.6"
+    assert manifest["migrations"][-1]["version"] == "0.10.7"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
@@ -4641,7 +4736,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "1321393b0a4bf87e47d237d068092f51e50f8c6e"
+        == "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
