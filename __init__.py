@@ -9626,6 +9626,24 @@ def _daily_integration_closeout_serial(
             },
             "error": _clip("; ".join(errors), 240) or "Git publication did not pass readback",
         }
+    publication_session_id = str(publication.get("session_id") or "").strip()
+    publication_replay = publication.get("idempotent_replay") is True
+    if not publication_session_id or (
+        not publication_replay
+        and publication_session_id != str(args.get("session_id") or "")
+    ):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_apply",
+            "calendar": {
+                "status": closeout.get("status"),
+                "counts": closeout.get("counts"),
+                "entity_count": len(envelopes),
+            },
+            "error": "publication session binding is invalid",
+        }
     if is_batch:
         try:
             acknowledgement = _calendar_live_batch_acknowledge(envelopes)
@@ -9689,6 +9707,13 @@ def _daily_integration_closeout_serial(
         "publication": {
             "status": publication.get("status"),
             "readback": publication.get("readback"),
+            "session_binding": {
+                "kind": "daily_integration_publication_session_binding",
+                "source": "kb_engine_publication_receipt",
+                "session_sha256": "sha256:"
+                + hashlib.sha256(publication_session_id.encode("utf-8")).hexdigest(),
+                "idempotent_replay": publication_replay,
+            },
         },
         "morning_brief": _daily_integration_morning_brief(sync, closeout, publication),
     }
@@ -9960,8 +9985,8 @@ def _register_integration_transport(ctx: Any) -> None:
             bound_args = dict(args)
             bound_args["session_id"] = runtime_session_id
             payload = _daily_integration_closeout(ctx, bound_args, run_id=run_id)
-            payload["session_binding"] = {
-                "kind": "hermes_runtime_session_binding",
+            payload["execution_session_binding"] = {
+                "kind": "hermes_runtime_execution_session_binding",
                 "source": "runtime_dispatch",
                 "session_sha256": "sha256:"
                 + hashlib.sha256(runtime_session_id.encode("utf-8")).hexdigest(),
