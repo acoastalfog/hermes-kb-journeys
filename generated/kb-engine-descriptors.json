@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:0f114aeda1ed789a92e9d4d2132696a9db68c73cfc9bf39129544462440d1538",
+      "input_schema_digest": "sha256:341f674f7c16e743a8390895bc4a9f988ae7b725a4aa66aa23d1abbe02b6b966",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -21,14 +21,14 @@
       "output_schema_digest": "sha256:537e42ece8af93536fb8af1fdefbe007a08c68e7553eac7f1f6ef9f0cd509823"
     },
     {
-      "input_schema_digest": "sha256:92bd72c07c9765f2166e97ef8292d441028f2615115a6f85bc4356e1ace1f728",
+      "input_schema_digest": "sha256:ea574e88eec260ce97b009109ecebb6157846d56c4bda8817dd775380e301a01",
       "name": "publication.daily_integration_apply",
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:c8645db7676b202dba641011c583a19809a4a7c50097367af6eeb83ff8795a52",
-  "engine_source_revision": "3861a32c939691c9a7d98f70015918204b782ca2",
-  "engine_version": "0.45.54",
+  "digest": "sha256:390e56f339013bc4105cb73cb8cc6a14b7b61543c5e7c5b1ac9b1c77ec65c2ec",
+  "engine_source_revision": "8f4d7de12ec1746cd192c2c152a624e556f90c6f",
+  "engine_version": "0.45.60",
   "journeys": [
     {
       "confirmation_required": false,
@@ -83,7 +83,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:a70a8e624e3b4ac00c81d66e9c29459517c2f445c35bcddfcb68de8b05f27327",
+  "source_export_digest": "sha256:1c50aad890da2d321291ee17f19b5e7ace6e0b3db621b5f8588c04e32544ce64",
   "tools": [
     {
       "annotations": {
@@ -304,6 +304,317 @@
                   "operations": {
                     "items": {
                       "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "anyOf": [
+                                {
+                                  "properties": {
+                                    "rebindings": {
+                                      "minItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "rebindings"
+                                  ]
+                                },
+                                {
+                                  "properties": {
+                                    "absent_retirements": {
+                                      "minItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "absent_retirements"
+                                  ]
+                                },
+                                {
+                                  "properties": {
+                                    "misowned_retirements": {
+                                      "minItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "misowned_retirements"
+                                  ]
+                                },
+                                {
+                                  "properties": {
+                                    "legacy_identity_repairs": {
+                                      "minItems": 1
+                                    }
+                                  },
+                                  "required": [
+                                    "legacy_identity_repairs"
+                                  ]
+                                }
+                              ],
+                              "properties": {
+                                "absent_retirements": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "event_id": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "publication_key",
+                                      "event_id"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "calendar_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "entity_path": {
+                                  "maxLength": 512,
+                                  "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                                  "type": "string"
+                                },
+                                "legacy_identity_repairs": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "event_id": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "publication_key",
+                                      "event_id"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "misowned_retirements": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "canonical_owner_entity_path": {
+                                        "maxLength": 512,
+                                        "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                                        "type": "string"
+                                      },
+                                      "canonical_owner_publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "event_id": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "publication_key",
+                                      "event_id",
+                                      "canonical_owner_entity_path",
+                                      "canonical_owner_publication_key"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "rebindings": {
+                                  "items": {
+                                    "oneOf": [
+                                      {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "event_id": {
+                                            "maxLength": 1024,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "intent_mode": {
+                                            "const": "preserve"
+                                          },
+                                          "intent_source_digest": {
+                                            "pattern": "^[0-9a-f]{64}$",
+                                            "type": "string"
+                                          },
+                                          "intent_source_key": {
+                                            "maxLength": 1024,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "last_synced_hash": {
+                                            "maxLength": 256,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "publication_class": {
+                                            "enum": [
+                                              "trip_block",
+                                              "flight_hold",
+                                              "hotel_stay"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "publication_key": {
+                                            "maxLength": 1024,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "retire_keys": {
+                                            "items": {
+                                              "maxLength": 1024,
+                                              "minLength": 1,
+                                              "pattern": "^[^\\r\\n]+$",
+                                              "type": "string"
+                                            },
+                                            "maxItems": 32,
+                                            "minItems": 1,
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "subject": {
+                                            "maxLength": 512,
+                                            "pattern": "^[^\\r\\n]*$",
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "event_id",
+                                          "publication_key",
+                                          "publication_class",
+                                          "last_synced_hash",
+                                          "subject",
+                                          "retire_keys",
+                                          "intent_mode",
+                                          "intent_source_key",
+                                          "intent_source_digest"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "event_id": {
+                                            "maxLength": 1024,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "intent_mode": {
+                                            "const": "absent"
+                                          },
+                                          "last_synced_hash": {
+                                            "maxLength": 256,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "publication_class": {
+                                            "enum": [
+                                              "trip_block",
+                                              "flight_hold",
+                                              "hotel_stay"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "publication_key": {
+                                            "maxLength": 1024,
+                                            "minLength": 1,
+                                            "pattern": "^[^\\r\\n]+$",
+                                            "type": "string"
+                                          },
+                                          "retire_keys": {
+                                            "items": {
+                                              "maxLength": 1024,
+                                              "minLength": 1,
+                                              "pattern": "^[^\\r\\n]+$",
+                                              "type": "string"
+                                            },
+                                            "maxItems": 32,
+                                            "minItems": 1,
+                                            "type": "array",
+                                            "uniqueItems": true
+                                          },
+                                          "subject": {
+                                            "maxLength": 512,
+                                            "pattern": "^[^\\r\\n]*$",
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "event_id",
+                                          "publication_key",
+                                          "publication_class",
+                                          "last_synced_hash",
+                                          "subject",
+                                          "retire_keys",
+                                          "intent_mode"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    ]
+                                  },
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                }
+                              },
+                              "required": [
+                                "entity_path",
+                                "calendar_digest"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "calendar.publication_ledger.reconcile"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
                         {
                           "additionalProperties": false,
                           "properties": {
@@ -571,6 +882,10 @@
                                   "description": "Optional initial Markdown log entry.",
                                   "type": "string"
                                 },
+                                "metadata": {
+                                  "description": "Optional YAML-compatible metadata fields to merge into metadata.yaml.",
+                                  "type": "object"
+                                },
                                 "object_kind": {
                                   "description": "Semantic object kind such as manuscript, report, or object.",
                                   "type": "string"
@@ -578,6 +893,10 @@
                                 "parent_path": {
                                   "description": "Existing directory-backed object or tracker path that should own the child.",
                                   "type": "string"
+                                },
+                                "publication": {
+                                  "description": "Optional YAML-compatible publication fields to write to publication.yaml.",
+                                  "type": "object"
                                 },
                                 "state_markdown": {
                                   "description": "Optional complete state.md body. Defaults to a title-only state.",
@@ -2064,7 +2383,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:0f114aeda1ed789a92e9d4d2132696a9db68c73cfc9bf39129544462440d1538",
+      "input_schema_digest": "sha256:341f674f7c16e743a8390895bc4a9f988ae7b725a4aa66aa23d1abbe02b6b966",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -2297,6 +2616,317 @@
             "description": "One or more typed exact KB changes.",
             "items": {
               "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "rebindings": {
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "rebindings"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "absent_retirements": {
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "absent_retirements"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "misowned_retirements": {
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "misowned_retirements"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "legacy_identity_repairs": {
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "legacy_identity_repairs"
+                          ]
+                        }
+                      ],
+                      "properties": {
+                        "absent_retirements": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "event_id": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              },
+                              "publication_key": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "publication_key",
+                              "event_id"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 64,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "calendar_digest": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "entity_path": {
+                          "maxLength": 512,
+                          "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                          "type": "string"
+                        },
+                        "legacy_identity_repairs": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "event_id": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              },
+                              "publication_key": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "publication_key",
+                              "event_id"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 64,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "misowned_retirements": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "canonical_owner_entity_path": {
+                                "maxLength": 512,
+                                "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                                "type": "string"
+                              },
+                              "canonical_owner_publication_key": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              },
+                              "event_id": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              },
+                              "publication_key": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "pattern": "^[^\\r\\n]+$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "publication_key",
+                              "event_id",
+                              "canonical_owner_entity_path",
+                              "canonical_owner_publication_key"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 64,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "rebindings": {
+                          "items": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "event_id": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "intent_mode": {
+                                    "const": "preserve"
+                                  },
+                                  "intent_source_digest": {
+                                    "pattern": "^[0-9a-f]{64}$",
+                                    "type": "string"
+                                  },
+                                  "intent_source_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "last_synced_hash": {
+                                    "maxLength": 256,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "publication_class": {
+                                    "enum": [
+                                      "trip_block",
+                                      "flight_hold",
+                                      "hotel_stay"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "retire_keys": {
+                                    "items": {
+                                      "maxLength": 1024,
+                                      "minLength": 1,
+                                      "pattern": "^[^\\r\\n]+$",
+                                      "type": "string"
+                                    },
+                                    "maxItems": 32,
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "subject": {
+                                    "maxLength": 512,
+                                    "pattern": "^[^\\r\\n]*$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "event_id",
+                                  "publication_key",
+                                  "publication_class",
+                                  "last_synced_hash",
+                                  "subject",
+                                  "retire_keys",
+                                  "intent_mode",
+                                  "intent_source_key",
+                                  "intent_source_digest"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "event_id": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "intent_mode": {
+                                    "const": "absent"
+                                  },
+                                  "last_synced_hash": {
+                                    "maxLength": 256,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "publication_class": {
+                                    "enum": [
+                                      "trip_block",
+                                      "flight_hold",
+                                      "hotel_stay"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "retire_keys": {
+                                    "items": {
+                                      "maxLength": 1024,
+                                      "minLength": 1,
+                                      "pattern": "^[^\\r\\n]+$",
+                                      "type": "string"
+                                    },
+                                    "maxItems": 32,
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "subject": {
+                                    "maxLength": 512,
+                                    "pattern": "^[^\\r\\n]*$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "event_id",
+                                  "publication_key",
+                                  "publication_class",
+                                  "last_synced_hash",
+                                  "subject",
+                                  "retire_keys",
+                                  "intent_mode"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          "maxItems": 64,
+                          "type": "array",
+                          "uniqueItems": true
+                        }
+                      },
+                      "required": [
+                        "entity_path",
+                        "calendar_digest"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "calendar.publication_ledger.reconcile"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
                 {
                   "additionalProperties": false,
                   "properties": {
@@ -2564,6 +3194,10 @@
                           "description": "Optional initial Markdown log entry.",
                           "type": "string"
                         },
+                        "metadata": {
+                          "description": "Optional YAML-compatible metadata fields to merge into metadata.yaml.",
+                          "type": "object"
+                        },
                         "object_kind": {
                           "description": "Semantic object kind such as manuscript, report, or object.",
                           "type": "string"
@@ -2571,6 +3205,10 @@
                         "parent_path": {
                           "description": "Existing directory-backed object or tracker path that should own the child.",
                           "type": "string"
+                        },
+                        "publication": {
+                          "description": "Optional YAML-compatible publication fields to write to publication.yaml.",
+                          "type": "object"
                         },
                         "state_markdown": {
                           "description": "Optional complete state.md body. Defaults to a title-only state.",
@@ -3958,7 +4596,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:1e90745826c13914bf794f49dce96c974e3a3e9dd0c40d345b101b5eabc65d02",
+      "input_schema_digest": "sha256:3f8dfb0135f9857ae89a27ec9e9baea669c5f4f0c7205737d3948ef37534a051",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -4020,6 +4658,317 @@
               "operations": {
                 "items": {
                   "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "rebindings": {
+                                  "minItems": 1
+                                }
+                              },
+                              "required": [
+                                "rebindings"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "absent_retirements": {
+                                  "minItems": 1
+                                }
+                              },
+                              "required": [
+                                "absent_retirements"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "misowned_retirements": {
+                                  "minItems": 1
+                                }
+                              },
+                              "required": [
+                                "misowned_retirements"
+                              ]
+                            },
+                            {
+                              "properties": {
+                                "legacy_identity_repairs": {
+                                  "minItems": 1
+                                }
+                              },
+                              "required": [
+                                "legacy_identity_repairs"
+                              ]
+                            }
+                          ],
+                          "properties": {
+                            "absent_retirements": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "event_id": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "publication_key",
+                                  "event_id"
+                                ],
+                                "type": "object"
+                              },
+                              "maxItems": 64,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "calendar_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "entity_path": {
+                              "maxLength": 512,
+                              "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                              "type": "string"
+                            },
+                            "legacy_identity_repairs": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "event_id": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "publication_key",
+                                  "event_id"
+                                ],
+                                "type": "object"
+                              },
+                              "maxItems": 64,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "misowned_retirements": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "canonical_owner_entity_path": {
+                                    "maxLength": 512,
+                                    "pattern": "^events/(?:archive/)?[a-z0-9][a-z0-9._-]*$",
+                                    "type": "string"
+                                  },
+                                  "canonical_owner_publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "event_id": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  },
+                                  "publication_key": {
+                                    "maxLength": 1024,
+                                    "minLength": 1,
+                                    "pattern": "^[^\\r\\n]+$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "publication_key",
+                                  "event_id",
+                                  "canonical_owner_entity_path",
+                                  "canonical_owner_publication_key"
+                                ],
+                                "type": "object"
+                              },
+                              "maxItems": 64,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "rebindings": {
+                              "items": {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "event_id": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "intent_mode": {
+                                        "const": "preserve"
+                                      },
+                                      "intent_source_digest": {
+                                        "pattern": "^[0-9a-f]{64}$",
+                                        "type": "string"
+                                      },
+                                      "intent_source_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "last_synced_hash": {
+                                        "maxLength": 256,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "publication_class": {
+                                        "enum": [
+                                          "trip_block",
+                                          "flight_hold",
+                                          "hotel_stay"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "retire_keys": {
+                                        "items": {
+                                          "maxLength": 1024,
+                                          "minLength": 1,
+                                          "pattern": "^[^\\r\\n]+$",
+                                          "type": "string"
+                                        },
+                                        "maxItems": 32,
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "subject": {
+                                        "maxLength": 512,
+                                        "pattern": "^[^\\r\\n]*$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "event_id",
+                                      "publication_key",
+                                      "publication_class",
+                                      "last_synced_hash",
+                                      "subject",
+                                      "retire_keys",
+                                      "intent_mode",
+                                      "intent_source_key",
+                                      "intent_source_digest"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "event_id": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "intent_mode": {
+                                        "const": "absent"
+                                      },
+                                      "last_synced_hash": {
+                                        "maxLength": 256,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "publication_class": {
+                                        "enum": [
+                                          "trip_block",
+                                          "flight_hold",
+                                          "hotel_stay"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "publication_key": {
+                                        "maxLength": 1024,
+                                        "minLength": 1,
+                                        "pattern": "^[^\\r\\n]+$",
+                                        "type": "string"
+                                      },
+                                      "retire_keys": {
+                                        "items": {
+                                          "maxLength": 1024,
+                                          "minLength": 1,
+                                          "pattern": "^[^\\r\\n]+$",
+                                          "type": "string"
+                                        },
+                                        "maxItems": 32,
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "subject": {
+                                        "maxLength": 512,
+                                        "pattern": "^[^\\r\\n]*$",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "event_id",
+                                      "publication_key",
+                                      "publication_class",
+                                      "last_synced_hash",
+                                      "subject",
+                                      "retire_keys",
+                                      "intent_mode"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              "maxItems": 64,
+                              "type": "array",
+                              "uniqueItems": true
+                            }
+                          },
+                          "required": [
+                            "entity_path",
+                            "calendar_digest"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "calendar.publication_ledger.reconcile"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
                     {
                       "additionalProperties": false,
                       "properties": {
@@ -4287,6 +5236,10 @@
                               "description": "Optional initial Markdown log entry.",
                               "type": "string"
                             },
+                            "metadata": {
+                              "description": "Optional YAML-compatible metadata fields to merge into metadata.yaml.",
+                              "type": "object"
+                            },
                             "object_kind": {
                               "description": "Semantic object kind such as manuscript, report, or object.",
                               "type": "string"
@@ -4294,6 +5247,10 @@
                             "parent_path": {
                               "description": "Existing directory-backed object or tracker path that should own the child.",
                               "type": "string"
+                            },
+                            "publication": {
+                              "description": "Optional YAML-compatible publication fields to write to publication.yaml.",
+                              "type": "object"
                             },
                             "state_markdown": {
                               "description": "Optional complete state.md body. Defaults to a title-only state.",
@@ -5774,7 +6731,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:694b48f072eaebe7491e8f7d576ef83008a0fdfcabb5d4b24060a5f749794206",
+      "output_schema_digest": "sha256:0422ede814228b5127cfd93dd6c170e25bb16c7d4c870e4804a92bcb47c6142d",
       "title": "Preview Exact KB Changes"
     },
     {
@@ -6621,6 +7578,35 @@
           "calendar_receipt": {
             "additionalProperties": false,
             "properties": {
+              "batch_digest": {
+                "description": "Digest binding the run id and ordered child plan digests.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "child_receipts": {
+                "description": "Ordered per-plan managed-calendar execution receipts.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "plan_digest": {
+                      "description": "Exact managed-calendar plan digest.",
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "receipt_digest": {
+                      "description": "Exact child execution receipt digest.",
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "plan_digest",
+                    "receipt_digest"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "counts": {
                 "additionalProperties": false,
                 "properties": {
@@ -6734,6 +7720,8 @@
               "ok",
               "source_reads",
               "counts",
+              "batch_digest",
+              "child_receipts",
               "receipt_digest"
             ],
             "type": "object"
@@ -6769,7 +7757,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:92bd72c07c9765f2166e97ef8292d441028f2615115a6f85bc4356e1ace1f728",
+      "input_schema_digest": "sha256:ea574e88eec260ce97b009109ecebb6157846d56c4bda8817dd775380e301a01",
       "name": "publication.daily_integration_apply",
       "output_schema": {
         "additionalProperties": true,
@@ -6842,6 +7830,35 @@
           "calendar_receipt": {
             "additionalProperties": false,
             "properties": {
+              "batch_digest": {
+                "description": "Digest binding the run id and ordered child plan digests.",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "child_receipts": {
+                "description": "Ordered per-plan managed-calendar execution receipts.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "plan_digest": {
+                      "description": "Exact managed-calendar plan digest.",
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "receipt_digest": {
+                      "description": "Exact child execution receipt digest.",
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "plan_digest",
+                    "receipt_digest"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "counts": {
                 "additionalProperties": false,
                 "properties": {
@@ -6955,6 +7972,8 @@
               "ok",
               "source_reads",
               "counts",
+              "batch_digest",
+              "child_receipts",
               "receipt_digest"
             ],
             "type": "object"
@@ -6971,7 +7990,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:8958330017ff9db5b3ec67f1757bedde1a555b2e5b35167f4d067096799fdfb2",
+      "input_schema_digest": "sha256:8cf3829e32c441e8a92d85beb7389a7808635adc73485c5a29e28394791ce9ed",
       "name": "publication.daily_integration_preview",
       "output_schema": {
         "additionalProperties": true,
