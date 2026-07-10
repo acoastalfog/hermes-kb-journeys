@@ -2364,6 +2364,7 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     publication = {
         "ok": True,
         "status": "published",
+        "session_id": "hermes-cron-daily",
         "readback": {"ok": True, "clean": True, "ahead": 0},
     }
     ctx = FakePacketTransportContext()
@@ -2432,6 +2433,23 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     ]
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
     assert apply_args["session_id"] == "hermes-cron-daily"
+
+    responses = iter((sync, preview, publication))
+    cross_session = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": run_id,
+                "calendar_envelope": envelope,
+            },
+            session_id="hermes-cron-other",
+        )
+    )
+    assert cross_session["accepted"] is False
+    assert cross_session["stage"] == "publication_apply"
+    assert cross_session["error"] == (
+        "publication runtime session binding does not match"
+    )
 
 
 def _eligible_daily_sync(run_id):
@@ -2620,6 +2638,7 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
     publication = {
         "ok": True,
         "status": "published",
+        "session_id": "hermes-cron-multi",
         "readback": {"ok": True, "clean": True, "ahead": 0},
     }
     responses = iter((sync, preview, publication))

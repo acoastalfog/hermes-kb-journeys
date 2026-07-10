@@ -9626,6 +9626,19 @@ def _daily_integration_closeout_serial(
             },
             "error": _clip("; ".join(errors), 240) or "Git publication did not pass readback",
         }
+    if str(publication.get("session_id") or "") != str(args.get("session_id") or ""):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_apply",
+            "calendar": {
+                "status": closeout.get("status"),
+                "counts": closeout.get("counts"),
+                "entity_count": len(envelopes),
+            },
+            "error": "publication runtime session binding does not match",
+        }
     if is_batch:
         try:
             acknowledgement = _calendar_live_batch_acknowledge(envelopes)
