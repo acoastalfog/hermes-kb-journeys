@@ -389,6 +389,7 @@ def _schema_shape_is_concrete(schema: Any, *, require_required: bool) -> bool:
                 and branches
                 and all(
                     _schema_shape_is_concrete(branch, require_required=require_required)
+                    or _required_branch_is_concrete(schema, branch)
                     for branch in branches
                 )
             )
@@ -416,17 +417,41 @@ def _required_branch_is_concrete(parent: Any, branch: Any) -> bool:
         not isinstance(parent, dict)
         or parent.get("type") != "object"
         or not isinstance(branch, dict)
-        or set(branch) != {"required"}
     ):
         return False
     properties = parent.get("properties")
     required = branch.get("required")
-    return bool(
+    if not (
         isinstance(properties, dict)
         and isinstance(required, list)
         and required
         and all(isinstance(name, str) and name in properties for name in required)
-    )
+        and len(required) == len(set(required))
+    ):
+        return False
+    if set(branch) == {"required"}:
+        return True
+    if set(branch) != {"properties", "required"}:
+        return False
+    refinements = branch.get("properties")
+    if not isinstance(refinements, dict) or set(refinements) != set(required):
+        return False
+    for name, refinement in refinements.items():
+        parent_property = properties.get(name)
+        if (
+            not isinstance(parent_property, dict)
+            or parent_property.get("type") != "array"
+            or not isinstance(refinement, dict)
+            or set(refinement) != {"minItems"}
+        ):
+            return False
+        minimum = refinement.get("minItems")
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+            return False
+        maximum = parent_property.get("maxItems")
+        if isinstance(maximum, int) and minimum > maximum:
+            return False
+    return True
 
 
 def _validate_schema(schema: Any, *, path: str = "$") -> None:
@@ -445,11 +470,13 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         if not isinstance(branches, list) or not branches:
             raise ValueError(f"{path}.{keyword} must contain at least one schema")
         for index, branch in enumerate(branches):
-            _validate_schema(branch, path=f"{path}.{keyword}[{index}]")
+            required_branch = _required_branch_is_concrete(schema, branch)
+            if not required_branch:
+                _validate_schema(branch, path=f"{path}.{keyword}[{index}]")
             if (
                 keyword in {"oneOf", "anyOf"}
                 and not _schema_shape_is_concrete(branch, require_required=False)
-                and not _required_branch_is_concrete(schema, branch)
+                and not required_branch
             ):
                 raise ValueError(f"{path}.{keyword}[{index}] is unconstrained")
         if keyword == "oneOf":
@@ -581,7 +608,7 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
         _json_value_key(item) for item in schema["enum"]
     }:
         return f"{path}: is not in enum"
-    if schema_type == "object" and isinstance(value, dict):
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
         properties = schema.get("properties") or {}
         for name, child_value in value.items():
             if name in properties:
@@ -596,7 +623,7 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
                 error = _runtime_schema_error(child_value, additional, path=f"{path}.{name}")
                 if error:
                     return error
-    if schema_type == "array" and isinstance(value, list):
+    if isinstance(value, list):
         if isinstance(schema.get("minItems"), int) and len(value) < schema["minItems"]:
             return f"{path}: has fewer than minItems"
         if isinstance(schema.get("maxItems"), int) and len(value) > schema["maxItems"]:

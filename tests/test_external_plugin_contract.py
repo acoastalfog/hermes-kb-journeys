@@ -3865,8 +3865,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.54"
-    assert source["engine_source_revision"] == "3861a32c939691c9a7d98f70015918204b782ca2"
+    assert source["engine_version"] == "0.45.60"
+    assert source["engine_source_revision"] == "8f4d7de12ec1746cd192c2c152a624e556f90c6f"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 13
@@ -3921,6 +3921,49 @@ def test_required_only_anyof_branches_remain_enforced(tmp_path, monkeypatch):
     assert plugin._runtime_schema_error({}, schema) is not None
     assert plugin._runtime_schema_error({"a": "ready"}, schema) is None
     assert plugin._runtime_schema_error({"b": "ready"}, schema) is None
+
+
+def test_required_property_refinement_anyof_branches_remain_enforced(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+            "b": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+        },
+        "anyOf": [
+            {"properties": {"a": {"minItems": 1}}, "required": ["a"]},
+            {"properties": {"b": {"minItems": 1}}, "required": ["b"]},
+        ],
+        "additionalProperties": False,
+    }
+    plugin._validate_schema(schema)
+    assert plugin._runtime_schema_error({}, schema) is not None
+    assert plugin._runtime_schema_error({"a": []}, schema) is not None
+    assert plugin._runtime_schema_error({"b": []}, schema) is not None
+    assert plugin._runtime_schema_error({"a": ["ready"]}, schema) is None
+    assert plugin._runtime_schema_error({"b": ["ready"]}, schema) is None
+
+
+def test_required_property_refinement_branch_cannot_target_another_field(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "array", "items": {"type": "string"}},
+            "b": {"type": "array", "items": {"type": "string"}},
+        },
+        "anyOf": [
+            {"properties": {"b": {"minItems": 1}}, "required": ["a"]},
+        ],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="invalid|required|unconstrained|no type"):
+        plugin._validate_schema(schema)
 
 
 def test_conforming_concrete_output_fixture_loads(tmp_path, monkeypatch):
@@ -4598,7 +4641,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "3861a32c939691c9a7d98f70015918204b782ca2"
+        == "8f4d7de12ec1746cd192c2c152a624e556f90c6f"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
