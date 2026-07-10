@@ -225,6 +225,34 @@ Version 0.10.5 bounds private-spool retry custody: accepted and terminal
 non-retryable handoffs delete only the exact verified inode and packet directory,
 while retryable transport or engine failures retain the packet for replay.
 
+Version 0.10.6 lets the existing `daily_integration_closeout` operation accept
+either the compatible single `calendar_envelope` or a `calendar_envelopes`
+array of one to fifty single-entity managed plans. The array is canonical even
+for one Event entity; the singular input remains compatibility-only. Every
+non-empty plan must declare `desired_set_complete: true`, bind the same
+exact completed run and source reads, and canonical Event identities must be
+distinct even when active and archive paths differ. The plugin recomputes every
+plan digest and submits one digest-bound batch through the declared protected
+transport; Hermes never calls NOC directly. These pre-preparation envelopes are
+harness-attested and engine-routed; kb-engine then stages and authorizes the exact intent. The owned
+calendar connector performs one complete owned-set read, enforces the aggregate
+delete floor, and executes plans serially with idempotent progress recovery. NOC
+relays the typed result and records engine writeback without owning calendar
+semantics. Only after every compact receipt proves balanced counts, readback,
+durable recording, and no held work does the plugin aggregate the existing
+engine closeout shape, retaining the batch digest and every ordered plan/child
+receipt digest when work was planned (or the canonical empty-list digest for a
+true no-op), and perform one publication preview/apply pair. Publication
+acknowledgement then removes private recovery material while retaining an
+idempotent compact tombstone for lost acknowledgements. Any refused, partial, or
+uncertain batch prevents publication.
+
+Before these plans are authored, an unbound TripIt anchor group is merged into
+the unique existing bound Event when the provider source ID matches exactly and
+the anchor date window is contained. That case must never mint a synthetic Event
+path; all of its calendar artifacts remain consolidated in the bound Event's one
+single-entity envelope.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

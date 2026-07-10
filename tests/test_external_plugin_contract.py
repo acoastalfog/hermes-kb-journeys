@@ -2241,6 +2241,66 @@ def test_semantic_batch_transport_rejects_invalid_target_evidence_text_offset(
     assert "target_evidence_text_offset" in result["error"]
 
 
+def _managed_calendar_plan(run_id, entity_path):
+    return {
+        "schema_version": 1,
+        "kind": "managed_calendar_plan",
+        "policy_scope": "kb_managed_event_travel_v1",
+        "run_id": run_id,
+        "entity_path": entity_path,
+        "desired_set_complete": True,
+        "source_reads": {
+            "tripit_complete": True,
+            "calendar_complete": True,
+            "tripit_digest": "sha256:" + "a" * 64,
+            "calendar_digest": "sha256:" + "b" * 64,
+        },
+        "artifacts": [],
+    }
+
+
+def _managed_calendar_closeout(
+    plugin,
+    run_id,
+    *,
+    planned=0,
+    applied=0,
+    kept=0,
+):
+    closeout = {
+        "schema_version": 1,
+        "kind": "managed_calendar_closeout",
+        "run_id": run_id,
+        "status": "not_required" if planned == 0 else "completed",
+        "ok": True,
+        "source_reads": {"tripit_complete": True, "calendar_complete": True},
+        "counts": {
+            "planned": planned,
+            "applied": applied,
+            "kept": kept,
+            "read_back": applied,
+            "recorded": applied,
+            "held": 0,
+            "failed": 0,
+            "pending": 0,
+        },
+    }
+    closeout["receipt_digest"] = plugin._managed_closeout_digest(closeout)
+    return closeout
+
+
+def _calendar_live_success(envelope, closeout):
+    return {
+        "schema_version": 1,
+        "kind": "calendar_live_executor_receipt",
+        "status": "completed",
+        "ok": True,
+        "run_id": envelope["run_id"],
+        "plan_digest": envelope["plan_digest"],
+        "closeout": closeout,
+    }
+
+
 @pytest.mark.parametrize(
     ("sync_status", "degradations"),
     [
@@ -2264,24 +2324,19 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     _install_conforming_descriptor_fixture(plugin, monkeypatch)
     run_id = "hdf-kb_sync-daily"
-    closeout = {
-        "schema_version": 1,
-        "kind": "managed_calendar_closeout",
-        "run_id": run_id,
-        "status": "completed",
-        "ok": True,
-        "source_reads": {"tripit_complete": True, "calendar_complete": True},
-        "counts": {
-            "planned": 2, "applied": 1, "kept": 1, "read_back": 1,
-            "recorded": 1, "held": 0, "failed": 0, "pending": 0,
-        },
-        "receipt_digest": "sha256:" + "c" * 64,
-    }
-    monkeypatch.setattr(
+    closeout = _managed_calendar_closeout(
         plugin,
-        "_calendar_live_request",
-        lambda envelope, mode="execute": {"ok": True, "status": "completed", "closeout": closeout},
+        run_id,
+        planned=2,
+        applied=1,
+        kept=1,
     )
+
+    def calendar_live_request(envelope, mode="execute"):
+        assert mode == "execute"
+        return _calendar_live_success(envelope, closeout)
+
+    monkeypatch.setattr(plugin, "_calendar_live_request", calendar_live_request)
     sync = {
         "kind": "kb_sync_receipt",
         "status": sync_status,
@@ -2327,7 +2382,7 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
         "policy_scope": "kb_managed_event_travel_v1",
         "run_id": run_id,
         "entity_path": "events/demo",
-        "source_reads": {},
+        "source_reads": {"tripit_complete": True, "calendar_complete": True},
         "artifacts": [],
     }
     result = json.loads(
@@ -2356,8 +2411,298 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
         "mcp_kb_engine_prod_publication_daily_integration_apply",
     ]
     apply_args = ctx.calls[-1][1]
-    assert apply_args["calendar_receipt"] == closeout
+    aggregate = apply_args["calendar_receipt"]
+    assert aggregate["counts"] == closeout["counts"]
+    prepared_envelope = dict(envelope)
+    prepared_envelope["plan_digest"] = plugin._managed_plan_digest(prepared_envelope)
+    assert aggregate["batch_digest"] == plugin._calendar_batch_digest(
+        [prepared_envelope]
+    )
+    assert aggregate["child_receipts"] == [
+        {
+            "plan_digest": prepared_envelope["plan_digest"],
+            "receipt_digest": closeout["receipt_digest"],
+        }
+    ]
+    assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
     assert apply_args["session_id"] == "hermes-cron-daily"
+
+
+def _eligible_daily_sync(run_id):
+    return {
+        "kind": "kb_sync_receipt",
+        "status": "completed",
+        "terminal_state": "completed",
+        "run_id": run_id,
+        "degradations": [],
+        "source_currency": {
+            "sources": [
+                {"source_id": source_id, "state": "current"}
+                for source_id in ("mail", "calendar", "slack", "meetings", "tripit")
+            ]
+        },
+        "semantic_accounting": {
+            "complete": True,
+            "remaining_count": 0,
+            "integrated_target_count": 4,
+        },
+        "lifecycle": {"status": "fixed_point"},
+    }
+
+
+def _noc_batch_success(plugin, envelopes, closeouts):
+    result = {
+        "schema_version": 1,
+        "kind": "calendar_live_batch_executor_receipt",
+        "status": "completed",
+        "ok": True,
+        "run_id": envelopes[0]["run_id"],
+        "batch_digest": plugin._calendar_batch_digest(envelopes),
+        "total_count": len(envelopes),
+        "completed_count": len(envelopes),
+        "receipts": [
+            {"plan_digest": envelope["plan_digest"], "closeout": closeout}
+            for envelope, closeout in zip(envelopes, closeouts, strict=True)
+        ],
+        "side_effect_state": "complete",
+        "aggregate_safety": {"allowed": True},
+    }
+    result["receipt_digest"] = plugin._managed_closeout_digest(result)
+    return result
+
+
+def _noc_batch_ack(plugin, envelopes, *, removed=True, compacted=True):
+    result = {
+        "schema_version": 1,
+        "kind": "calendar_live_batch_acknowledgement",
+        "status": "acknowledged",
+        "ok": True,
+        "run_id": envelopes[0]["run_id"],
+        "batch_digest": plugin._calendar_batch_digest(envelopes),
+        "connector_progress_removed": removed,
+        "recovery_compacted": compacted,
+    }
+    result["receipt_digest"] = plugin._managed_closeout_digest(result)
+    return result
+
+
+def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publication(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-multi"
+    raw_envelopes = [
+        _managed_calendar_plan(run_id, "events/travel-one"),
+        _managed_calendar_plan(run_id, "events/archive/travel-two"),
+    ]
+    envelopes = []
+    for raw in raw_envelopes:
+        envelope = dict(raw)
+        envelope["plan_digest"] = plugin._managed_plan_digest(envelope)
+        envelopes.append(envelope)
+    closeouts = [
+        _managed_calendar_closeout(plugin, run_id, planned=2, applied=1, kept=1),
+        _managed_calendar_closeout(plugin, run_id, planned=3, applied=2, kept=1),
+    ]
+    events = []
+
+    def batch_request(values):
+        events.append("calendar_batch")
+        assert [value["plan_digest"] for value in values] == [
+            value["plan_digest"] for value in envelopes
+        ]
+        return _noc_batch_success(plugin, values, closeouts)
+
+    monkeypatch.setattr(plugin, "_calendar_live_batch_request", batch_request)
+    monkeypatch.setattr(
+        plugin,
+        "_calendar_live_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("single path used")),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_calendar_live_batch_acknowledge",
+        lambda values: events.append("calendar_ack") or _noc_batch_ack(plugin, values),
+    )
+    sync = _eligible_daily_sync(run_id)
+    preview = {"ok": True, "status": "ready", "preview_digest": "sha256:" + "d" * 64}
+    publication = {
+        "ok": True,
+        "status": "published",
+        "readback": {"ok": True, "clean": True, "ahead": 0},
+    }
+    responses = iter((sync, preview, publication))
+    ctx = FakePacketTransportContext()
+
+    def dispatch(tool_name, args):
+        ctx.calls.append((tool_name, args))
+        events.append(tool_name)
+        return json.dumps({"result": next(responses)})
+
+    ctx.dispatch_tool = dispatch
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": run_id,
+                "session_id": "hermes-cron-multi",
+                "calendar_envelopes": raw_envelopes,
+            }
+        )
+    )
+
+    assert result["accepted"] is True and result["complete"] is True
+    assert result["calendar"]["entity_count"] == 2
+    assert result["calendar"]["counts"] == {
+        "planned": 5,
+        "applied": 3,
+        "kept": 2,
+        "read_back": 3,
+        "recorded": 3,
+        "held": 0,
+        "failed": 0,
+        "pending": 0,
+    }
+    assert events == [
+        "mcp_kb_engine_prod_kb_sync_status",
+        "calendar_batch",
+        "mcp_kb_engine_prod_publication_daily_integration_preview",
+        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "calendar_ack",
+    ]
+    aggregate = ctx.calls[-1][1]["calendar_receipt"]
+    assert aggregate["batch_digest"] == plugin._calendar_batch_digest(envelopes)
+    assert aggregate["child_receipts"] == [
+        {
+            "plan_digest": envelope["plan_digest"],
+            "receipt_digest": child["receipt_digest"],
+        }
+        for envelope, child in zip(envelopes, closeouts, strict=True)
+    ]
+    assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
+
+
+def test_calendar_aggregate_not_required_binds_canonical_empty_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    run_id = "hdf-kb_sync-empty"
+    envelopes = []
+    closeouts = []
+    for index in (1, 2):
+        envelope = _managed_calendar_plan(run_id, f"events/empty-{index}")
+        envelope["plan_digest"] = plugin._managed_plan_digest(envelope)
+        envelopes.append(envelope)
+        closeouts.append(_managed_calendar_closeout(plugin, run_id))
+
+    aggregate = plugin._aggregate_calendar_closeouts(
+        closeouts,
+        envelopes=envelopes,
+        run_id=run_id,
+    )
+
+    assert aggregate["status"] == "not_required"
+    assert aggregate["child_receipts"] == []
+    assert aggregate["batch_digest"] == plugin._managed_mapping_digest(
+        {"run_id": run_id, "plan_digests": []}
+    )
+    assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
+
+
+def test_daily_integration_batch_uncertainty_stops_before_publication(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    run_id = "hdf-kb_sync-multi"
+    raw = [
+        _managed_calendar_plan(run_id, "events/travel-one"),
+        _managed_calendar_plan(run_id, "events/travel-two"),
+    ]
+
+    def batch_request(values):
+        result = {
+            "schema_version": 1,
+            "kind": "calendar_live_batch_executor_receipt",
+            "status": "partial",
+            "ok": False,
+            "run_id": run_id,
+            "batch_digest": plugin._calendar_batch_digest(values),
+            "total_count": 2,
+            "completed_count": 0,
+            "receipts": [],
+            "side_effect_state": "uncertain",
+            "reason_code": "graph_execution_failed",
+            "reason": "retry exact batch",
+            "uncertain_plan_digest": values[1]["plan_digest"],
+        }
+        result["receipt_digest"] = plugin._managed_closeout_digest(result)
+        return result
+
+    monkeypatch.setattr(plugin, "_calendar_live_batch_request", batch_request)
+    monkeypatch.setattr(
+        plugin,
+        "_calendar_live_batch_acknowledge",
+        lambda values: (_ for _ in ()).throw(AssertionError("ack must not run")),
+    )
+    ctx = FakePacketTransportContext()
+    ctx.dispatch_result = {"result": _eligible_daily_sync(run_id)}
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": run_id,
+                "session_id": "hermes-cron-multi",
+                "calendar_envelopes": raw,
+            }
+        )
+    )
+
+    assert result["accepted"] is False and result["stage"] == "calendar_execution"
+    assert result["error"] == "graph_execution_failed"
+    assert [name for name, _args in ctx.calls] == ["mcp_kb_engine_prod_kb_sync_status"]
+
+
+def test_daily_integration_batch_schema_and_identity_gates(tmp_path, monkeypatch):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+    parameters = ctx.registered_tools["kb_integration_transport"]["schema"]["parameters"]
+    batch = parameters["properties"]["calendar_envelopes"]
+    assert batch["minItems"] == 1 and batch["maxItems"] == 50
+    assert "unbound TripIt anchor" in batch["description"]
+    assert "never mint a synthetic Event path" in batch["description"]
+    closeout_variant = next(
+        variant
+        for variant in parameters["oneOf"]
+        if variant["properties"]["operation"].get("const") == "daily_integration_closeout"
+    )
+    assert len(closeout_variant["oneOf"]) == 2
+
+    run_id = "hdf-kb_sync-multi"
+    first = _managed_calendar_plan(run_id, "events/travel-one")
+    alias = _managed_calendar_plan(run_id, "events/archive/travel-one")
+    envelopes, error = plugin._calendar_closeout_envelopes(
+        {"calendar_envelopes": [first, alias]}, run_id=run_id
+    )
+    assert envelopes == [] and "distinct" in error
+
+    second = _managed_calendar_plan(run_id, "events/travel-two")
+    second["source_reads"]["calendar_digest"] = "sha256:" + "c" * 64
+    envelopes, error = plugin._calendar_closeout_envelopes(
+        {"calendar_envelopes": [first, second]}, run_id=run_id
+    )
+    assert envelopes == [] and "same complete source reads" in error
+
+    nonempty = _managed_calendar_plan(run_id, "events/travel-three")
+    nonempty["artifacts"] = [{"events": []}]
+    nonempty.pop("desired_set_complete")
+    envelopes, error = plugin._calendar_closeout_envelopes(
+        {"calendar_envelopes": [nonempty]}, run_id=run_id
+    )
+    assert envelopes == [] and "complete single-entity plan" in error
 
 
 @pytest.mark.parametrize(
@@ -4149,9 +4494,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.5"
+    assert manifest["version"] == "0.10.6"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.5"
+    assert manifest["migrations"][-1]["version"] == "0.10.6"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"

@@ -93,6 +93,7 @@ COMPLETION_CLOCK_SKEW_SECONDS = 30
 INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
 CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
 CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+DAILY_INTEGRATION_CLOSEOUT_LOCK = threading.Lock()
 SYNC_PACKET_MAX_BYTES = 64 * 1024 * 1024
 SYNC_PACKET_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SYNC_PACKET_ACCEPTED_STATUSES = frozenset(
@@ -8918,23 +8919,244 @@ def _context_search(args: dict[str, Any]) -> dict[str, Any]:
 
 def _managed_plan_digest(envelope: dict[str, Any]) -> str:
     material = {key: value for key, value in envelope.items() if key != "plan_digest"}
+    return _managed_mapping_digest(material)
+
+
+def _managed_mapping_digest(value: dict[str, Any]) -> str:
     canonical = json.dumps(
-        material,
+        value,
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+        default=str,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
-def _calendar_live_request(envelope: dict[str, Any], *, mode: str = "execute") -> dict[str, Any]:
-    path = os.getenv("HERMES_CALENDAR_LIVE_SOCKET", CALENDAR_LIVE_SOCKET).strip() or CALENDAR_LIVE_SOCKET
-    request = {
-        "schema_version": 1,
-        "kind": "calendar_live_managed_request",
-        "mode": mode,
-        "envelope": envelope,
+_MANAGED_CALENDAR_COUNT_FIELDS = (
+    "planned",
+    "applied",
+    "kept",
+    "read_back",
+    "recorded",
+    "held",
+    "failed",
+    "pending",
+)
+
+
+def _managed_closeout_digest(closeout: dict[str, Any]) -> str:
+    material = {key: value for key, value in closeout.items() if key != "receipt_digest"}
+    return _managed_mapping_digest(material)
+
+
+def _calendar_closeout_envelopes(
+    args: dict[str, Any], *, run_id: str
+) -> tuple[list[dict[str, Any]], str]:
+    has_single = "calendar_envelope" in args
+    has_batch = "calendar_envelopes" in args
+    if has_single == has_batch:
+        return [], "provide exactly one of calendar_envelope or calendar_envelopes"
+    raw_envelopes: Any = (
+        [args.get("calendar_envelope")] if has_single else args.get("calendar_envelopes")
+    )
+    if not isinstance(raw_envelopes, list) or not 1 <= len(raw_envelopes) <= 50:
+        return [], "calendar envelopes must contain between 1 and 50 plans"
+
+    envelopes: list[dict[str, Any]] = []
+    entity_paths: set[str] = set()
+    source_pairs: set[tuple[str, str]] = set()
+    for raw in raw_envelopes:
+        if not isinstance(raw, dict):
+            return [], "each calendar envelope must be an object"
+        entity_path = str(raw.get("entity_path") or "").strip()
+        entity_identity = _calendar_entity_identity(entity_path)
+        source_reads = raw.get("source_reads")
+        artifacts = raw.get("artifacts")
+        if (
+            raw.get("schema_version") != 1
+            or raw.get("kind") != "managed_calendar_plan"
+            or raw.get("policy_scope") != "kb_managed_event_travel_v1"
+            or str(raw.get("run_id") or "") != run_id
+            or not entity_identity
+            or not isinstance(source_reads, dict)
+            or source_reads.get("tripit_complete") is not True
+            or source_reads.get("calendar_complete") is not True
+            or not isinstance(artifacts, list)
+            or len(artifacts) > 200
+            or (bool(artifacts) and raw.get("desired_set_complete") is not True)
+        ):
+            return [], "each calendar envelope must be a complete single-entity plan for the exact run"
+        if entity_identity in entity_paths:
+            return [], "calendar envelopes must bind distinct event entities"
+        entity_paths.add(entity_identity)
+        if has_batch:
+            source_pair = (
+                str(source_reads.get("tripit_digest") or ""),
+                str(source_reads.get("calendar_digest") or ""),
+            )
+            if any(not DESCRIPTOR_DIGEST_RE.fullmatch(value) for value in source_pair):
+                return [], "calendar batch source reads must include exact digests"
+            source_pairs.add(source_pair)
+        envelope = dict(raw)
+        envelope["plan_digest"] = _managed_plan_digest(envelope)
+        envelopes.append(envelope)
+    if has_batch and len(source_pairs) != 1:
+        return [], "calendar batch envelopes must bind the same complete source reads"
+    return envelopes, ""
+
+
+def _calendar_entity_identity(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^events/(?:archive/)?", "", text)
+    text = re.sub(r"[^a-z0-9._-]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-._")
+    return f"events/{text}" if text else ""
+
+
+def _validated_calendar_closeout(
+    result: Any,
+    *,
+    envelope: dict[str, Any],
+    run_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if (
+        not isinstance(result, dict)
+        or result.get("schema_version") != 1
+        or result.get("kind") != "calendar_live_executor_receipt"
+        or result.get("ok") is not True
+        or result.get("status") != "completed"
+        or result.get("run_id") != run_id
+        or result.get("plan_digest") != envelope.get("plan_digest")
+    ):
+        reason = result.get("reason") if isinstance(result, dict) else ""
+        return None, _clip(reason, 160) or "managed calendar execution failed"
+    closeout = result.get("closeout")
+    closeout_error = _managed_closeout_error(closeout, run_id=run_id)
+    if closeout_error:
+        return None, closeout_error
+    return dict(closeout), ""
+
+
+def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
+    if not isinstance(closeout, dict) or set(closeout) != {
+        "schema_version",
+        "kind",
+        "run_id",
+        "status",
+        "ok",
+        "source_reads",
+        "counts",
+        "receipt_digest",
+    }:
+        return "managed calendar closeout contract is invalid"
+    source_reads = closeout.get("source_reads")
+    counts = closeout.get("counts")
+    if (
+        closeout.get("schema_version") != 1
+        or closeout.get("kind") != "managed_calendar_closeout"
+        or closeout.get("run_id") != run_id
+        or closeout.get("status") not in {"completed", "not_required"}
+        or closeout.get("ok") is not True
+        or not isinstance(source_reads, dict)
+        or set(source_reads) != {"tripit_complete", "calendar_complete"}
+        or source_reads.get("tripit_complete") is not True
+        or source_reads.get("calendar_complete") is not True
+        or not isinstance(counts, dict)
+        or set(counts) != set(_MANAGED_CALENDAR_COUNT_FIELDS)
+        or any(
+            isinstance(counts.get(name), bool)
+            or not isinstance(counts.get(name), int)
+            or counts[name] < 0
+            for name in _MANAGED_CALENDAR_COUNT_FIELDS
+        )
+    ):
+        return "managed calendar closeout proof is incomplete"
+    if (
+        counts["planned"] != counts["applied"] + counts["kept"] + counts["held"]
+        or counts["applied"] != counts["read_back"]
+        or counts["applied"] != counts["recorded"]
+        or closeout["status"]
+        != ("not_required" if counts["planned"] == 0 else "completed")
+        or counts["held"]
+        or counts["failed"]
+        or counts["pending"]
+    ):
+        return "managed calendar closeout accounting is incomplete"
+    if closeout.get("receipt_digest") != _managed_closeout_digest(closeout):
+        return "managed calendar closeout digest is invalid"
+    return ""
+
+
+def _aggregate_calendar_closeouts(
+    closeouts: list[dict[str, Any]],
+    *,
+    envelopes: list[dict[str, Any]],
+    run_id: str,
+) -> dict[str, Any]:
+    if len(closeouts) != len(envelopes):
+        raise ValueError("calendar closeout provenance is incomplete")
+    counts = {
+        name: sum(int(closeout["counts"][name]) for closeout in closeouts)
+        for name in _MANAGED_CALENDAR_COUNT_FIELDS
     }
+    child_receipts = (
+        [
+            {
+                "plan_digest": str(envelope.get("plan_digest") or ""),
+                "receipt_digest": str(closeout.get("receipt_digest") or ""),
+            }
+            for envelope, closeout in zip(envelopes, closeouts, strict=True)
+        ]
+        if counts["planned"]
+        else []
+    )
+    receipt = {
+        "schema_version": 1,
+        "kind": "managed_calendar_closeout",
+        "run_id": run_id,
+        "batch_digest": _managed_mapping_digest(
+            {
+                "run_id": run_id,
+                "plan_digests": [
+                    child["plan_digest"] for child in child_receipts
+                ],
+            }
+        ),
+        "child_receipts": child_receipts,
+        "status": "not_required" if counts["planned"] == 0 else "completed",
+        "ok": True,
+        "source_reads": {
+            "tripit_complete": all(
+                closeout["source_reads"]["tripit_complete"] is True
+                for closeout in closeouts
+            ),
+            "calendar_complete": all(
+                closeout["source_reads"]["calendar_complete"] is True
+                for closeout in closeouts
+            ),
+        },
+        "counts": counts,
+    }
+    receipt["receipt_digest"] = _managed_closeout_digest(receipt)
+    return receipt
+
+
+def _calendar_batch_digest(envelopes: list[dict[str, Any]]) -> str:
+    run_ids = {str(envelope.get("run_id") or "") for envelope in envelopes}
+    run_id = next(iter(run_ids)) if len(run_ids) == 1 else ""
+    return _managed_mapping_digest(
+        {
+            "run_id": run_id,
+            "plan_digests": [
+                str(envelope.get("plan_digest") or "") for envelope in envelopes
+            ],
+        }
+    )
+
+
+def _calendar_live_socket_request(request: dict[str, Any]) -> dict[str, Any]:
+    path = os.getenv("HERMES_CALENDAR_LIVE_SOCKET", CALENDAR_LIVE_SOCKET).strip() or CALENDAR_LIVE_SOCKET
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(240)
     chunks: list[bytes] = []
@@ -8960,6 +9182,152 @@ def _calendar_live_request(envelope: dict[str, Any], *, mode: str = "execute") -
     if not isinstance(payload, dict):
         raise ValueError("calendar.live returned a non-object response")
     return payload
+
+
+def _calendar_live_request(envelope: dict[str, Any], *, mode: str = "execute") -> dict[str, Any]:
+    return _calendar_live_socket_request(
+        {
+            "schema_version": 1,
+            "kind": "calendar_live_managed_request",
+            "mode": mode,
+            "envelope": envelope,
+        }
+    )
+
+
+def _calendar_live_batch_request(envelopes: list[dict[str, Any]]) -> dict[str, Any]:
+    return _calendar_live_socket_request(
+        {
+            "schema_version": 1,
+            "kind": "calendar_live_managed_batch_request",
+            "mode": "execute",
+            "batch_digest": _calendar_batch_digest(envelopes),
+            "envelopes": envelopes,
+        }
+    )
+
+
+def _calendar_live_batch_acknowledge(envelopes: list[dict[str, Any]]) -> dict[str, Any]:
+    return _calendar_live_socket_request(
+        {
+            "schema_version": 1,
+            "kind": "calendar_live_managed_batch_request",
+            "mode": "acknowledge",
+            "batch_digest": _calendar_batch_digest(envelopes),
+            "envelopes": envelopes,
+        }
+    )
+
+
+def _validated_calendar_batch_result(
+    result: Any,
+    *,
+    envelopes: list[dict[str, Any]],
+    run_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    batch_digest = _calendar_batch_digest(envelopes)
+    allowed_fields = {
+        "schema_version",
+        "kind",
+        "status",
+        "ok",
+        "run_id",
+        "batch_digest",
+        "total_count",
+        "completed_count",
+        "receipts",
+        "side_effect_state",
+        "aggregate_safety",
+        "reason",
+        "reason_code",
+        "uncertain_plan_digest",
+        "receipt_digest",
+    }
+    if (
+        not isinstance(result, dict)
+        or not set(result).issubset(allowed_fields)
+        or result.get("schema_version") != 1
+        or result.get("kind") != "calendar_live_batch_executor_receipt"
+        or result.get("run_id") != run_id
+        or result.get("batch_digest") != batch_digest
+        or result.get("total_count") != len(envelopes)
+        or result.get("receipt_digest")
+        != _managed_closeout_digest(result)
+    ):
+        return [], "managed calendar batch response contract is invalid"
+    receipts = result.get("receipts")
+    if not isinstance(receipts, list):
+        return [], "managed calendar batch receipts are invalid"
+    if result.get("ok") is not True:
+        reason_code = str(result.get("reason_code") or "")
+        if (
+            result.get("status")
+            not in {"refused", "partial", "recording_incomplete"}
+            or result.get("completed_count") != 0
+            or receipts
+            or result.get("side_effect_state") not in {"none", "uncertain", "applied"}
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason_code)
+        ):
+            return [], "managed calendar batch failure proof is invalid"
+        return [], reason_code
+    aggregate_safety = result.get("aggregate_safety")
+    if (
+        result.get("status") != "completed"
+        or result.get("side_effect_state") != "complete"
+        or result.get("completed_count") != len(envelopes)
+        or len(receipts) != len(envelopes)
+        or not isinstance(aggregate_safety, dict)
+        or aggregate_safety.get("allowed") is not True
+    ):
+        return [], "managed calendar batch completion proof is invalid"
+    closeouts: list[dict[str, Any]] = []
+    for envelope, receipt in zip(envelopes, receipts, strict=True):
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != {"plan_digest", "closeout"}
+            or receipt.get("plan_digest") != envelope.get("plan_digest")
+        ):
+            return [], "managed calendar batch receipt binding is invalid"
+        closeout = receipt.get("closeout")
+        closeout_error = _managed_closeout_error(closeout, run_id=run_id)
+        if closeout_error:
+            return [], closeout_error
+        closeouts.append(dict(closeout))
+    return closeouts, ""
+
+
+def _calendar_batch_acknowledgement_error(
+    result: Any,
+    *,
+    envelopes: list[dict[str, Any]],
+    run_id: str,
+) -> str:
+    if (
+        not isinstance(result, dict)
+        or set(result)
+        != {
+            "schema_version",
+            "kind",
+            "status",
+            "ok",
+            "run_id",
+            "batch_digest",
+            "connector_progress_removed",
+            "recovery_compacted",
+            "receipt_digest",
+        }
+        or result.get("schema_version") != 1
+        or result.get("kind") != "calendar_live_batch_acknowledgement"
+        or result.get("status") != "acknowledged"
+        or result.get("ok") is not True
+        or result.get("run_id") != run_id
+        or result.get("batch_digest") != _calendar_batch_digest(envelopes)
+        or not isinstance(result.get("connector_progress_removed"), bool)
+        or not isinstance(result.get("recovery_compacted"), bool)
+        or result.get("receipt_digest") != _managed_closeout_digest(result)
+    ):
+        return "managed calendar recovery acknowledgement is invalid"
+    return ""
 
 
 def _daily_integration_morning_brief(
@@ -8992,6 +9360,13 @@ def _daily_integration_morning_brief(
 
 
 def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) -> dict[str, Any]:
+    with DAILY_INTEGRATION_CLOSEOUT_LOCK:
+        return _daily_integration_closeout_serial(ctx, args, run_id=run_id)
+
+
+def _daily_integration_closeout_serial(
+    ctx: Any, args: dict[str, Any], *, run_id: str
+) -> dict[str, Any]:
     target = _mcp_target()
     _tool, sync, errors = _dispatch_first(
         ctx, target, [("kb.sync.status", {"run_id": run_id})]
@@ -9005,36 +9380,80 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
             "error": _clip("; ".join(errors), 240)
             or "kb.sync run is not eligible for Daily Integration closeout",
         }
-    envelope = args.get("calendar_envelope")
-    if not isinstance(envelope, dict) or str(envelope.get("run_id") or "") != run_id:
+    envelopes, envelope_error = _calendar_closeout_envelopes(args, run_id=run_id)
+    if envelope_error:
         return {
             "accepted": False,
             "complete": False,
             "run_id": run_id,
             "stage": "calendar_plan",
-            "error": "calendar envelope must bind the exact completed run",
+            "error": envelope_error,
         }
-    envelope = dict(envelope)
-    envelope["plan_digest"] = _managed_plan_digest(envelope)
-    try:
-        calendar_result = _calendar_live_request(envelope, mode="execute")
-    except (OSError, ValueError) as exc:
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "calendar_execution",
-            "error": _clip(str(exc), 240),
-        }
-    closeout = calendar_result.get("closeout") if isinstance(calendar_result, dict) else None
-    if calendar_result.get("ok") is not True or not isinstance(closeout, dict) or closeout.get("ok") is not True:
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "calendar_execution",
-            "error": _clip(calendar_result.get("reason"), 240) or "managed calendar execution failed",
-        }
+    is_batch = "calendar_envelopes" in args
+    closeouts: list[dict[str, Any]] = []
+    if is_batch:
+        try:
+            calendar_result = _calendar_live_batch_request(envelopes)
+        except (OSError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_execution",
+                "calendar": {
+                    "completed_entities": 0,
+                    "total_entities": len(envelopes),
+                },
+                "error": _clip(str(exc), 240),
+            }
+        closeouts, closeout_error = _validated_calendar_batch_result(
+            calendar_result,
+            envelopes=envelopes,
+            run_id=run_id,
+        )
+        if closeout_error:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_execution",
+                "calendar": {
+                    "completed_entities": 0,
+                    "total_entities": len(envelopes),
+                },
+                "error": closeout_error,
+            }
+    else:
+        envelope = envelopes[0]
+        try:
+            calendar_result = _calendar_live_request(envelope, mode="execute")
+        except (OSError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_execution",
+                "error": _clip(str(exc), 240),
+            }
+        closeout, closeout_error = _validated_calendar_closeout(
+            calendar_result,
+            envelope=envelope,
+            run_id=run_id,
+        )
+        if closeout is None:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_execution",
+                "error": closeout_error,
+            }
+        closeouts.append(closeout)
+    closeout = _aggregate_calendar_closeouts(
+        closeouts,
+        envelopes=envelopes,
+        run_id=run_id,
+    )
     _tool, preview, errors = _dispatch_first(
         ctx,
         target,
@@ -9046,7 +9465,11 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
             "complete": False,
             "run_id": run_id,
             "stage": "publication_preview",
-            "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+            "calendar": {
+                "status": closeout.get("status"),
+                "counts": closeout.get("counts"),
+                "entity_count": len(envelopes),
+            },
             "error": _clip("; ".join(errors), 240) or "Git publication is held",
         }
     preview_digest = str(preview.get("preview_digest") or "")
@@ -9080,9 +9503,50 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
             "complete": False,
             "run_id": run_id,
             "stage": "publication_apply",
-            "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+            "calendar": {
+                "status": closeout.get("status"),
+                "counts": closeout.get("counts"),
+                "entity_count": len(envelopes),
+            },
             "error": _clip("; ".join(errors), 240) or "Git publication did not pass readback",
         }
+    if is_batch:
+        try:
+            acknowledgement = _calendar_live_batch_acknowledge(envelopes)
+        except (OSError, ValueError) as exc:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_recovery_cleanup",
+                "calendar": {
+                    "status": closeout.get("status"),
+                    "counts": closeout.get("counts"),
+                    "entity_count": len(envelopes),
+                },
+                "publication": {
+                    "status": publication.get("status"),
+                    "readback": publication.get("readback"),
+                },
+                "error": _clip(str(exc), 240),
+            }
+        acknowledgement_error = _calendar_batch_acknowledgement_error(
+            acknowledgement,
+            envelopes=envelopes,
+            run_id=run_id,
+        )
+        if acknowledgement_error:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "calendar_recovery_cleanup",
+                "publication": {
+                    "status": publication.get("status"),
+                    "readback": publication.get("readback"),
+                },
+                "error": acknowledgement_error,
+            }
     return {
         "accepted": True,
         "complete": True,
@@ -9096,7 +9560,11 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
         "source_currency": sync.get("source_currency"),
         "semantic_accounting": sync.get("semantic_accounting"),
         "lifecycle": sync.get("lifecycle"),
-        "calendar": {"status": closeout.get("status"), "counts": closeout.get("counts")},
+        "calendar": {
+            "status": closeout.get("status"),
+            "counts": closeout.get("counts"),
+            "entity_count": len(envelopes),
+        },
         "publication": {
             "status": publication.get("status"),
             "readback": publication.get("readback"),
@@ -9173,7 +9641,24 @@ def _register_integration_transport(ctx: Any) -> None:
                 },
                 "calendar_envelope": {
                     "type": "object",
-                    "description": "Exact kb_managed_event_travel_v1 envelope for this run.",
+                    "description": (
+                        "Deprecated single-envelope compatibility input. New Daily Integration "
+                        "closeouts use calendar_envelopes even when there is one Event entity."
+                    ),
+                },
+                "calendar_envelopes": {
+                    "type": "array",
+                    "description": (
+                        "One to fifty harness-attested, engine-routed single-entity "
+                        "kb_managed_event_travel_v1 envelopes for this exact run. This is "
+                        "the canonical input, including for one Event entity. Before planning, "
+                        "merge an unbound TripIt anchor into its unique existing bound Event "
+                        "when provider source_id and the contained date window match; never "
+                        "mint a synthetic Event path for that case."
+                    ),
+                    "items": {"type": "object"},
+                    "minItems": 1,
+                    "maxItems": 50,
                 },
                 "session_id": {
                     "type": "string",
@@ -9274,7 +9759,17 @@ def _register_integration_transport(ctx: Any) -> None:
                 },
                 {
                     "properties": {"operation": {"const": "daily_integration_closeout"}},
-                    "required": ["run_id", "calendar_envelope", "session_id"],
+                    "required": ["run_id", "session_id"],
+                    "oneOf": [
+                        {
+                            "required": ["calendar_envelope"],
+                            "not": {"required": ["calendar_envelopes"]},
+                        },
+                        {
+                            "required": ["calendar_envelopes"],
+                            "not": {"required": ["calendar_envelope"]},
+                        },
+                    ],
                 },
                 {
                     "properties": {"operation": {"const": "semantic_batch"}},
@@ -9298,6 +9793,7 @@ def _register_integration_transport(ctx: Any) -> None:
                             {"required": ["packet_path"]},
                             {"required": ["packet_transport"]},
                             {"required": ["calendar_envelope"]},
+                            {"required": ["calendar_envelopes"]},
                             {"required": ["evidence_refs"]},
                             {"required": ["target_refs"]}
                         ]
