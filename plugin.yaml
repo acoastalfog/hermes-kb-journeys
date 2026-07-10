@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.10.6
+version: 0.10.7
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -59,3 +59,5 @@ migrations:
     hard_break: "verified source packets are deleted after accepted or terminal non-retryable handoff; retryable failures remain retained"
   - version: 0.10.6
     hard_break: "Daily Integration closeout merges exact-source/date-contained TripIt anchors into their unique bound Event, accepts one to fifty harness-attested engine-routed single-entity envelopes, and publishes once against their exact aggregate receipt"
+  - version: 0.10.7
+    hard_break: "Daily Integration carries one strict batch-wide terminal calendar observation through publication and reports pre-execution versus final owned counts without repeating Graph effects on acknowledged replay"

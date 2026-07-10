@@ -48,8 +48,8 @@ The loader admits at most 13 generated tools, requires concrete input and output
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.45.60 at revision
-`1321393b0a4bf87e47d237d068092f51e50f8c6e`, which owns the exact
+The committed export is pinned to kb-engine 0.45.61 at revision
+`e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -246,6 +246,13 @@ true no-op), and perform one publication preview/apply pair. Publication
 acknowledgement then removes private recovery material while retaining an
 idempotent compact tombstone for lost acknowledgements. Any refused, partial, or
 uncertain batch prevents publication.
+
+Version 0.10.7 carries the connector's one batch-wide terminal calendar
+observation through the aggregate publication receipt and final morning brief.
+The pre-execution safety count remains distinct from the complete final owned
+count and privacy-safe digest; attendee and Graph event-type violations are
+reported only as aggregate counts. Exact closeout replay consumes the compact
+acknowledged tombstone and performs no additional connector or Graph-bound call.
 
 Before these plans are authored, an unbound TripIt anchor group is merged into
 the unique existing bound Event when the provider source ID matches exactly and

@@ -9066,7 +9066,7 @@ def _validated_calendar_closeout(
 
 
 def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
-    if not isinstance(closeout, dict) or set(closeout) != {
+    base_fields = {
         "schema_version",
         "kind",
         "run_id",
@@ -9075,6 +9075,10 @@ def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
         "source_reads",
         "counts",
         "receipt_digest",
+    }
+    if not isinstance(closeout, dict) or frozenset(closeout) not in {
+        frozenset(base_fields),
+        frozenset({*base_fields, "calendar_observation"}),
     }:
         return "managed calendar closeout contract is invalid"
     source_reads = closeout.get("source_reads")
@@ -9112,6 +9116,49 @@ def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
         return "managed calendar closeout accounting is incomplete"
     if closeout.get("receipt_digest") != _managed_closeout_digest(closeout):
         return "managed calendar closeout digest is invalid"
+    if "calendar_observation" in closeout:
+        observation_error = _calendar_observation_error(
+            closeout.get("calendar_observation")
+        )
+        if observation_error:
+            return observation_error
+    return ""
+
+
+def _calendar_observation_error(value: Any) -> str:
+    fields = {
+        "schema_version",
+        "kind",
+        "pre_execution_owned_count",
+        "final_owned_count",
+        "final_owned_calendar_digest",
+        "attendee_violation_count",
+        "event_type_violation_count",
+    }
+    integer_fields = (
+        "pre_execution_owned_count",
+        "final_owned_count",
+        "attendee_violation_count",
+        "event_type_violation_count",
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("schema_version") != 1
+        or value.get("kind") != "managed_calendar_terminal_observation"
+        or any(
+            isinstance(value.get(name), bool)
+            or not isinstance(value.get(name), int)
+            or value[name] < 0
+            for name in integer_fields
+        )
+        or not DESCRIPTOR_DIGEST_RE.fullmatch(
+            str(value.get("final_owned_calendar_digest") or "")
+        )
+        or value["attendee_violation_count"] > value["final_owned_count"]
+        or value["event_type_violation_count"] > value["final_owned_count"]
+    ):
+        return "managed calendar terminal observation is invalid"
     return ""
 
 
@@ -9120,6 +9167,7 @@ def _aggregate_calendar_closeouts(
     *,
     envelopes: list[dict[str, Any]],
     run_id: str,
+    calendar_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if len(closeouts) != len(envelopes):
         raise ValueError("calendar closeout provenance is incomplete")
@@ -9165,6 +9213,11 @@ def _aggregate_calendar_closeouts(
         },
         "counts": counts,
     }
+    if calendar_observation is not None:
+        observation_error = _calendar_observation_error(calendar_observation)
+        if observation_error:
+            raise ValueError(observation_error)
+        receipt["calendar_observation"] = dict(calendar_observation)
     receipt["receipt_digest"] = _managed_closeout_digest(receipt)
     return receipt
 
@@ -9251,7 +9304,7 @@ def _validated_calendar_batch_result(
     *,
     envelopes: list[dict[str, Any]],
     run_id: str,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str]:
     batch_digest = _calendar_batch_digest(envelopes)
     allowed_fields = {
         "schema_version",
@@ -9265,6 +9318,7 @@ def _validated_calendar_batch_result(
         "receipts",
         "side_effect_state",
         "aggregate_safety",
+        "calendar_observation",
         "reason",
         "reason_code",
         "uncertain_plan_digest",
@@ -9281,10 +9335,10 @@ def _validated_calendar_batch_result(
         or result.get("receipt_digest")
         != _managed_closeout_digest(result)
     ):
-        return [], "managed calendar batch response contract is invalid"
+        return [], None, "managed calendar batch response contract is invalid"
     receipts = result.get("receipts")
     if not isinstance(receipts, list):
-        return [], "managed calendar batch receipts are invalid"
+        return [], None, "managed calendar batch receipts are invalid"
     if result.get("ok") is not True:
         reason_code = str(result.get("reason_code") or "")
         if (
@@ -9295,9 +9349,10 @@ def _validated_calendar_batch_result(
             or result.get("side_effect_state") not in {"none", "uncertain", "applied"}
             or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason_code)
         ):
-            return [], "managed calendar batch failure proof is invalid"
-        return [], reason_code
+            return [], None, "managed calendar batch failure proof is invalid"
+        return [], None, reason_code
     aggregate_safety = result.get("aggregate_safety")
+    calendar_observation = result.get("calendar_observation")
     if (
         result.get("status") != "completed"
         or result.get("side_effect_state") != "complete"
@@ -9306,7 +9361,20 @@ def _validated_calendar_batch_result(
         or not isinstance(aggregate_safety, dict)
         or aggregate_safety.get("allowed") is not True
     ):
-        return [], "managed calendar batch completion proof is invalid"
+        return [], None, "managed calendar batch completion proof is invalid"
+    if calendar_observation is not None:
+        observation_error = _calendar_observation_error(calendar_observation)
+        if observation_error:
+            return [], None, observation_error
+        pre_execution_count = calendar_observation["pre_execution_owned_count"]
+        if (
+            aggregate_safety.get("owned_count") != pre_execution_count
+            or aggregate_safety.get("pre_execution_owned_count")
+            != pre_execution_count
+        ):
+            return [], None, "managed calendar pre-execution observation is inconsistent"
+    elif "pre_execution_owned_count" in aggregate_safety:
+        return [], None, "managed calendar terminal observation is missing"
     closeouts: list[dict[str, Any]] = []
     for envelope, receipt in zip(envelopes, receipts, strict=True):
         if (
@@ -9314,13 +9382,15 @@ def _validated_calendar_batch_result(
             or set(receipt) != {"plan_digest", "closeout"}
             or receipt.get("plan_digest") != envelope.get("plan_digest")
         ):
-            return [], "managed calendar batch receipt binding is invalid"
+            return [], None, "managed calendar batch receipt binding is invalid"
         closeout = receipt.get("closeout")
         closeout_error = _managed_closeout_error(closeout, run_id=run_id)
         if closeout_error:
-            return [], closeout_error
+            return [], None, closeout_error
         closeouts.append(dict(closeout))
-    return closeouts, ""
+    return closeouts, (
+        dict(calendar_observation) if isinstance(calendar_observation, dict) else None
+    ), ""
 
 
 def _calendar_batch_acknowledgement_error(
@@ -9374,12 +9444,27 @@ def _daily_integration_morning_brief(
     changed = int(counts.get("applied") or 0)
     kept = int(counts.get("kept") or 0)
     git_status = str(publication.get("status") or "unknown")
+    observation = (
+        calendar.get("calendar_observation")
+        if isinstance(calendar.get("calendar_observation"), dict)
+        else {}
+    )
+    final_owned = observation.get("final_owned_count")
+    attendee_violations = int(observation.get("attendee_violation_count") or 0)
+    event_type_violations = int(observation.get("event_type_violation_count") or 0)
+    calendar_line = f"Calendar: {changed} applied, {kept} already current."
+    if isinstance(final_owned, int) and not isinstance(final_owned, bool):
+        calendar_line = (
+            f"Calendar: {changed} applied, {kept} already current; "
+            f"{final_owned} managed events verified, "
+            f"{attendee_violations} attendee / {event_type_violations} type violations."
+        )
     return "\n".join(
         (
             "Daily Integration complete",
             f"Evidence: {source_current}/5 sources current.",
             f"KB: {targets} targets integrated; lifecycle {lifecycle.get('status') or 'verified'}.",
-            f"Calendar: {changed} applied, {kept} already current.",
+            calendar_line,
             f"Git: {git_status} with clean readback.",
             "Next: open /kb review for the current decision queue.",
         )
@@ -9418,6 +9503,7 @@ def _daily_integration_closeout_serial(
         }
     is_batch = "calendar_envelopes" in args
     closeouts: list[dict[str, Any]] = []
+    calendar_observation: dict[str, Any] | None = None
     if is_batch:
         try:
             calendar_result = _calendar_live_batch_request(envelopes)
@@ -9433,10 +9519,12 @@ def _daily_integration_closeout_serial(
                 },
                 "error": _clip(str(exc), 240),
             }
-        closeouts, closeout_error = _validated_calendar_batch_result(
-            calendar_result,
-            envelopes=envelopes,
-            run_id=run_id,
+        closeouts, calendar_observation, closeout_error = (
+            _validated_calendar_batch_result(
+                calendar_result,
+                envelopes=envelopes,
+                run_id=run_id,
+            )
         )
         if closeout_error:
             return {
@@ -9480,6 +9568,7 @@ def _daily_integration_closeout_serial(
         closeouts,
         envelopes=envelopes,
         run_id=run_id,
+        calendar_observation=calendar_observation,
     )
     _tool, preview, errors = _dispatch_first(
         ctx,
@@ -9591,6 +9680,11 @@ def _daily_integration_closeout_serial(
             "status": closeout.get("status"),
             "counts": closeout.get("counts"),
             "entity_count": len(envelopes),
+            **(
+                {"calendar_observation": calendar_observation}
+                if calendar_observation is not None
+                else {}
+            ),
         },
         "publication": {
             "status": publication.get("status"),
