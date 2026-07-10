@@ -221,6 +221,10 @@ If the exact context-only proof page or one evidence row's non-text metadata is
 itself larger than the ceiling, the transport still fails closed instead of
 dropping a field. General metadata paging remains a separate future extension.
 
+Version 0.10.5 bounds private-spool retry custody: accepted and terminal
+non-retryable handoffs delete only the exact verified inode and packet directory,
+while retryable transport or engine failures retain the packet for replay.
+
 ## Local Test
 
 Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a

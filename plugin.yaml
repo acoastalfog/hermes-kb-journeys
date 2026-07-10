@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.10.4
+version: 0.10.5
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -55,3 +55,5 @@ migrations:
     hard_break: "generated kb-engine dispatch follows the running Hermes MCP registry naming convention while preserving exact accepted-packet cleanup"
   - version: 0.10.4
     hard_break: "oversized target review invariants use a bounded context-only proof page before direct evidence continuation at the returned offset"
+  - version: 0.10.5
+    hard_break: "verified source packets are deleted after accepted or terminal non-retryable handoff; retryable failures remain retained"

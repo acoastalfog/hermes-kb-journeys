@@ -372,6 +372,7 @@ def test_sync_packet_transport_uses_the_host_canonical_mcp_registry_name(
     state_root = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     packet_path, packet = _spooled_source_packet(state_root)
+    transport = _packet_transport(packet_path, packet)
 
     isolated_registry = registry_module.ToolRegistry()
     monkeypatch.setattr(registry_module, "registry", isolated_registry)
@@ -424,7 +425,7 @@ def test_sync_packet_transport_uses_the_host_canonical_mcp_registry_name(
             {
                 "operation": "resume_packet",
                 "run_id": "hdf-kb_sync-test",
-                "packet_transport": _packet_transport(packet_path, packet),
+                "packet_transport": transport,
             }
         )
     )
@@ -752,6 +753,47 @@ def test_sync_packet_transport_retains_packet_on_retryable_dispatch_failure(
     assert "private evidence body" not in json.dumps(result)
 
 
+def test_sync_packet_transport_cleans_packet_on_nonretryable_dispatch_failure(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet = _spooled_source_packet(state_root)
+    transport = _packet_transport(packet_path, packet)
+
+    class TerminalContext(FakePacketTransportContext):
+        def dispatch_tool(self, tool_name, args):
+            self.calls.append((tool_name, args))
+            raise RuntimeError("runtime output violates generated schema")
+
+    ctx = TerminalContext()
+    plugin._register_integration_transport(ctx)
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert result == {
+        "accepted": False,
+        "retryable": False,
+        "run_id": "hdf-kb_sync-test",
+        "error": "private packet transport was not accepted",
+        "error_code": "kb_sync_resume_transport_failed",
+        "cleanup": {"directory": "removed", "packet": "deleted"},
+        "dispatch_reason_code": "output_contract_invalid",
+    }
+    assert not packet_path.exists()
+    assert "private evidence body" not in json.dumps(result)
+    assert str(packet_path) not in json.dumps(result)
+    assert transport["packet_digest"] not in json.dumps(result)
+
+
 def test_sync_packet_transport_classifies_missing_registered_route_without_error_text(
     tmp_path, monkeypatch
 ):
@@ -826,8 +868,8 @@ def test_sync_packet_transport_classifies_engine_failed_as_nonretryable(
     assert result["accepted"] is False
     assert result["retryable"] is False
     assert result["error_code"] == "kb_sync_resume_transport_failed"
-    assert result["cleanup"]["packet"] == "retained"
-    assert packet_path.exists()
+    assert result["cleanup"] == {"directory": "removed", "packet": "deleted"}
+    assert not packet_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -845,7 +887,7 @@ def test_sync_packet_transport_classifies_engine_failed_as_nonretryable(
         ({"status": "awaiting_action", "run_id": "another-run"}, False),
     ],
 )
-def test_sync_packet_transport_retains_packet_when_engine_does_not_accept(
+def test_sync_packet_transport_cleans_terminal_and_retains_retryable_engine_rejection(
     tmp_path, monkeypatch, engine_result, retryable
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
@@ -868,8 +910,12 @@ def test_sync_packet_transport_retains_packet_when_engine_does_not_accept(
     assert result["accepted"] is False
     assert result["retryable"] is retryable
     assert result["error_code"] == "kb_sync_resume_not_accepted"
-    assert result["cleanup"]["packet"] == "retained"
-    assert packet_path.exists()
+    if retryable:
+        assert result["cleanup"] == {"directory": "retained", "packet": "retained"}
+        assert packet_path.exists()
+    else:
+        assert result["cleanup"] == {"directory": "removed", "packet": "deleted"}
+        assert not packet_path.exists()
     assert "private evidence body" not in json.dumps(result)
 
 
@@ -4103,9 +4149,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.4"
+    assert manifest["version"] == "0.10.5"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.4"
+    assert manifest["migrations"][-1]["version"] == "0.10.5"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
