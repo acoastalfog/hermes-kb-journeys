@@ -9781,10 +9781,6 @@ def _register_integration_transport(ctx: Any) -> None:
                     "minItems": 1,
                     "maxItems": 50,
                 },
-                "session_id": {
-                    "type": "string",
-                    "description": "Stable Hermes execution session id for publication provenance.",
-                },
                 "evidence_refs": {
                     "type": "array",
                     "description": "One to ten exact adequate evidence refs to inspect.",
@@ -9880,7 +9876,7 @@ def _register_integration_transport(ctx: Any) -> None:
                 },
                 {
                     "properties": {"operation": {"const": "daily_integration_closeout"}},
-                    "required": ["run_id", "session_id"],
+                    "required": ["run_id"],
                     "oneOf": [
                         {
                             "required": ["calendar_envelope"],
@@ -9925,7 +9921,7 @@ def _register_integration_transport(ctx: Any) -> None:
         },
     }
 
-    def _handler(args: dict[str, Any], **_: Any) -> str:
+    def _handler(args: dict[str, Any], **runtime: Any) -> str:
         operation = str(args.get("operation") or "").strip()
         if operation == "context_search":
             try:
@@ -9945,8 +9941,33 @@ def _register_integration_transport(ctx: Any) -> None:
                 separators=(",", ":"),
             )
         if operation == "daily_integration_closeout":
+            runtime_session_id = str(runtime.get("session_id") or "").strip()
+            if (
+                not runtime_session_id
+                or len(runtime_session_id) > 256
+                or any(ord(character) < 32 for character in runtime_session_id)
+            ):
+                return json.dumps(
+                    {
+                        "accepted": False,
+                        "retryable": False,
+                        "run_id": run_id,
+                        "error": "runtime session id is unavailable",
+                        "error_code": "runtime_session_unavailable",
+                    },
+                    separators=(",", ":"),
+                )
+            bound_args = dict(args)
+            bound_args["session_id"] = runtime_session_id
+            payload = _daily_integration_closeout(ctx, bound_args, run_id=run_id)
+            payload["session_binding"] = {
+                "kind": "hermes_runtime_session_binding",
+                "source": "runtime_dispatch",
+                "session_sha256": "sha256:"
+                + hashlib.sha256(runtime_session_id.encode("utf-8")).hexdigest(),
+            }
             return json.dumps(
-                _daily_integration_closeout(ctx, args, run_id=run_id),
+                payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
