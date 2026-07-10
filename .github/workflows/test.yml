@@ -18,6 +18,7 @@ jobs:
       matrix:
         hermes_ref:
           - v2026.6.19
+          - v2026.7.7.2
           - main
     steps:
       - uses: actions/checkout@v4

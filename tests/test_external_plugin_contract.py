@@ -2390,9 +2390,9 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
             {
                 "operation": "daily_integration_closeout",
                 "run_id": run_id,
-                "session_id": "hermes-cron-daily",
                 "calendar_envelope": envelope,
-            }
+            },
+            session_id="hermes-cron-daily",
         )
     )
 
@@ -2404,6 +2404,12 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     }
     assert "Evidence: 5/5 sources current." in result["morning_brief"]
     assert "KB: 3 targets integrated" in result["morning_brief"]
+    assert result["session_binding"] == {
+        "kind": "hermes_runtime_session_binding",
+        "source": "runtime_dispatch",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"hermes-cron-daily").hexdigest(),
+    }
     assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 14
     assert [name for name, _args in ctx.calls] == [
         "mcp_kb_engine_prod_kb_sync_status",
@@ -2631,9 +2637,9 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
             {
                 "operation": "daily_integration_closeout",
                 "run_id": run_id,
-                "session_id": "hermes-cron-multi",
                 "calendar_envelopes": raw_envelopes,
-            }
+            },
+            session_id="hermes-cron-multi",
         )
     )
 
@@ -2748,9 +2754,9 @@ def test_daily_integration_batch_uncertainty_stops_before_publication(tmp_path, 
             {
                 "operation": "daily_integration_closeout",
                 "run_id": run_id,
-                "session_id": "hermes-cron-multi",
                 "calendar_envelopes": raw,
-            }
+            },
+            session_id="hermes-cron-multi",
         )
     )
 
@@ -2775,6 +2781,8 @@ def test_daily_integration_batch_schema_and_identity_gates(tmp_path, monkeypatch
         if variant["properties"]["operation"].get("const") == "daily_integration_closeout"
     )
     assert len(closeout_variant["oneOf"]) == 2
+    assert "session_id" not in parameters["properties"]
+    assert closeout_variant["required"] == ["run_id"]
 
     run_id = "hdf-kb_sync-multi"
     first = _managed_calendar_plan(run_id, "events/travel-one")
@@ -2799,6 +2807,58 @@ def test_daily_integration_batch_schema_and_identity_gates(tmp_path, monkeypatch
     )
     assert envelopes == [] and "complete single-entity plan" in error
 
+
+def test_daily_integration_closeout_binds_runtime_session_not_model_argument(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    captured = {}
+
+    def closeout(_ctx, args, *, run_id):
+        captured.update(args)
+        return {"accepted": True, "complete": True, "run_id": run_id}
+
+    monkeypatch.setattr(plugin, "_daily_integration_closeout", closeout)
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+    handler = ctx.registered_tools["kb_integration_transport"]["handler"]
+
+    missing = json.loads(
+        handler(
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": "hdf-kb_sync-runtime",
+                "calendar_envelopes": [{}],
+            }
+        )
+    )
+    assert missing == {
+        "accepted": False,
+        "retryable": False,
+        "run_id": "hdf-kb_sync-runtime",
+        "error": "runtime session id is unavailable",
+        "error_code": "runtime_session_unavailable",
+    }
+
+    result = json.loads(
+        handler(
+            {
+                "operation": "daily_integration_closeout",
+                "run_id": "hdf-kb_sync-runtime",
+                "session_id": "model-forged-session",
+                "calendar_envelopes": [{}],
+            },
+            session_id="cron_job-1_20260710_170020",
+        )
+    )
+    assert captured["session_id"] == "cron_job-1_20260710_170020"
+    assert result["session_binding"] == {
+        "kind": "hermes_runtime_session_binding",
+        "source": "runtime_dispatch",
+        "session_sha256": "sha256:"
+        + hashlib.sha256(b"cron_job-1_20260710_170020").hexdigest(),
+    }
 
 @pytest.mark.parametrize(
     "degradation",
@@ -4632,9 +4692,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.7"
+    assert manifest["version"] == "0.10.8"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.7"
+    assert manifest["migrations"][-1]["version"] == "0.10.8"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"

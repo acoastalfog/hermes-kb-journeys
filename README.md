@@ -254,6 +254,12 @@ count and privacy-safe digest; attendee and Graph event-type violations are
 reported only as aggregate counts. Exact closeout replay consumes the compact
 acknowledged tombstone and performs no additional connector or Graph-bound call.
 
+Version 0.10.8 removes the model-supplied closeout session ID. Hermes injects
+the actual runtime session into every tool handler; the plugin now binds that
+value to publication provenance, fails closed when it is absent, and returns a
+privacy-safe SHA-256 session attestation for operational verification. A model
+argument can neither invent nor override the provenance binding.
+
 Before these plans are authored, an unbound TripIt anchor group is merged into
 the unique existing bound Event when the provider source ID matches exactly and
 the anchor date window is contained. That case must never mint a synthetic Event
