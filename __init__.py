@@ -7418,7 +7418,7 @@ class _LoadedSyncPacket:
                     pass
                 setattr(self, field, -1)
 
-    def cleanup_after_accept(self) -> dict[str, str]:
+    def cleanup_verified_packet(self) -> dict[str, str]:
         """Delete only the still-named inode opened and verified above."""
         try:
             current = os.stat(
@@ -8754,7 +8754,7 @@ def _search_slack_context(
     try:
         loaded = _load_sync_spooled_packet(None, spool)
         packet = loaded.packet
-        loaded.cleanup_after_accept()
+        loaded.cleanup_verified_packet()
     except (OSError, ValueError) as exc:
         return {"source": "slack", "status": "degraded", "error": _clip(str(exc), 240)}, []
     finally:
@@ -8794,7 +8794,7 @@ def _search_tripit_context(
     try:
         loaded = _load_sync_spooled_packet(None, spool)
         packet = loaded.packet
-        loaded.cleanup_after_accept()
+        loaded.cleanup_verified_packet()
     except (OSError, ValueError) as exc:
         return {"source": "tripit", "status": "degraded", "error": _clip(str(exc), 240)}, []
     finally:
@@ -9383,29 +9383,36 @@ def _register_integration_transport(ctx: Any) -> None:
                 [("kb.sync.resume", {"run_id": run_id, "response": loaded.packet})],
             )
             if payload is None:
+                retryable = _sync_packet_dispatch_is_retryable(errors)
+                failure = _sync_packet_failure(
+                    run_id=run_id,
+                    error_code="kb_sync_resume_transport_failed",
+                    retryable=retryable,
+                    managed=True,
+                    dispatch_reason_code=_sync_packet_dispatch_reason_code(errors),
+                )
+                if not retryable:
+                    failure["cleanup"] = loaded.cleanup_verified_packet()
                 return json.dumps(
-                    _sync_packet_failure(
-                        run_id=run_id,
-                        error_code="kb_sync_resume_transport_failed",
-                        retryable=_sync_packet_dispatch_is_retryable(errors),
-                        managed=True,
-                        dispatch_reason_code=_sync_packet_dispatch_reason_code(errors),
-                    ),
+                    failure,
                     separators=(",", ":"),
                 )
             accepted, retryable = _sync_packet_engine_acceptance(payload, run_id=run_id)
             if not accepted:
+                failure = _sync_packet_failure(
+                    run_id=run_id,
+                    error_code="kb_sync_resume_not_accepted",
+                    retryable=retryable,
+                    managed=True,
+                )
+                if not retryable:
+                    failure["cleanup"] = loaded.cleanup_verified_packet()
                 return json.dumps(
-                    _sync_packet_failure(
-                        run_id=run_id,
-                        error_code="kb_sync_resume_not_accepted",
-                        retryable=retryable,
-                        managed=True,
-                    ),
+                    failure,
                     separators=(",", ":"),
                 )
             result = _compact_sync_packet_result(payload, run_id=run_id)
-            result["cleanup"] = loaded.cleanup_after_accept()
+            result["cleanup"] = loaded.cleanup_verified_packet()
             if loaded.compatibility:
                 result["compatibility"] = loaded.compatibility
             return json.dumps(
