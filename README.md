@@ -51,7 +51,7 @@ and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
 The committed export is pinned to kb-engine 0.45.61 at revision
-`8b3433c46176d3f13a1761592a9c2a051a16bac0`, which owns the exact
+`d9e8a4db080a47996ac96aaa577e6c0c5e501931`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -63,9 +63,9 @@ The Phase F consumer seam pins two once-built artifacts from that same source
 revision:
 
 - `kb_engine-0.45.61-py3-none-any.whl` —
-  `323350d7e931722c8f7ccd34994e083d0be69cdf086c0a2a4e16142be3ea3bfb`
+  `cb7c3cae5af7867cdc0ebf66423cda4adc3db5bd26a9c3f8303c7eacd2e784de`
 - `kb_source_access-0.45.61-py3-none-any.whl` —
-  `6d51b1b59d15840448647ef109a8e6caae80cbabe4f5926d5db2a6c9fd7ee9e1`
+  `b6b6649cfa82aa38c94de6c29b73398aea0fe758f02098cbe0546db9d6fe5bd5`
 
 The machine-readable pins live in `.github/candidate-artifacts/`. Candidate CI
 builds both distributions from the exact Git commit, installs both wheels into
