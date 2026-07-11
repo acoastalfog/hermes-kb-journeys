@@ -50,8 +50,8 @@ The loader admits at most 13 generated tools, requires concrete input and output
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.45.61 at revision
-`cf0629fd78b3c82d4d3d561e7687ac54d8d6fffa`, which owns the exact
+The committed export is pinned to kb-engine 0.46.0 at revision
+`6fb8bf61a11cdf65eb87e4d0de24e76adcaa99b4`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -62,10 +62,10 @@ local test results do not count as a green GitHub workflow.
 The Phase F consumer seam pins two once-built artifacts from that same source
 revision:
 
-- `kb_engine-0.45.61-py3-none-any.whl` —
-  `feb3a249f06e7760e4d27d2c202e5b6bfa7ab0cf494a1d7d296cb0ca1727da1e`
-- `kb_source_access-0.45.61-py3-none-any.whl` —
-  `f28f6c7fe1405fd0314042c1ab70a7db96b1d419bf96480239d4b09ea5eb3a82`
+- `kb_engine-0.46.0-py3-none-any.whl` —
+  `6c69ee46f217f3080eb1cc274ecc0f075349e03b559a4c72264409fac3ddaca1`
+- `kb_source_access-0.46.0-py3-none-any.whl` —
+  `4556d1779dfdffca378a626028e28b7a56048018e887359f7aaf3c2bf49f2705`
 
 The machine-readable pins live in `.github/candidate-artifacts/`. Candidate CI
 builds both distributions from the exact Git commit, installs both wheels into
@@ -325,8 +325,8 @@ current-upstream checkout:
 ```bash
 python -m venv .owner-venv
 .owner-venv/bin/pip install \
-  /path/to/kb_engine-0.45.61-py3-none-any.whl \
-  /path/to/kb_source_access-0.45.61-py3-none-any.whl \
+  /path/to/kb_engine-0.46.0-py3-none-any.whl \
+  /path/to/kb_source_access-0.46.0-py3-none-any.whl \
   pytest pyyaml
 env -u PYTHONPATH .owner-venv/bin/python -I -m pytest \
   tests/test_external_plugin_contract.py -q
