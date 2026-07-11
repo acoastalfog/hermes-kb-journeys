@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tomllib
 import json
+import importlib.metadata
 import importlib.util
 from copy import deepcopy
 from pathlib import Path
@@ -19,6 +20,18 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HERMES_REPO = Path("/Users/acosta/Knowledge/hermes-agent")
+CANDIDATE_PIN = ROOT / ".github" / "candidate-artifacts" / "kb-engine.json"
+SOURCE_CANDIDATE_PIN = (
+    ROOT / ".github" / "candidate-artifacts" / "kb-source-access.json"
+)
+
+
+def _candidate_pin() -> dict:
+    return json.loads(CANDIDATE_PIN.read_text(encoding="utf-8"))
+
+
+def _source_candidate_pin() -> dict:
+    return json.loads(SOURCE_CANDIDATE_PIN.read_text(encoding="utf-8"))
 
 
 def _hermes_repo() -> Path:
@@ -308,6 +321,143 @@ def _packet_transport(path: Path, packet: dict) -> dict:
     }
 
 
+def _v2_spooled_source_packet(
+    root: Path,
+    *,
+    recipe_digest: str = "sha256:" + "a" * 64,
+    session_id: str = "hermes-session-1",
+) -> tuple[Path, dict, dict]:
+    packet = {
+        "schema_version": 1,
+        "kind": "kb.source_evidence",
+        "source_id": "m365.email",
+        "connector_id": "neutral.m365-evidence",
+        "harness_id": "hermes-cron",
+        "requested_journey": "kb.sync",
+        "collected_at": "2026-07-04T00:05:00Z",
+        "items": [{"external_id": "mail-1", "semantic_text": "private evidence body"}],
+        "coverage": {
+            "requested_window": {
+                "start": "2026-07-03T00:00:00Z",
+                "end": "2026-07-04T00:00:00Z",
+            },
+            "observed_intervals": [],
+            "gaps": [],
+            "errors": [],
+            "truncated": False,
+        },
+        "limits": {"max_items": 1, "truncated": False},
+        "provenance": {"source_refs": ["source:mail-1"]},
+        "privacy": {"classification": "private"},
+    }
+    raw = json.dumps(
+        packet,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    harness = root / "kb-source-access" / "spool" / ("source-access-" + "1" * 24)
+    packet_dir = harness / ("packet-1-" + "2" * 16)
+    packet_dir.mkdir(parents=True)
+    harness.chmod(0o700)
+    packet_dir.chmod(0o700)
+    path = packet_dir / f"m365.email-{digest[:16]}.json"
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    transport = {
+        "schema_version": 2,
+        "kind": "kb.connector.transport",
+        "mode": "private_local_spool",
+        "packet_path": str(path),
+        "packet_digest": "sha256:" + digest,
+        "byte_count": len(raw),
+        "recipe_digest": recipe_digest,
+        "session_id": session_id,
+        "cleanup_custody": "connector_owned",
+    }
+    return path, packet, transport
+
+
+def test_v2_packet_transport_is_forwarded_unchanged_and_connector_cleans_custody(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, packet, transport = _v2_spooled_source_packet(state_root)
+    packet_dir = packet_path.parent
+    ctx = FakePacketTransportContext()
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_kb_sync_resume",
+            {"run_id": "hdf-kb_sync-test", "response": transport},
+        )
+    ]
+    assert result["accepted"] is True
+    assert result["packet_validation_owner"] == "kb-engine"
+    assert result["cleanup"] == {
+        "status": "cleaned",
+        "cleanup_performed": True,
+        "custody_owner": "kb-source-access",
+    }
+    assert not packet_path.exists()
+    assert not packet_dir.exists()
+    assert "private evidence body" not in json.dumps(result)
+    assert str(packet_path) not in json.dumps(result)
+    assert transport["packet_digest"] not in json.dumps(result)
+    assert packet["source_id"] == "m365.email"
+
+
+def test_v2_packet_validation_failure_is_engine_owned_and_does_not_echo_packet(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    packet_path, _packet, transport = _v2_spooled_source_packet(state_root)
+    transport["packet_digest"] = "sha256:" + "f" * 64
+    ctx = FakePacketTransportContext(
+        {
+            "result": {
+                "status": "invalid_response",
+                "run_id": "hdf-kb_sync-test",
+                "reason": "connector_transport_invalid",
+            }
+        }
+    )
+    plugin._register_integration_transport(ctx)
+
+    result = json.loads(
+        ctx.registered_tools["kb_integration_transport"]["handler"](
+            {
+                "operation": "resume_packet",
+                "run_id": "hdf-kb_sync-test",
+                "packet_transport": transport,
+            }
+        )
+    )
+
+    assert ctx.calls[0][1]["response"] == transport
+    assert result["accepted"] is False
+    assert result["packet_validation_owner"] == "kb-engine"
+    assert result["cleanup"]["status"] == "blocked"
+    assert packet_path.exists()
+    assert "private evidence body" not in json.dumps(result)
+
+
 def test_sync_packet_transport_forwards_verified_descriptor_and_cleans_exact_spool(
     tmp_path, monkeypatch
 ):
@@ -480,17 +630,32 @@ def test_sync_packet_transport_schema_prefers_exact_descriptor_and_marks_path_de
 
     parameters = ctx.registered_tools["kb_integration_transport"]["schema"]["parameters"]
     transport = parameters["properties"]["packet_transport"]
-    assert transport["type"] == "object"
-    assert transport["required"] == [
+    assert len(transport["oneOf"]) == 2
+    installed, legacy = transport["oneOf"]
+    private_spool = next(
+        branch
+        for branch in installed["oneOf"]
+        if branch["properties"]["mode"].get("const") == "private_local_spool"
+    )
+    assert private_spool["required"] == [
+        "schema_version",
         "kind",
+        "mode",
         "packet_path",
         "packet_digest",
         "byte_count",
+        "recipe_digest",
+        "session_id",
+        "cleanup_custody",
     ]
-    assert transport["additionalProperties"] is False
-    assert transport["properties"]["kind"] == {"const": "private_spool"}
-    assert transport["properties"]["packet_digest"]["pattern"] == "^sha256:[0-9a-f]{64}$"
-    assert transport["properties"]["byte_count"]["maximum"] == 64 * 1024 * 1024
+    assert private_spool["additionalProperties"] is False
+    assert private_spool["properties"]["kind"] == {
+        "const": "kb.connector.transport"
+    }
+    assert private_spool["properties"]["cleanup_custody"] == {
+        "const": "connector_owned"
+    }
+    assert legacy["properties"]["kind"] == {"const": "private_spool"}
     assert "deprecated" in parameters["properties"]["packet_path"]["description"].lower()
 
 
@@ -1000,41 +1165,50 @@ def test_context_search_reuses_the_single_transport_without_a_sync_run(
     ctx = FakePacketTransportContext()
     calls = []
 
-    def calendar(**kwargs):
-        calls.append(("calendar", kwargs))
-        return {"source": "calendar", "status": "ready", "selected_count": 1}, [
-            {"source": "calendar", "ref": "event-1", "title": "Acme review"}
-        ]
+    class Facade:
+        def dispatch(self, source_id, operation, params):
+            calls.append((source_id, operation, params))
+            if source_id == "m365.calendar" and operation == "fetch":
+                return {"status": "ok", "result": {"item": {"external_id": "event-1"}}}
+            if source_id == "m365.email":
+                return {"status": "unavailable", "error_code": "mail_unavailable"}
+            rows = {
+                "m365.calendar": [
+                    {
+                        "ref": "sar1.calendar",
+                        "summary": {
+                            "subject": "Acme review",
+                            "start": "2026-07-08T10:00:00Z",
+                        },
+                    }
+                ],
+                "travel.tripit": [
+                    {
+                        "ref": "sar1.tripit",
+                        "summary": {
+                            "title": "Acme trip",
+                            "start": "2026-07-07T00:00:00Z",
+                        },
+                    }
+                ],
+                "slack.message": [
+                    {
+                        "ref": "sar1.slack",
+                        "summary": {
+                            "text": "Acme context",
+                            "timestamp": "2026-07-09T00:00:00Z",
+                        },
+                    }
+                ],
+                "m365.meeting_artifact": [],
+            }[source_id]
+            return {
+                "status": "ok",
+                "result": {"items": rows},
+                "continuation": {"complete": True, "cursor": None},
+            }
 
-    def mail(**kwargs):
-        calls.append(("mail", kwargs))
-        return {"source": "mail", "status": "degraded", "error": "mail unavailable"}, []
-
-    def slack(**kwargs):
-        calls.append(("slack", kwargs))
-        return {"source": "slack", "status": "ready", "selected_count": 1}, [
-            {"source": "slack", "ref": "message-1", "text": "Acme context"}
-        ]
-
-    def tripit(**kwargs):
-        calls.append(("tripit", kwargs))
-        return {"source": "tripit", "status": "ready", "selected_count": 1}, [
-            {"source": "tripit", "ref": "trip-1", "title": "Acme trip"}
-        ]
-
-    def meetings(calendar_rows, **kwargs):
-        calls.append(("meeting_artifacts", {"calendar_rows": calendar_rows, **kwargs}))
-        return {
-            "source": "meeting_artifacts",
-            "status": "empty",
-            "selected_count": 0,
-        }, []
-
-    monkeypatch.setattr(plugin, "_search_calendar_context", calendar)
-    monkeypatch.setattr(plugin, "_search_mail_context", mail)
-    monkeypatch.setattr(plugin, "_search_slack_context", slack)
-    monkeypatch.setattr(plugin, "_search_tripit_context", tripit)
-    monkeypatch.setattr(plugin, "_search_meeting_artifacts_context", meetings)
+    monkeypatch.setattr(plugin, "_source_access_facade", lambda: Facade())
     plugin._register_integration_transport(ctx)
 
     registered = ctx.registered_tools["kb_integration_transport"]
@@ -1053,6 +1227,7 @@ def test_context_search_reuses_the_single_transport_without_a_sync_run(
 
     assert result["accepted"] is True
     assert result["kind"] == "hermes_context_search"
+    assert result["source_access_owner"] == "kb-source-access"
     assert result["item_count"] == 3
     assert result["external_effect_started"] is False
     assert result["durable_kb_write_started"] is False
@@ -1063,14 +1238,15 @@ def test_context_search_reuses_the_single_transport_without_a_sync_run(
         "tripit",
         "calendar",
     ]
-    assert [row[0] for row in calls] == [
-        "calendar",
-        "tripit",
-        "mail",
-        "slack",
-        "meeting_artifacts",
+    assert [(row[0], row[1]) for row in calls] == [
+        ("m365.calendar", "search"),
+        ("travel.tripit", "search"),
+        ("m365.email", "search"),
+        ("slack.message", "search"),
+        ("m365.calendar", "fetch"),
+        ("m365.meeting_artifact", "search"),
     ]
-    assert calls[-1][1]["calendar_rows"][0]["ref"] == "event-1"
+    assert calls[-1][2]["query"] == "event-1"
     operation = registered["schema"]["parameters"]["properties"]["operation"]
     assert "context_search" in operation["enum"]
     assert registered["schema"]["parameters"]["required"] == ["operation"]
@@ -1107,8 +1283,8 @@ def test_context_search_rejects_an_unsafe_window_before_any_source_read(
     ctx = FakePacketTransportContext()
     monkeypatch.setattr(
         plugin,
-        "_search_calendar_context",
-        lambda **_kwargs: pytest.fail("source read must not start"),
+        "_source_access_facade",
+        lambda: pytest.fail("source read must not start"),
     )
     plugin._register_integration_transport(ctx)
 
@@ -1274,7 +1450,7 @@ def test_context_meeting_search_skips_future_events(tmp_path, monkeypatch):
     assert rows == []
 
 
-def test_semantic_batch_transport_returns_exact_evidence_without_mcp_envelope_bloat(
+def test_semantic_batch_transport_returns_the_exact_engine_packet_without_local_compaction(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
@@ -1354,11 +1530,16 @@ def test_semantic_batch_transport_returns_exact_evidence_without_mcp_envelope_bl
     assert result["selected_evidence"] == status["selected_evidence"]
     assert result["candidate_state"] == status["candidate_state"]
     assert result["next_action"]["response_schema"] == {"type": "object"}
-    assert "remaining_refs" not in result["next_action"]["semantic_accounting"]["progress"]
-    assert "source_currency" not in result
-    assert "publication" not in result
-    assert "timing" not in result
-    assert "evidence_sources" not in result["next_action"]
+    assert result["next_action"]["semantic_accounting"]["progress"]["remaining_refs"] == [
+        "sha256:" + "c" * 64
+    ]
+    assert result["source_currency"] == status["source_currency"]
+    assert result["publication"] == status["publication"]
+    assert result["timing"] == status["timing"]
+    assert result["next_action"]["evidence_sources"] == [
+        {"source_id": "m365.email"}
+    ]
+    assert result["semantic_owner"] == "kb-engine"
     assert "semantic_batch" in registered["schema"]["parameters"]["properties"]["operation"]["enum"]
 
 
@@ -1420,7 +1601,7 @@ def test_semantic_batch_transport_reduces_requested_prefix_until_result_is_bound
     assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1_500
 
 
-def test_semantic_batch_transport_omits_only_byte_identical_duplicate_transcript(
+def test_semantic_batch_transport_preserves_owner_packet_duplicate_fields(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
@@ -1479,14 +1660,12 @@ def test_semantic_batch_transport_omits_only_byte_identical_duplicate_transcript
 
     item = result["selected_evidence"]["items"][0]["item"]
     assert item["semantic_text"] == semantic_text
-    assert "transcript" not in item
+    assert item["transcript"] == semantic_text
     assert item["subject"] == "Review"
     assert result["selected_evidence"]["items"][1]["item"]["transcript"] == (
         "different source transcript"
     )
-    assert result["selected_evidence"]["transport_normalization"] == {
-        "duplicate_transcript_fields_omitted": 1
-    }
+    assert "transport_normalization" not in result["selected_evidence"]
 
 
 def test_semantic_batch_transport_pages_one_oversized_evidence_body_losslessly(
@@ -2537,6 +2716,229 @@ def _noc_batch_ack(plugin, envelopes, *, removed=True, compacted=True):
     return result
 
 
+def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
+    tmp_path, monkeypatch
+):
+    from kb_engine.api import integration_run
+
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    monkeypatch.setattr(
+        plugin,
+        "_legacy_daily_integration_closeout_serial",
+        lambda *_args, **_kwargs: pytest.fail("legacy closeout must not run"),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_legacy_aggregate_calendar_closeouts",
+        lambda *_args, **_kwargs: pytest.fail("legacy aggregation must not run"),
+    )
+
+    run_id = "hdf-kb_sync-engine-owned-closeout"
+    recipe = integration_run.compile_recipe(
+        [],
+        observed_at="2026-07-10T00:00:00Z",
+        external_effects=[plugin.CALENDAR_INTEGRATION_EFFECT_ID],
+        publication_posture="required",
+    )
+    run_model = integration_run.new_run(
+        run_id,
+        recipe,
+        actor="hermes-relay",
+        session_id="hermes-runtime-session",
+    )
+    run_model = integration_run.advance(
+        run_model,
+        recipe=recipe,
+        completed_stage="exercise_judgment",
+        result={"semantic_accounting_digest": "sha256:" + "a" * 64},
+    )
+    run_model = integration_run.advance(
+        run_model,
+        recipe=recipe,
+        completed_stage="project_evidence",
+        result={"evidence_receipt_digest": "sha256:" + "b" * 64},
+    )
+    initial = {
+        "schema_version": 1,
+        "kind": "kb_sync_run",
+        "status": "awaiting_action",
+        "run_id": run_id,
+        "recipe_digest": recipe["digest"],
+        "integration_stage": "execute_external_effect",
+        "next_action": {
+            "kind": "execute_external_effect",
+            "integration_stage": "execute_external_effect",
+            "run_id": run_id,
+            "recipe_digest": recipe["digest"],
+            "effect_ids": [plugin.CALENDAR_INTEGRATION_EFFECT_ID],
+            "response_kind": "kb.integration.effect_results",
+        },
+    }
+    raw_plan = _managed_calendar_plan(run_id, "events/engine-owned-closeout")
+    child_closeout = _managed_calendar_closeout(
+        plugin,
+        run_id,
+        planned=2,
+        applied=1,
+        kept=1,
+    )
+    events = []
+    terminal_packet = None
+    effect_packet = None
+
+    def calendar_batch(envelopes):
+        events.append("calendar_batch")
+        return _noc_batch_success(plugin, envelopes, [child_closeout])
+
+    monkeypatch.setattr(plugin, "_calendar_live_batch_request", calendar_batch)
+    monkeypatch.setattr(
+        plugin,
+        "_calendar_live_batch_acknowledge",
+        lambda envelopes: events.append("calendar_ack")
+        or _noc_batch_ack(plugin, envelopes),
+    )
+
+    preview = {
+        "ok": True,
+        "status": "ready",
+        "preview_digest": "sha256:" + "d" * 64,
+    }
+    publication_receipt = {
+        "ok": True,
+        "status": "published",
+        "session_id": "hermes-runtime-session",
+        "readback": {"ok": True, "clean": True, "ahead": 0},
+    }
+    ctx = FakePacketTransportContext()
+
+    def dispatch(tool_name, args):
+        nonlocal run_model, terminal_packet, effect_packet
+        ctx.calls.append((tool_name, args))
+        if tool_name.endswith("kb_sync_status"):
+            payload = terminal_packet or initial
+        elif tool_name.endswith("publication_daily_integration_preview"):
+            payload = preview
+        elif tool_name.endswith("publication_daily_integration_apply"):
+            payload = publication_receipt
+        elif tool_name.endswith("kb_sync_resume"):
+            response = args["response"]
+            if response.get("kind") == "kb.integration.effect_results":
+                assert integration_run.validate_effect_results(
+                    response,
+                    run=run_model,
+                    recipe=recipe,
+                )["ok"] is True
+                effect_packet = response
+                acknowledgement = integration_run.effect_acknowledgement(
+                    response,
+                    run=run_model,
+                    recipe=recipe,
+                )
+                run_model = integration_run.advance(
+                    run_model,
+                    recipe=recipe,
+                    completed_stage="execute_external_effect",
+                    result=response,
+                )
+                run_model = integration_run.advance(
+                    run_model,
+                    recipe=recipe,
+                    completed_stage="record_effect",
+                    result=acknowledgement,
+                )
+                payload = {
+                    "schema_version": 1,
+                    "kind": "kb_sync_run",
+                    "status": "awaiting_action",
+                    "run_id": run_id,
+                    "recipe_digest": recipe["digest"],
+                    "integration_stage": "publish",
+                    "next_action": {
+                        "kind": "publish_integration",
+                        "integration_stage": "publish",
+                        "run_id": run_id,
+                        "recipe_digest": recipe["digest"],
+                        "publication_posture": "required",
+                        "response_kind": "kb.integration.publication_result",
+                    },
+                }
+            else:
+                assert integration_run.validate_publication_result(
+                    response,
+                    run=run_model,
+                    recipe=recipe,
+                )["ok"] is True
+                run_model = integration_run.advance(
+                    run_model,
+                    recipe=recipe,
+                    completed_stage="publish",
+                    result=response,
+                )
+                final_receipt = integration_run.final_receipt(
+                    run_model,
+                    recipe=recipe,
+                    terminal_status="completed",
+                )
+                terminal_packet = {
+                    "schema_version": 1,
+                    "kind": "kb_sync_receipt",
+                    "status": "completed",
+                    "terminal_state": "completed",
+                    "run_id": run_id,
+                    "degradations": [],
+                    "semantic_final_receipt": final_receipt,
+                    "external_effects": effect_packet,
+                    "publication": response,
+                    "source_currency": {"sources": []},
+                    "semantic_accounting": {
+                        "complete": True,
+                        "remaining_count": 0,
+                        "integrated_target_count": 4,
+                    },
+                    "lifecycle": {"status": "fixed_point"},
+                }
+                payload = terminal_packet
+        else:
+            raise AssertionError(tool_name)
+        return json.dumps({"result": payload})
+
+    ctx.dispatch_tool = dispatch
+    plugin._register_integration_transport(ctx)
+    handler = ctx.registered_tools["kb_integration_transport"]["handler"]
+    request = {
+        "operation": "daily_integration_closeout",
+        "run_id": run_id,
+        "calendar_envelopes": [raw_plan],
+    }
+    result = json.loads(handler(request, session_id="hermes-runtime-session"))
+
+    assert result["accepted"] is True and result["complete"] is True
+    assert result["semantic_owner"] == "kb-engine"
+    assert result["integration_receipt"]["kind"] == "kb.integration.final_receipt"
+    assert result["integration_summary"]["complete"] is True
+    assert result["calendar"]["counts"] == child_closeout["counts"]
+    assert effect_packet["results"][0]["result"]["kind"] == "managed_calendar_closeout"
+    assert events == ["calendar_batch", "calendar_ack"]
+    assert [name for name, _args in ctx.calls] == [
+        "mcp_kb_engine_prod_kb_sync_status",
+        "mcp_kb_engine_prod_kb_sync_resume",
+        "mcp_kb_engine_prod_publication_daily_integration_preview",
+        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "mcp_kb_engine_prod_kb_sync_resume",
+    ]
+
+    calls_before_replay = len(ctx.calls)
+    events.clear()
+    replay = json.loads(handler(request, session_id="hermes-runtime-replay"))
+    assert replay["accepted"] is True and replay["idempotent_replay"] is True
+    assert replay["integration_receipt"] == result["integration_receipt"]
+    assert events == ["calendar_ack"]
+    assert [name for name, _args in ctx.calls[calls_before_replay:]] == [
+        "mcp_kb_engine_prod_kb_sync_status"
+    ]
+
+
 def test_calendar_batch_result_dual_reads_legacy_without_terminal_observation(
     tmp_path, monkeypatch
 ):
@@ -2780,8 +3182,10 @@ def test_calendar_aggregate_not_required_binds_canonical_empty_provenance(
 
     assert aggregate["status"] == "not_required"
     assert aggregate["child_receipts"] == []
-    assert aggregate["batch_digest"] == plugin._managed_mapping_digest(
-        {"run_id": run_id, "plan_digests": []}
+    assert aggregate["batch_digest"] == (
+        plugin._engine_calendar_contracts().calendar_batch_digest(
+            [], run_id=run_id
+        )
     )
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
 
@@ -2864,7 +3268,7 @@ def test_daily_integration_batch_schema_and_identity_gates(tmp_path, monkeypatch
     envelopes, error = plugin._calendar_closeout_envelopes(
         {"calendar_envelopes": [first, alias]}, run_id=run_id
     )
-    assert envelopes == [] and "distinct" in error
+    assert envelopes == [] and "complete single-entity" in error
 
     second = _managed_calendar_plan(run_id, "events/travel-two")
     second["source_reads"]["calendar_digest"] = "sha256:" + "c" * 64
@@ -4094,8 +4498,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.45.61"
-    assert source["engine_source_revision"] == "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526"
+    assert source["engine_version"] == "0.46.0"
+    assert source["engine_source_revision"] == "c4b4266a4749efbce7343776666a98260ee58342"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 13
@@ -4766,9 +5170,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.10.8"
+    assert manifest["version"] == "0.11.0"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.10.8"
+    assert manifest["migrations"][-1]["version"] == "0.11.0"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
@@ -4870,7 +5274,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526"
+        == "c4b4266a4749efbce7343776666a98260ee58342"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -4888,6 +5292,160 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     assert checkout["persist-credentials"] is False
     assert "https://github.com/acoastalfog/kb-engine.git" not in workflow_text
     assert "git -C kb-engine fetch" not in workflow_text
+
+    candidate_job = workflow["jobs"]["engine-candidate-contract"]
+    assert (
+        candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
+        == "c4b4266a4749efbce7343776666a98260ee58342"
+    )
+    candidate_checkouts = [
+        step
+        for step in candidate_job["steps"]
+        if step.get("uses") == "actions/checkout@v4"
+        and step.get("with", {}).get("repository") == "acoastalfog/kb-engine"
+    ]
+    assert len(candidate_checkouts) == 1
+    candidate_checkout = candidate_checkouts[0]["with"]
+    assert candidate_checkout["ref"] == "${{ env.KB_ENGINE_CANDIDATE_REF }}"
+    assert candidate_checkout["path"] == "kb-engine-candidate"
+    assert candidate_checkout["ssh-key"] == "${{ secrets.KB_ENGINE_DEPLOY_KEY }}"
+    assert candidate_checkout["persist-credentials"] is False
+    candidate_commands = "\n".join(
+        str(step.get("run") or "") for step in candidate_job["steps"]
+    )
+    assert "build_release_artifacts.py" in candidate_commands
+    assert "build_source_access_artifacts.py" in candidate_commands
+    assert "KB_SOURCE_ACCESS_CANDIDATE_WHEEL" in candidate_commands
+    assert "-I -m pytest" in candidate_commands
+
+
+@pytest.mark.skipif(
+    os.environ.get("KB_ENGINE_CANDIDATE_REQUIRED") != "1",
+    reason="exact candidate wheel is validated by the candidate artifact job",
+)
+def test_installed_candidate_wheel_is_exact_and_sibling_free():
+    pin = _candidate_pin()
+    source_pin = _source_candidate_pin()
+    assert "PYTHONPATH" not in os.environ
+    assert os.environ.get("KB_ENGINE_CANDIDATE_SOURCE_COMMIT") == pin["source_commit"]
+
+    wheel = Path(os.environ["KB_ENGINE_CANDIDATE_WHEEL"]).resolve()
+    assert wheel.name == pin["wheel_filename"]
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == pin["wheel_sha256"]
+    source_wheel = Path(os.environ["KB_SOURCE_ACCESS_CANDIDATE_WHEEL"]).resolve()
+    assert source_wheel.name == source_pin["wheel_filename"]
+    assert hashlib.sha256(source_wheel.read_bytes()).hexdigest() == source_pin["wheel_sha256"]
+    assert source_pin["source_commit"] == pin["source_commit"]
+    assert source_pin["core_wheel_sha256"] == pin["wheel_sha256"]
+
+    import kb_engine  # noqa: PLC0415
+    import kb_source_access  # noqa: PLC0415
+    from kb_engine.api import contract_fixtures  # noqa: PLC0415
+
+    distribution = importlib.metadata.distribution(pin["distribution"])
+    source_distribution = importlib.metadata.distribution(source_pin["distribution"])
+    installed_root = Path(distribution.locate_file("")).resolve()
+    engine_file = Path(kb_engine.__file__).resolve()
+    assert distribution.version == pin["version"]
+    assert source_distribution.version == source_pin["version"]
+    assert engine_file.is_relative_to(installed_root)
+    assert not engine_file.is_relative_to(
+        Path(os.environ["KB_ENGINE_CANDIDATE_SOURCE_CHECKOUT"]).resolve()
+    )
+    assert Path(kb_source_access.__file__).resolve().is_relative_to(
+        Path(source_distribution.locate_file("")).resolve()
+    )
+
+    manifest = contract_fixtures.manifest()
+    assert manifest["kind"] == pin["fixture_manifest_kind"]
+    assert manifest["fixture_count"] == pin["fixture_count"]
+    assert len(manifest["fixtures"]) == pin["fixture_count"]
+    assert all(row["fixture_digest"].startswith("sha256:") for row in manifest["fixtures"])
+
+
+@pytest.mark.skipif(
+    os.environ.get("KB_ENGINE_CANDIDATE_REQUIRED") != "1",
+    reason="exact candidate wheel is validated by the candidate artifact job",
+)
+def test_installed_candidate_goldens_match_hermes_compatibility_reducers(
+    tmp_path, monkeypatch
+):
+    from kb_engine.api import contract_fixtures  # noqa: PLC0415
+
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    terminal = contract_fixtures.load("terminal-eligibility")
+    decisions = {}
+    legacy_decisions = {}
+    for case in terminal["input"]["cases"]:
+        packet = deepcopy(case["receipt"])
+        packet["terminal_state"] = case["terminal_state"]
+        if packet.get("status") == "completed_with_degradation":
+            packet.update(
+                {
+                    "source_currency": {"sources": [{"state": "current"}]},
+                    "semantic_accounting": {"complete": True, "remaining_count": 0},
+                    "lifecycle": {"status": "fixed_point"},
+                }
+            )
+        decisions[case["id"]] = plugin._daily_integration_closeout_eligible(packet)
+        legacy_decisions[case["id"]] = (
+            plugin._legacy_daily_integration_closeout_eligible(packet)
+        )
+    assert decisions == terminal["expected"]["decisions"]
+    assert decisions == legacy_decisions
+
+    closeout = contract_fixtures.load("closeout-replay")
+    run_id = closeout["input"]["run_id"]
+    envelopes = [
+        {"plan_digest": f"sha256:{index:064x}"}
+        for index, _entity in enumerate(closeout["input"]["entities"], start=1)
+    ]
+    children = []
+    for counts in closeout["input"]["child_counts"]:
+        child = {
+            "schema_version": 1,
+            "kind": "managed_calendar_closeout",
+            "run_id": run_id,
+            "status": "not_required" if counts["planned"] == 0 else "completed",
+            "ok": True,
+            "counts": counts,
+            "source_reads": {
+                "tripit_complete": True,
+                "calendar_complete": True,
+            },
+        }
+        child["receipt_digest"] = plugin._managed_closeout_digest(child)
+        children.append(child)
+    first = plugin._aggregate_calendar_closeouts(
+        children,
+        envelopes=envelopes,
+        run_id=run_id,
+        calendar_observation=closeout["input"]["calendar_observation"],
+    )
+    replay = plugin._aggregate_calendar_closeouts(
+        children,
+        envelopes=envelopes,
+        run_id=run_id,
+        calendar_observation=closeout["input"]["calendar_observation"],
+    )
+    legacy = plugin._legacy_aggregate_calendar_closeouts(
+        children,
+        envelopes=envelopes,
+        run_id=run_id,
+        calendar_observation=closeout["input"]["calendar_observation"],
+    )
+    assert first == legacy
+    actual = {
+        "status": first["status"],
+        "counts": first["counts"],
+        "child_receipt_count": len(first["child_receipts"]),
+        "calendar_observation_preserved": (
+            first["calendar_observation"]
+            == closeout["input"]["calendar_observation"]
+        ),
+        "exact_replay": first == replay,
+    }
+    assert actual == closeout["expected"]
 
 
 # --- Milestone 3: Hermes-first free-text user contract ---
