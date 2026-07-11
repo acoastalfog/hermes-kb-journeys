@@ -3182,7 +3182,11 @@ def test_calendar_aggregate_not_required_binds_canonical_empty_provenance(
 
     assert aggregate["status"] == "not_required"
     assert aggregate["child_receipts"] == []
-    assert aggregate["batch_digest"] == plugin._calendar_batch_digest(envelopes)
+    assert aggregate["batch_digest"] == (
+        plugin._engine_calendar_contracts().calendar_batch_digest(
+            [], run_id=run_id
+        )
+    )
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
 
 
@@ -4495,7 +4499,7 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
     assert source["engine_version"] == "0.45.61"
-    assert source["engine_source_revision"] == "fc8cf25d06aefd1aeb7674ce06a352d5a9c9a46e"
+    assert source["engine_source_revision"] == "8b3433c46176d3f13a1761592a9c2a051a16bac0"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 13
@@ -5270,7 +5274,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "fc8cf25d06aefd1aeb7674ce06a352d5a9c9a46e"
+        == "8b3433c46176d3f13a1761592a9c2a051a16bac0"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -5292,7 +5296,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     candidate_job = workflow["jobs"]["engine-candidate-contract"]
     assert (
         candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
-        == "fc8cf25d06aefd1aeb7674ce06a352d5a9c9a46e"
+        == "8b3433c46176d3f13a1761592a9c2a051a16bac0"
     )
     candidate_checkouts = [
         step
