@@ -2,10 +2,10 @@
   "schema_version": 1,
   "distribution": "kb-engine",
   "source_repository": "acoastalfog/kb-engine",
-  "source_commit": "fb78531ea994d9f4a5e8e961fd41deb0768b6ba2",
-  "version": "0.46.2",
-  "wheel_filename": "kb_engine-0.46.2-py3-none-any.whl",
-  "wheel_sha256": "f38500fee7c9e1f5fe5ff398203328ad47c57f68c4753b38b8e73dd46fc83244",
+  "source_commit": "dc79593edaebaa2cc965e56f30ca076dd14eaf59",
+  "version": "0.46.3",
+  "wheel_filename": "kb_engine-0.46.3-py3-none-any.whl",
+  "wheel_sha256": "bfd74cabcb4545c68b202bff89135ed33b915096c31bd78bea048c124abca71f",
   "fixture_manifest_kind": "kb.contract_golden_manifest",
   "fixture_count": 6
 }
