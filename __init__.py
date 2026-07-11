@@ -91,6 +91,15 @@ SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
 INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
+ENGINE_DISTRIBUTION = "kb-engine"
+ENGINE_VERSION = "0.45.61"
+SOURCE_ACCESS_DISTRIBUTION = "kb-source-access"
+SOURCE_ACCESS_VERSION = "0.45.61"
+OWNER_INSTALL_REMEDIATION = (
+    "install the exact kb-engine==0.45.61 and kb-source-access==0.45.61 "
+    "artifacts pinned by hermes-kb-journeys"
+)
+CALENDAR_INTEGRATION_EFFECT_ID = "calendar.publication.reconcile_many"
 CALENDAR_LIVE_SOCKET = "/run/noc-calendar-live/executor.sock"
 CALENDAR_LIVE_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 DAILY_INTEGRATION_CLOSEOUT_LOCK = threading.Lock()
@@ -188,6 +197,89 @@ EVIDENCE_ENVELOPE_FIELDS = {
     "evidence_packet",
     "user_confirmation",
 }
+
+
+class _OwnerPackageUnavailable(RuntimeError):
+    """Fail closed when a delegated installed owner is unavailable."""
+
+
+def _engine_calendar_contracts() -> Any:
+    try:
+        from kb_engine.api import calendar_publication_contracts
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return calendar_publication_contracts
+
+
+def _engine_daily_integration_policy() -> Any:
+    try:
+        from kb_engine.api import daily_integration_policy
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return daily_integration_policy
+
+
+def _engine_integration_run() -> Any:
+    try:
+        from kb_engine.api import integration_run
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return integration_run
+
+
+def _engine_connector_contracts() -> Any:
+    try:
+        from kb_engine.api import connector_contracts
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return connector_contracts
+
+
+def _source_access_facade() -> Any:
+    config_root = str(os.environ.get("HERMES_KB_SOURCE_CONFIG_ROOT") or "").strip()
+    if not config_root:
+        raise _OwnerPackageUnavailable(
+            "set HERMES_KB_SOURCE_CONFIG_ROOT to the NOC-placed Source Access "
+            "configuration directory"
+        )
+    try:
+        from kb_source_access.public import create_facade
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return create_facade(
+        config_root=config_root,
+        timeout_seconds=CONTEXT_SEARCH_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def _source_access_cleanup_transport(
+    transport: dict[str, Any],
+    *,
+    expected_recipe_digest: str,
+    expected_session_id: str,
+) -> dict[str, Any]:
+    try:
+        from kb_source_access.custody import cleanup_transport
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise _OwnerPackageUnavailable(OWNER_INSTALL_REMEDIATION) from exc
+    return cleanup_transport(
+        transport,
+        expected_recipe_digest=expected_recipe_digest,
+        expected_session_id=expected_session_id,
+        max_packet_bytes=SYNC_PACKET_MAX_BYTES,
+    )
+
+
+def _connector_transport_schema() -> dict[str, Any]:
+    schema = (
+        _engine_connector_contracts().contract().get("schemas", {}).get("transport")
+    )
+    if not isinstance(schema, dict):
+        raise _OwnerPackageUnavailable(
+            "installed kb-engine connector transport schema is unavailable; "
+            + OWNER_INSTALL_REMEDIATION
+        )
+    return copy.deepcopy(schema)
 
 
 def _descriptor_digest(value: Any) -> str:
@@ -409,7 +501,14 @@ def _schema_shape_is_concrete(schema: Any, *, require_required: bool) -> bool:
         if not isinstance(properties, dict) or not properties:
             return False
         return not require_required or (isinstance(required, list) and bool(required))
-    return schema.get("type") in {"array", "boolean", "integer", "number", "string"}
+    return schema.get("type") in {
+        "array",
+        "boolean",
+        "integer",
+        "null",
+        "number",
+        "string",
+    }
 
 
 def _required_branch_is_concrete(parent: Any, branch: Any) -> bool:
@@ -7160,7 +7259,7 @@ def _sync_success_state(packet: Any) -> str:
     return ""
 
 
-def _daily_integration_closeout_eligible(packet: Any) -> bool:
+def _legacy_daily_integration_closeout_eligible(packet: Any) -> bool:
     """Allow only clean runs or fully-accounted item-level insufficiency."""
 
     success_state = _sync_success_state(packet)
@@ -7204,6 +7303,35 @@ def _daily_integration_closeout_eligible(packet: Any) -> bool:
         and int(accounting.get("remaining_count") or 0) == 0
         and lifecycle.get("status") == "fixed_point"
     )
+
+
+def _daily_integration_closeout_eligible(packet: Any) -> bool:
+    """Delegate terminal eligibility to the installed engine policy.
+
+    The released legacy receipt projection remains a parity oracle until the
+    retirement window closes; canonical final receipts are interpreted only by
+    the installed owner.
+    """
+
+    if not isinstance(packet, dict):
+        return False
+    receipt = (
+        packet.get("semantic_final_receipt")
+        if isinstance(packet.get("semantic_final_receipt"), dict)
+        else packet
+    )
+    state_status = str(packet.get("status") or "").strip().lower()
+    owner_result = _engine_daily_integration_policy().terminal_eligible(
+        state_status,
+        receipt,
+    )
+    if receipt.get("kind") == "kb.integration.final_receipt":
+        return owner_result
+    legacy_result = _legacy_daily_integration_closeout_eligible(packet)
+    if owner_result != legacy_result:
+        logger.error("kb_journeys: terminal eligibility parity failure")
+        return False
+    return owner_result
 
 
 def _sync_publication_is_separate(packet: Any) -> bool:
@@ -7842,6 +7970,43 @@ def _sync_packet_failure(
     return result
 
 
+def _connector_cleanup_projection(
+    transport: dict[str, Any],
+    *,
+    perform: bool,
+) -> dict[str, Any]:
+    mode = str(transport.get("mode") or "")
+    if mode == "bounded_inline":
+        return {
+            "status": "not_required",
+            "cleanup_performed": False,
+            "custody_owner": SOURCE_ACCESS_DISTRIBUTION,
+        }
+    if not perform:
+        return {
+            "status": "retained",
+            "cleanup_performed": False,
+            "custody_owner": SOURCE_ACCESS_DISTRIBUTION,
+        }
+    recipe_digest = str(transport.get("recipe_digest") or "")
+    session_id = str(transport.get("session_id") or "")
+    cleanup = _source_access_cleanup_transport(
+        transport,
+        expected_recipe_digest=recipe_digest,
+        expected_session_id=session_id,
+    )
+    return {
+        "status": str(cleanup.get("status") or "blocked"),
+        "cleanup_performed": cleanup.get("cleanup_performed") is True,
+        "custody_owner": SOURCE_ACCESS_DISTRIBUTION,
+        **(
+            {"error_code": str(cleanup.get("error_code") or "cleanup_failed")}
+            if cleanup.get("ok") is not True
+            else {}
+        ),
+    }
+
+
 def _compact_semantic_status_result(
     payload: Any,
     *,
@@ -7955,11 +8120,12 @@ def _normalize_target_dossiers_for_transport(payload: Any) -> Any:
     return normalized
 
 
-def _semantic_batch_transport(
+def _legacy_semantic_batch_transport(
     ctx: Any,
     args: dict[str, Any],
     *,
     run_id: str,
+    initial_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence_refs = args.get("evidence_refs")
     target_refs = args.get("target_refs")
@@ -8064,11 +8230,16 @@ def _semantic_batch_transport(
     )
     requested_count = len(selected)
     while selected:
-        _tool, payload, errors = _dispatch_first(
-            ctx,
-            _mcp_target(),
-            [("kb.sync.status", {"run_id": run_id, selector: selected})],
-        )
+        if initial_payload is None:
+            _tool, payload, errors = _dispatch_first(
+                ctx,
+                _mcp_target(),
+                [("kb.sync.status", {"run_id": run_id, selector: selected})],
+            )
+        else:
+            payload = initial_payload
+            errors = []
+            initial_payload = None
         if payload is None:
             return {
                 "accepted": False,
@@ -8132,6 +8303,128 @@ def _semantic_batch_transport(
                 "error": "one semantic review item exceeds the bounded transport result",
             }
         selected = selected[: max(1, len(selected) // 2)]
+    raise AssertionError("semantic batch selector unexpectedly became empty")
+
+
+def _semantic_batch_transport(
+    ctx: Any,
+    args: dict[str, Any],
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    """Return the engine packet intact and negotiate only the response budget.
+
+    Offset-based local paging is retained as an explicit v1 compatibility path
+    until the post-cutover retirement window. New requests delegate selection,
+    packet shape, and semantic compaction to ``kb.sync.status``.
+    """
+
+    offsets = (
+        args.get("target_evidence_offset"),
+        args.get("evidence_text_offset"),
+        args.get("target_evidence_text_offset"),
+    )
+    if any(value is not None for value in offsets):
+        return _legacy_semantic_batch_transport(ctx, args, run_id=run_id)
+
+    evidence_refs = args.get("evidence_refs")
+    target_refs = args.get("target_refs")
+    if (evidence_refs is None) == (target_refs is None):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "semantic_batch requires exactly one selector",
+        }
+    selector = "evidence_refs" if evidence_refs is not None else "target_refs"
+    values = evidence_refs if evidence_refs is not None else target_refs
+    if not isinstance(values, list) or not 1 <= len(values) <= 10:
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": f"{selector} must contain one to ten exact refs",
+        }
+    selected = [str(value or "").strip() for value in values]
+    if len(set(selected)) != len(selected) or any(not value for value in selected):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": f"{selector} must contain unique non-empty refs",
+        }
+    if selector == "evidence_refs" and any(
+        not DESCRIPTOR_DIGEST_RE.fullmatch(value) for value in selected
+    ):
+        return {
+            "accepted": False,
+            "run_id": run_id,
+            "error": "evidence_refs must be exact sha256 refs",
+        }
+
+    requested_count = len(selected)
+    while selected:
+        _tool, payload, errors = _dispatch_first(
+            ctx,
+            _mcp_target(),
+            [("kb.sync.status", {"run_id": run_id, selector: selected})],
+        )
+        if not isinstance(payload, dict):
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "error": _clip("; ".join(errors), 240) or "kb.sync.status failed",
+            }
+        status = str(payload.get("status") or "")
+        if str(payload.get("run_id") or "") != run_id or status in {
+            "invalid_request",
+            "not_found",
+            "failed",
+            "cancelled",
+        }:
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "status": status,
+                "error": _clip(payload.get("reason"), 240)
+                or "semantic status selection failed",
+            }
+        required_result = (
+            "selected_evidence" if selector == "evidence_refs" else "target_dossiers"
+        )
+        if not isinstance(payload.get(required_result), dict):
+            return {
+                "accepted": False,
+                "run_id": run_id,
+                "error": f"{required_result} is unavailable",
+            }
+        result = dict(payload)
+        result.update(
+            {
+                "accepted": True,
+                "requested_count": requested_count,
+                "selected_count": len(selected),
+                "reduced": len(selected) < requested_count,
+                "semantic_owner": ENGINE_DISTRIBUTION,
+                "response_budget": {
+                    "maximum_bytes": INTEGRATION_TRANSPORT_MAX_RESULT_BYTES,
+                    "strategy": "selector_prefix",
+                },
+            }
+        )
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= INTEGRATION_TRANSPORT_MAX_RESULT_BYTES:
+            return result
+        if len(selected) > 1:
+            selected = selected[: max(1, len(selected) // 2)]
+            continue
+        return _legacy_semantic_batch_transport(
+            ctx,
+            args,
+            run_id=run_id,
+            initial_payload=payload,
+        )
     raise AssertionError("semantic batch selector unexpectedly became empty")
 
 
@@ -8881,7 +9174,7 @@ def _search_meeting_artifacts_context(
     }, items
 
 
-def _context_search(args: dict[str, Any]) -> dict[str, Any]:
+def _legacy_context_search(args: dict[str, Any]) -> dict[str, Any]:
     terms = _context_terms(args.get("terms"))
     requested_sources = _context_sources(args.get("sources"))
     start = _context_timestamp(args.get("start"), field="start")
@@ -8944,7 +9237,246 @@ def _context_search(args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _managed_plan_digest(envelope: dict[str, Any]) -> str:
+_CONTEXT_SOURCE_ACCESS_IDS = {
+    "calendar": "m365.calendar",
+    "mail": "m365.email",
+    "slack": "slack.message",
+    "meeting_artifacts": "m365.meeting_artifact",
+    "tripit": "travel.tripit",
+}
+
+
+def _source_access_summary_timestamp(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, dict):
+        return None
+    for field in (
+        "start",
+        "receivedDateTime",
+        "received_at",
+        "created_at",
+        "timestamp",
+    ):
+        candidate = value.get(field)
+        if isinstance(candidate, dict):
+            candidate = candidate.get("dateTime")
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text):
+            try:
+                return _dt.datetime.fromtimestamp(float(text), tz=_dt.timezone.utc)
+            except (OverflowError, ValueError):
+                continue
+        try:
+            parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(_dt.timezone.utc)
+    return None
+
+
+def _source_access_search_result(
+    facade: Any,
+    *,
+    source: str,
+    query: str,
+    limit: int,
+    start: _dt.datetime,
+    end: _dt.datetime,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    source_id = _CONTEXT_SOURCE_ACCESS_IDS[source]
+    result = facade.dispatch(
+        source_id,
+        "search",
+        {"query": query, "limit": limit},
+    )
+    if not isinstance(result, dict) or result.get("status") not in {"ok", "ready"}:
+        return {
+            "source": source,
+            "source_id": source_id,
+            "status": "degraded",
+            "reason_code": str(
+                (result or {}).get("error_code")
+                or (result or {}).get("status")
+                or "source_access_failed"
+            ),
+        }, []
+    shaped = result.get("result")
+    raw_items = shaped.get("items") if isinstance(shaped, dict) else None
+    if not isinstance(raw_items, list):
+        return {
+            "source": source,
+            "source_id": source_id,
+            "status": "degraded",
+            "reason_code": "source_access_result_invalid",
+        }, []
+    items: list[dict[str, Any]] = []
+    for row in raw_items:
+        if not isinstance(row, dict):
+            continue
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        timestamp = _source_access_summary_timestamp(summary)
+        if timestamp is not None and not start <= timestamp < end:
+            continue
+        ref = str(row.get("ref") or "").strip()
+        if not ref:
+            continue
+        items.append(
+            {
+                "source": source,
+                "source_id": source_id,
+                "ref": ref,
+                "summary": dict(summary),
+            }
+        )
+    continuation = result.get("continuation")
+    return {
+        "source": source,
+        "source_id": source_id,
+        "status": "ready",
+        "observed_count": len(raw_items),
+        "selected_count": len(items),
+        "bounded": bool(
+            isinstance(continuation, dict)
+            and continuation.get("complete") is not True
+        ),
+    }, items[:limit]
+
+
+def _source_access_meeting_context(
+    facade: Any,
+    *,
+    calendar_items: list[dict[str, Any]],
+    limit: int,
+    start: _dt.datetime,
+    end: _dt.datetime,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    source = "meeting_artifacts"
+    if not calendar_items:
+        return {
+            "source": source,
+            "source_id": _CONTEXT_SOURCE_ACCESS_IDS[source],
+            "status": "degraded",
+            "reason_code": "calendar_anchor_unavailable",
+        }, []
+    event_ref = str(calendar_items[0].get("ref") or "")
+    fetched = facade.dispatch(
+        _CONTEXT_SOURCE_ACCESS_IDS["calendar"],
+        "fetch",
+        {"ref": event_ref, "max_bytes": 64 * 1024},
+    )
+    fetched_result = fetched.get("result") if isinstance(fetched, dict) else None
+    event = (
+        fetched_result.get("item")
+        if isinstance(fetched_result, dict)
+        and isinstance(fetched_result.get("item"), dict)
+        else {}
+    )
+    event_id = str(event.get("external_id") or "").strip()
+    if not event_id:
+        return {
+            "source": source,
+            "source_id": _CONTEXT_SOURCE_ACCESS_IDS[source],
+            "status": "degraded",
+            "reason_code": "calendar_anchor_unresolved",
+        }, []
+    return _source_access_search_result(
+        facade,
+        source=source,
+        query=event_id,
+        limit=limit,
+        start=start,
+        end=end,
+    )
+
+
+def _context_search(args: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate connector-owned searches without invoking provider CLIs locally."""
+
+    terms = _context_terms(args.get("terms"))
+    requested_sources = _context_sources(args.get("sources"))
+    start = _context_timestamp(args.get("start"), field="start")
+    end = _context_timestamp(args.get("end"), field="end")
+    if end <= start:
+        raise ValueError("end must be after start")
+    if end - start > _dt.timedelta(days=CONTEXT_SEARCH_MAX_WINDOW_DAYS):
+        raise ValueError(
+            f"context search window cannot exceed {CONTEXT_SEARCH_MAX_WINDOW_DAYS} days"
+        )
+    limit = args.get("limit_per_source", 5)
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= CONTEXT_SEARCH_MAX_ITEMS_PER_SOURCE
+    ):
+        raise ValueError(
+            "limit_per_source must be between 1 and "
+            f"{CONTEXT_SEARCH_MAX_ITEMS_PER_SOURCE}"
+        )
+    facade = _source_access_facade()
+    query = " ".join(terms)
+    statuses: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    calendar_items: list[dict[str, Any]] = []
+    for source in (
+        "calendar",
+        "tripit",
+        "mail",
+        "slack",
+        "meeting_artifacts",
+    ):
+        if source not in requested_sources:
+            continue
+        if source == "meeting_artifacts":
+            status, rows = _source_access_meeting_context(
+                facade,
+                calendar_items=calendar_items,
+                limit=limit,
+                start=start,
+                end=end,
+            )
+        else:
+            status, rows = _source_access_search_result(
+                facade,
+                source=source,
+                query=query,
+                limit=limit,
+                start=start,
+                end=end,
+            )
+            if source == "calendar":
+                calendar_items = rows
+        statuses.append(status)
+        items.extend(rows)
+    result: dict[str, Any] = {
+        "accepted": True,
+        "kind": "hermes_context_search",
+        "source_access_owner": SOURCE_ACCESS_DISTRIBUTION,
+        "terms": terms,
+        "window": {
+            "start": start.isoformat().replace("+00:00", "Z"),
+            "end": end.isoformat().replace("+00:00", "Z"),
+        },
+        "sources": statuses,
+        "requested_sources": requested_sources,
+        "items": items,
+        "item_count": len(items),
+        "external_effect_started": False,
+        "durable_kb_write_started": False,
+    }
+    while (
+        items
+        and len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        > INTEGRATION_TRANSPORT_MAX_RESULT_BYTES
+    ):
+        items.pop()
+        result["item_count"] = len(items)
+        result["response_budget_reduced"] = True
+    return result
+
+
+def _legacy_managed_plan_digest(envelope: dict[str, Any]) -> str:
     material = {key: value for key, value in envelope.items() if key != "plan_digest"}
     return _managed_mapping_digest(material)
 
@@ -8972,12 +9504,12 @@ _MANAGED_CALENDAR_COUNT_FIELDS = (
 )
 
 
-def _managed_closeout_digest(closeout: dict[str, Any]) -> str:
+def _legacy_managed_closeout_digest(closeout: dict[str, Any]) -> str:
     material = {key: value for key, value in closeout.items() if key != "receipt_digest"}
     return _managed_mapping_digest(material)
 
 
-def _calendar_closeout_envelopes(
+def _legacy_calendar_closeout_envelopes(
     args: dict[str, Any], *, run_id: str
 ) -> tuple[list[dict[str, Any]], str]:
     has_single = "calendar_envelope" in args
@@ -9026,7 +9558,7 @@ def _calendar_closeout_envelopes(
                 return [], "calendar batch source reads must include exact digests"
             source_pairs.add(source_pair)
         envelope = dict(raw)
-        envelope["plan_digest"] = _managed_plan_digest(envelope)
+        envelope["plan_digest"] = _legacy_managed_plan_digest(envelope)
         envelopes.append(envelope)
     if has_batch and len(source_pairs) != 1:
         return [], "calendar batch envelopes must bind the same complete source reads"
@@ -9041,7 +9573,7 @@ def _calendar_entity_identity(value: Any) -> str:
     return f"events/{text}" if text else ""
 
 
-def _validated_calendar_closeout(
+def _legacy_validated_calendar_closeout(
     result: Any,
     *,
     envelope: dict[str, Any],
@@ -9059,13 +9591,13 @@ def _validated_calendar_closeout(
         reason = result.get("reason") if isinstance(result, dict) else ""
         return None, _clip(reason, 160) or "managed calendar execution failed"
     closeout = result.get("closeout")
-    closeout_error = _managed_closeout_error(closeout, run_id=run_id)
+    closeout_error = _legacy_managed_closeout_error(closeout, run_id=run_id)
     if closeout_error:
         return None, closeout_error
     return dict(closeout), ""
 
 
-def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
+def _legacy_managed_closeout_error(closeout: Any, *, run_id: str) -> str:
     base_fields = {
         "schema_version",
         "kind",
@@ -9114,10 +9646,10 @@ def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
         or counts["pending"]
     ):
         return "managed calendar closeout accounting is incomplete"
-    if closeout.get("receipt_digest") != _managed_closeout_digest(closeout):
+    if closeout.get("receipt_digest") != _legacy_managed_closeout_digest(closeout):
         return "managed calendar closeout digest is invalid"
     if "calendar_observation" in closeout:
-        observation_error = _calendar_observation_error(
+        observation_error = _legacy_calendar_observation_error(
             closeout.get("calendar_observation")
         )
         if observation_error:
@@ -9125,7 +9657,7 @@ def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
     return ""
 
 
-def _calendar_observation_error(value: Any) -> str:
+def _legacy_calendar_observation_error(value: Any) -> str:
     fields = {
         "schema_version",
         "kind",
@@ -9162,7 +9694,7 @@ def _calendar_observation_error(value: Any) -> str:
     return ""
 
 
-def _aggregate_calendar_closeouts(
+def _legacy_aggregate_calendar_closeouts(
     closeouts: list[dict[str, Any]],
     *,
     envelopes: list[dict[str, Any]],
@@ -9190,14 +9722,7 @@ def _aggregate_calendar_closeouts(
         "schema_version": 1,
         "kind": "managed_calendar_closeout",
         "run_id": run_id,
-        "batch_digest": _managed_mapping_digest(
-            {
-                "run_id": run_id,
-                "plan_digests": [
-                    child["plan_digest"] for child in child_receipts
-                ],
-            }
-        ),
+        "batch_digest": _legacy_calendar_batch_digest(envelopes),
         "child_receipts": child_receipts,
         "status": "not_required" if counts["planned"] == 0 else "completed",
         "ok": True,
@@ -9214,15 +9739,15 @@ def _aggregate_calendar_closeouts(
         "counts": counts,
     }
     if calendar_observation is not None:
-        observation_error = _calendar_observation_error(calendar_observation)
+        observation_error = _legacy_calendar_observation_error(calendar_observation)
         if observation_error:
             raise ValueError(observation_error)
         receipt["calendar_observation"] = dict(calendar_observation)
-    receipt["receipt_digest"] = _managed_closeout_digest(receipt)
+    receipt["receipt_digest"] = _legacy_managed_closeout_digest(receipt)
     return receipt
 
 
-def _calendar_batch_digest(envelopes: list[dict[str, Any]]) -> str:
+def _legacy_calendar_batch_digest(envelopes: list[dict[str, Any]]) -> str:
     run_ids = {str(envelope.get("run_id") or "") for envelope in envelopes}
     run_id = next(iter(run_ids)) if len(run_ids) == 1 else ""
     return _managed_mapping_digest(
@@ -9233,6 +9758,102 @@ def _calendar_batch_digest(envelopes: list[dict[str, Any]]) -> str:
             ],
         }
     )
+
+
+def _managed_plan_digest(envelope: dict[str, Any]) -> str:
+    return str(_engine_calendar_contracts().managed_plan_digest(envelope))
+
+
+def _managed_closeout_digest(closeout: dict[str, Any]) -> str:
+    return str(_engine_calendar_contracts().managed_closeout_digest(closeout))
+
+
+def _calendar_closeout_envelopes(
+    args: dict[str, Any], *, run_id: str
+) -> tuple[list[dict[str, Any]], str]:
+    has_single = "calendar_envelope" in args
+    has_batch = "calendar_envelopes" in args
+    if has_single == has_batch:
+        return [], "provide exactly one of calendar_envelope or calendar_envelopes"
+    raw = [args.get("calendar_envelope")] if has_single else args.get("calendar_envelopes")
+    if not isinstance(raw, list) or any(not isinstance(row, dict) for row in raw):
+        return [], "calendar envelopes must be engine-routed plan objects"
+    prepared = _engine_calendar_contracts().prepare_managed_calendar_plans(
+        raw,
+        run_id=run_id,
+    )
+    if prepared.get("ok") is not True or not isinstance(prepared.get("plans"), list):
+        reason = str(prepared.get("reason") or "calendar_plan_invalid")
+        messages = {
+            "calendar_plan_count_invalid": "calendar envelopes must contain between 1 and 50 plans",
+            "calendar_plan_invalid": (
+                "each calendar envelope must be a complete single-entity plan for the exact run"
+            ),
+            "calendar_source_digest_invalid": (
+                "calendar batch source reads must include exact digests"
+            ),
+            "calendar_source_binding_mismatch": (
+                "calendar batch envelopes must bind the same complete source reads"
+            ),
+        }
+        return [], messages.get(reason, reason)
+    return [dict(row) for row in prepared["plans"]], ""
+
+
+def _validated_calendar_closeout(
+    result: Any,
+    *,
+    envelope: dict[str, Any],
+    run_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if (
+        not isinstance(result, dict)
+        or result.get("schema_version") != 1
+        or result.get("kind") != "calendar_live_executor_receipt"
+        or result.get("ok") is not True
+        or result.get("status") != "completed"
+        or result.get("run_id") != run_id
+        or result.get("plan_digest") != envelope.get("plan_digest")
+    ):
+        reason = result.get("reason") if isinstance(result, dict) else ""
+        return None, _clip(reason, 160) or "managed calendar execution failed"
+    closeout = result.get("closeout")
+    error = _managed_closeout_error(closeout, run_id=run_id)
+    return (dict(closeout), "") if not error else (None, error)
+
+
+def _managed_closeout_error(closeout: Any, *, run_id: str) -> str:
+    return str(
+        _engine_calendar_contracts().managed_closeout_error(
+            closeout,
+            run_id=run_id,
+        )
+    )
+
+
+def _calendar_observation_error(value: Any) -> str:
+    return str(_engine_calendar_contracts().calendar_observation_error(value))
+
+
+def _aggregate_calendar_closeouts(
+    closeouts: list[dict[str, Any]],
+    *,
+    envelopes: list[dict[str, Any]],
+    run_id: str,
+    calendar_observation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return dict(
+        _engine_calendar_contracts().aggregate_managed_closeouts(
+            closeouts,
+            plans=envelopes,
+            run_id=run_id,
+            calendar_observation=calendar_observation,
+        )
+    )
+
+
+def _calendar_batch_digest(envelopes: list[dict[str, Any]]) -> str:
+    return str(_engine_calendar_contracts().calendar_batch_digest(envelopes))
 
 
 def _calendar_live_socket_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -9476,13 +10097,465 @@ def _daily_integration_closeout(ctx: Any, args: dict[str, Any], *, run_id: str) 
         return _daily_integration_closeout_serial(ctx, args, run_id=run_id)
 
 
+def _integration_effect_results_packet(
+    sync: dict[str, Any],
+    *,
+    run_id: str,
+    calendar_closeout: dict[str, Any],
+) -> dict[str, Any]:
+    action = sync.get("next_action") if isinstance(sync.get("next_action"), dict) else {}
+    effect_ids = action.get("effect_ids")
+    recipe_digest = str(action.get("recipe_digest") or sync.get("recipe_digest") or "")
+    if (
+        action.get("kind") != "execute_external_effect"
+        or effect_ids != [CALENDAR_INTEGRATION_EFFECT_ID]
+        or not DESCRIPTOR_DIGEST_RE.fullmatch(recipe_digest)
+    ):
+        raise ValueError("engine effect action is not the supported calendar route")
+    status = str(calendar_closeout.get("status") or "")
+    if status not in {"completed", "not_required"}:
+        raise ValueError("engine calendar closeout is not complete")
+    row = {
+        "effect_id": CALENDAR_INTEGRATION_EFFECT_ID,
+        "status": status,
+        "result": dict(calendar_closeout),
+        "result_digest": _descriptor_digest(calendar_closeout),
+    }
+    return {
+        "schema_version": 1,
+        "kind": "kb.integration.effect_results",
+        "run_id": run_id,
+        "recipe_digest": recipe_digest,
+        "results": [row],
+    }
+
+
+def _integration_publication_result_packet(
+    sync: dict[str, Any],
+    *,
+    run_id: str,
+    publication: dict[str, Any],
+) -> dict[str, Any]:
+    action = sync.get("next_action") if isinstance(sync.get("next_action"), dict) else {}
+    recipe_digest = str(action.get("recipe_digest") or sync.get("recipe_digest") or "")
+    if (
+        action.get("kind") != "publish_integration"
+        or action.get("publication_posture") != "required"
+        or not DESCRIPTOR_DIGEST_RE.fullmatch(recipe_digest)
+    ):
+        raise ValueError("engine publication action is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "kb.integration.publication_result",
+        "run_id": run_id,
+        "recipe_digest": recipe_digest,
+        "status": "published",
+        "receipt": dict(publication),
+        "receipt_digest": _descriptor_digest(publication),
+    }
+
+
+def _execute_calendar_effect(
+    args: dict[str, Any],
+    *,
+    run_id: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+    envelopes, error = _calendar_closeout_envelopes(args, run_id=run_id)
+    if error:
+        return None, [], error
+    try:
+        result = _calendar_live_batch_request(envelopes)
+    except (OSError, ValueError) as exc:
+        return None, envelopes, _clip(str(exc), 240)
+    closeouts, observation, error = _validated_calendar_batch_result(
+        result,
+        envelopes=envelopes,
+        run_id=run_id,
+    )
+    if error:
+        return None, envelopes, error
+    try:
+        aggregate = _aggregate_calendar_closeouts(
+            closeouts,
+            envelopes=envelopes,
+            run_id=run_id,
+            calendar_observation=observation,
+        )
+    except ValueError as exc:
+        return None, envelopes, _clip(str(exc), 240)
+    return aggregate, envelopes, ""
+
+
+def _acknowledge_calendar_delivery(
+    envelopes: list[dict[str, Any]],
+    *,
+    run_id: str,
+) -> str:
+    try:
+        acknowledgement = _calendar_live_batch_acknowledge(envelopes)
+    except (OSError, ValueError) as exc:
+        return _clip(str(exc), 240)
+    return _calendar_batch_acknowledgement_error(
+        acknowledgement,
+        envelopes=envelopes,
+        run_id=run_id,
+    )
+
+
+def _engine_calendar_closeout_from_packet(packet: Any) -> dict[str, Any]:
+    effects = packet.get("external_effects") if isinstance(packet, dict) else None
+    results = effects.get("results") if isinstance(effects, dict) else None
+    if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+        return {}
+    result = results[0].get("result")
+    return dict(result) if isinstance(result, dict) else {}
+
+
+def _engine_publication_receipt_from_packet(packet: Any) -> dict[str, Any]:
+    publication = packet.get("publication") if isinstance(packet, dict) else None
+    receipt = publication.get("receipt") if isinstance(publication, dict) else None
+    return dict(receipt) if isinstance(receipt, dict) else {}
+
+
+def _render_engine_daily_integration_closeout(
+    packet: dict[str, Any],
+    *,
+    run_id: str,
+    entity_count: int,
+    calendar_closeout: dict[str, Any] | None = None,
+    publication_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    receipt = packet.get("semantic_final_receipt")
+    if (
+        not isinstance(receipt, dict)
+        or not _daily_integration_closeout_eligible(packet)
+    ):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "engine_final_receipt",
+            "error": "kb.sync did not return an eligible engine final receipt",
+        }
+    summary = _engine_integration_run().final_summary(receipt)
+    closeout = calendar_closeout or _engine_calendar_closeout_from_packet(packet)
+    publication = publication_receipt or _engine_publication_receipt_from_packet(packet)
+    counts = closeout.get("counts") if isinstance(closeout.get("counts"), dict) else {}
+    publication_session_id = str(publication.get("session_id") or "").strip()
+    publication_binding = (
+        {
+            "kind": "daily_integration_publication_session_binding",
+            "source": "kb_engine_publication_receipt",
+            "session_sha256": "sha256:"
+            + hashlib.sha256(publication_session_id.encode("utf-8")).hexdigest(),
+            "idempotent_replay": publication.get("idempotent_replay") is True,
+        }
+        if publication_session_id
+        else None
+    )
+    result: dict[str, Any] = {
+        "accepted": True,
+        "complete": summary.get("complete") is True,
+        "run_id": run_id,
+        "status": summary.get("status"),
+        "semantic_owner": ENGINE_DISTRIBUTION,
+        "integration_receipt": receipt,
+        "integration_summary": summary,
+        "stages": {
+            "integration": summary.get("status"),
+            "calendar": closeout.get("status"),
+            "publication": publication.get("status"),
+        },
+        "source_currency": packet.get("source_currency"),
+        "semantic_accounting": packet.get("semantic_accounting"),
+        "lifecycle": packet.get("lifecycle"),
+        "calendar": {
+            "status": closeout.get("status"),
+            "counts": counts,
+            "entity_count": entity_count,
+            **(
+                {"calendar_observation": closeout["calendar_observation"]}
+                if isinstance(closeout.get("calendar_observation"), dict)
+                else {}
+            ),
+        },
+        "publication": {
+            "status": publication.get("status"),
+            "readback": publication.get("readback"),
+            **({"session_binding": publication_binding} if publication_binding else {}),
+        },
+        "morning_brief": _daily_integration_morning_brief(
+            packet,
+            closeout,
+            publication,
+        ),
+    }
+    return result
+
+
 def _daily_integration_closeout_serial(
-    ctx: Any, args: dict[str, Any], *, run_id: str
+    ctx: Any,
+    args: dict[str, Any],
+    *,
+    run_id: str,
 ) -> dict[str, Any]:
     target = _mcp_target()
     _tool, sync, errors = _dispatch_first(
-        ctx, target, [("kb.sync.status", {"run_id": run_id})]
+        ctx,
+        target,
+        [("kb.sync.status", {"run_id": run_id})],
     )
+    if not isinstance(sync, dict):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "integration_readback",
+            "error": _clip("; ".join(errors), 240) or "kb.sync.status failed",
+        }
+
+    raw_envelopes = (
+        [args.get("calendar_envelope")]
+        if "calendar_envelope" in args
+        else args.get("calendar_envelopes")
+    )
+    entity_count = len(raw_envelopes) if isinstance(raw_envelopes, list) else 0
+    if isinstance(sync.get("semantic_final_receipt"), dict):
+        envelopes, envelope_error = _calendar_closeout_envelopes(args, run_id=run_id)
+        if envelope_error:
+            return {
+                "accepted": False,
+                "complete": True,
+                "run_id": run_id,
+                "stage": "calendar_recovery_cleanup",
+                "error": envelope_error,
+            }
+        acknowledgement_error = _acknowledge_calendar_delivery(
+            envelopes,
+            run_id=run_id,
+        )
+        if acknowledgement_error:
+            return {
+                "accepted": False,
+                "complete": True,
+                "run_id": run_id,
+                "stage": "calendar_recovery_cleanup",
+                "error": acknowledgement_error,
+            }
+        replay = _render_engine_daily_integration_closeout(
+            sync,
+            run_id=run_id,
+            entity_count=entity_count,
+        )
+        replay["idempotent_replay"] = True
+        return replay
+
+    action = sync.get("next_action") if isinstance(sync.get("next_action"), dict) else {}
+    action_kind = str(action.get("kind") or "")
+    if action_kind not in {"execute_external_effect", "publish_integration"}:
+        if _daily_integration_closeout_eligible(sync):
+            compatibility = _legacy_daily_integration_closeout_serial(
+                ctx,
+                args,
+                run_id=run_id,
+                initial_sync=(sync, errors),
+            )
+            compatibility["compatibility"] = "terminal_first_closeout_v1"
+            return compatibility
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "integration_readback",
+            "error": "kb.sync is not awaiting an engine-owned closeout action",
+        }
+
+    closeout, envelopes, calendar_error = _execute_calendar_effect(args, run_id=run_id)
+    if closeout is None:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "calendar_execution",
+            "calendar": {
+                "completed_entities": 0,
+                "total_entities": len(envelopes),
+            },
+            "error": calendar_error,
+        }
+
+    if action_kind == "execute_external_effect":
+        try:
+            effect_packet = _integration_effect_results_packet(
+                sync,
+                run_id=run_id,
+                calendar_closeout=closeout,
+            )
+        except ValueError as exc:
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "engine_effect_packet",
+                "error": _clip(str(exc), 240),
+            }
+        _tool, sync, errors = _dispatch_first(
+            ctx,
+            target,
+            [("kb.sync.resume", {"run_id": run_id, "response": effect_packet})],
+        )
+        if not isinstance(sync, dict) or (
+            not isinstance(sync.get("next_action"), dict)
+            or sync["next_action"].get("kind") != "publish_integration"
+        ):
+            return {
+                "accepted": False,
+                "complete": False,
+                "run_id": run_id,
+                "stage": "engine_effect_record",
+                "error": _clip("; ".join(errors), 240)
+                or _clip((sync or {}).get("reason"), 240)
+                or "kb.sync did not record the external effect",
+            }
+
+    _tool, preview, errors = _dispatch_first(
+        ctx,
+        target,
+        [
+            (
+                "publication.daily_integration_preview",
+                {"run_id": run_id, "calendar_receipt": closeout},
+            )
+        ],
+    )
+    if not isinstance(preview, dict) or preview.get("ok") is not True:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_preview",
+            "calendar": {
+                "status": closeout.get("status"),
+                "counts": closeout.get("counts"),
+                "entity_count": len(envelopes),
+            },
+            "error": _clip("; ".join(errors), 240) or "Git publication is held",
+        }
+    preview_digest = str(preview.get("preview_digest") or "")
+    if not DESCRIPTOR_DIGEST_RE.fullmatch(preview_digest):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_preview",
+            "error": "publication preview did not return an exact digest",
+        }
+    _tool, publication, errors = _dispatch_first(
+        ctx,
+        target,
+        [
+            (
+                "publication.daily_integration_apply",
+                {
+                    "run_id": run_id,
+                    "calendar_receipt": closeout,
+                    "preview_digest": preview_digest,
+                    "actor": "hermes-relay",
+                    "source": "kb_journeys.daily_integration",
+                    "session_id": str(args.get("session_id") or ""),
+                },
+            )
+        ],
+    )
+    if (
+        not isinstance(publication, dict)
+        or publication.get("ok") is not True
+        or publication.get("status") not in {"published", "noop"}
+    ):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_apply",
+            "error": _clip("; ".join(errors), 240)
+            or "Git publication did not pass readback",
+        }
+    publication_session_id = str(publication.get("session_id") or "").strip()
+    publication_replay = publication.get("idempotent_replay") is True
+    if not publication_session_id or (
+        not publication_replay
+        and publication_session_id != str(args.get("session_id") or "")
+    ):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "publication_apply",
+            "error": "publication session binding is invalid",
+        }
+    try:
+        publication_packet = _integration_publication_result_packet(
+            sync,
+            run_id=run_id,
+            publication=publication,
+        )
+    except ValueError as exc:
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "engine_publication_packet",
+            "error": _clip(str(exc), 240),
+        }
+    _tool, terminal, errors = _dispatch_first(
+        ctx,
+        target,
+        [("kb.sync.resume", {"run_id": run_id, "response": publication_packet})],
+    )
+    if not isinstance(terminal, dict):
+        return {
+            "accepted": False,
+            "complete": False,
+            "run_id": run_id,
+            "stage": "engine_publication_record",
+            "error": _clip("; ".join(errors), 240)
+            or "kb.sync did not record publication",
+        }
+    acknowledgement_error = _acknowledge_calendar_delivery(
+        envelopes,
+        run_id=run_id,
+    )
+    if acknowledgement_error:
+        return {
+            "accepted": False,
+            "complete": isinstance(terminal.get("semantic_final_receipt"), dict),
+            "run_id": run_id,
+            "stage": "calendar_recovery_cleanup",
+            "error": acknowledgement_error,
+        }
+    return _render_engine_daily_integration_closeout(
+        terminal,
+        run_id=run_id,
+        entity_count=len(envelopes),
+        calendar_closeout=closeout,
+        publication_receipt=publication,
+    )
+
+
+def _legacy_daily_integration_closeout_serial(
+    ctx: Any,
+    args: dict[str, Any],
+    *,
+    run_id: str,
+    initial_sync: tuple[Any, list[str]] | None = None,
+) -> dict[str, Any]:
+    target = _mcp_target()
+    if initial_sync is None:
+        _tool, sync, errors = _dispatch_first(
+            ctx, target, [("kb.sync.status", {"run_id": run_id})]
+        )
+    else:
+        sync, errors = initial_sync
     if not _daily_integration_closeout_eligible(sync):
         return {
             "accepted": False,
@@ -9723,6 +10796,30 @@ def _register_integration_transport(ctx: Any) -> None:
     if len(_descriptor_allowlist()) > 13:
         logger.error("kb_journeys: integration transport would exceed the 14-tool cap")
         return
+    try:
+        installed_transport_schema = _connector_transport_schema()
+    except _OwnerPackageUnavailable as exc:
+        logger.error("kb_journeys: integration transport unavailable: %s", exc)
+        return
+    legacy_transport_schema = {
+        "type": "object",
+        "description": "Deprecated Source Access v1 packet descriptor.",
+        "properties": {
+            "kind": {"const": "private_spool"},
+            "packet_path": {"type": "string", "pattern": "^/"},
+            "packet_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+            },
+            "byte_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": SYNC_PACKET_MAX_BYTES,
+            },
+        },
+        "required": ["kind", "packet_path", "packet_digest", "byte_count"],
+        "additionalProperties": False,
+    }
     schema = {
         "name": INTEGRATION_TRANSPORT_TOOL,
         "description": (
@@ -9749,34 +10846,12 @@ def _register_integration_transport(ctx: Any) -> None:
                     "description": "The exact active kb.sync run id.",
                 },
                 "packet_transport": {
-                    "type": "object",
                     "description": (
-                        "The exact compact descriptor returned by "
-                        "source_gather(delivery=private_spool). Pass it unchanged."
+                        "The exact v2 descriptor returned by installed Source Access. "
+                        "Pass it unchanged; the engine validates recipe/session binding "
+                        "and connector custody. The v1 branch is compatibility-only."
                     ),
-                    "properties": {
-                        "kind": {"const": "private_spool"},
-                        "packet_path": {
-                            "type": "string",
-                            "pattern": "^/",
-                        },
-                        "packet_digest": {
-                            "type": "string",
-                            "pattern": "^sha256:[0-9a-f]{64}$",
-                        },
-                        "byte_count": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": SYNC_PACKET_MAX_BYTES,
-                        },
-                    },
-                    "required": [
-                        "kind",
-                        "packet_path",
-                        "packet_digest",
-                        "byte_count",
-                    ],
-                    "additionalProperties": False,
+                    "oneOf": [installed_transport_schema, legacy_transport_schema],
                 },
                 "packet_path": {
                     "type": "string",
@@ -9951,7 +11026,7 @@ def _register_integration_transport(ctx: Any) -> None:
         if operation == "context_search":
             try:
                 payload = _context_search(args)
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, _OwnerPackageUnavailable) as exc:
                 payload = {"accepted": False, "error": _clip(str(exc), 240)}
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         run_id = str(args.get("run_id") or "").strip()
@@ -9984,7 +11059,16 @@ def _register_integration_transport(ctx: Any) -> None:
                 )
             bound_args = dict(args)
             bound_args["session_id"] = runtime_session_id
-            payload = _daily_integration_closeout(ctx, bound_args, run_id=run_id)
+            try:
+                payload = _daily_integration_closeout(ctx, bound_args, run_id=run_id)
+            except _OwnerPackageUnavailable as exc:
+                payload = {
+                    "accepted": False,
+                    "complete": False,
+                    "run_id": run_id,
+                    "error": _clip(str(exc), 240),
+                    "error_code": "installed_owner_unavailable",
+                }
             payload["execution_session_binding"] = {
                 "kind": "hermes_runtime_execution_session_binding",
                 "source": "runtime_dispatch",
@@ -10011,6 +11095,87 @@ def _register_integration_transport(ctx: Any) -> None:
                     "error": "operation is invalid",
                     "error_code": "operation_invalid",
                 },
+                separators=(",", ":"),
+            )
+        packet_transport = args.get("packet_transport")
+        is_v2_transport = bool(
+            isinstance(packet_transport, dict)
+            and (
+                packet_transport.get("schema_version") == 2
+                or "mode" in packet_transport
+                or packet_transport.get("kind") == "kb.connector.transport"
+            )
+        )
+        if is_v2_transport:
+            _tool, payload, errors = _dispatch_first(
+                ctx,
+                _mcp_target(),
+                [
+                    (
+                        "kb.sync.resume",
+                        {"run_id": run_id, "response": dict(packet_transport)},
+                    )
+                ],
+            )
+            if payload is None:
+                retryable = _sync_packet_dispatch_is_retryable(errors)
+                failure = _sync_packet_failure(
+                    run_id=run_id,
+                    error_code="kb_sync_resume_transport_failed",
+                    retryable=retryable,
+                    managed=True,
+                    dispatch_reason_code=_sync_packet_dispatch_reason_code(errors),
+                )
+                try:
+                    failure["cleanup"] = _connector_cleanup_projection(
+                        packet_transport,
+                        perform=not retryable,
+                    )
+                except _OwnerPackageUnavailable as exc:
+                    failure["cleanup"] = {
+                        "status": "blocked",
+                        "cleanup_performed": False,
+                        "error": _clip(str(exc), 240),
+                    }
+                failure["packet_validation_owner"] = ENGINE_DISTRIBUTION
+                return json.dumps(failure, separators=(",", ":"))
+            accepted, retryable = _sync_packet_engine_acceptance(payload, run_id=run_id)
+            if not accepted:
+                failure = _sync_packet_failure(
+                    run_id=run_id,
+                    error_code="kb_sync_resume_not_accepted",
+                    retryable=retryable,
+                    managed=True,
+                )
+                try:
+                    failure["cleanup"] = _connector_cleanup_projection(
+                        packet_transport,
+                        perform=not retryable,
+                    )
+                except _OwnerPackageUnavailable as exc:
+                    failure["cleanup"] = {
+                        "status": "blocked",
+                        "cleanup_performed": False,
+                        "error": _clip(str(exc), 240),
+                    }
+                failure["packet_validation_owner"] = ENGINE_DISTRIBUTION
+                return json.dumps(failure, separators=(",", ":"))
+            result = _compact_sync_packet_result(payload, run_id=run_id)
+            try:
+                result["cleanup"] = _connector_cleanup_projection(
+                    packet_transport,
+                    perform=True,
+                )
+            except _OwnerPackageUnavailable as exc:
+                result["cleanup"] = {
+                    "status": "blocked",
+                    "cleanup_performed": False,
+                    "error": _clip(str(exc), 240),
+                }
+            result["packet_validation_owner"] = ENGINE_DISTRIBUTION
+            return json.dumps(
+                result,
+                ensure_ascii=False,
                 separators=(",", ":"),
             )
         loaded: _LoadedSyncPacket | None = None

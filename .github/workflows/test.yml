@@ -11,7 +11,7 @@ permissions:
 jobs:
   engine-candidate-contract:
     env:
-      KB_ENGINE_CANDIDATE_REF: f8e43fa7409a2a06a8318e99020a400b08c1f5a4
+      KB_ENGINE_CANDIDATE_REF: f4c714528858ec35230bab09a21f016926bf62c2
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +29,19 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Build source-bound candidate artifact
         run: |
-          uv run --with build --with twine python \
+          uv run --with build --with twine --with pyyaml python \
             kb-engine-candidate/scripts/build_release_artifacts.py \
             --repo kb-engine-candidate \
             --ref "$KB_ENGINE_CANDIDATE_REF" \
             --output kb-engine-candidate-artifacts
+      - name: Build exact Source Access candidate artifact
+        run: |
+          CORE_WHEEL="$GITHUB_WORKSPACE/kb-engine-candidate-artifacts/kb_engine-0.45.61-py3-none-any.whl"
+          uv run --with build --with pyyaml python \
+            kb-engine-candidate/scripts/build_source_access_artifacts.py \
+            --core-wheel "$CORE_WHEEL" \
+            --source-commit "$KB_ENGINE_CANDIDATE_REF" \
+            --output kb-source-access-candidate-artifacts
       - name: Validate installed candidate goldens
         env:
           KB_ENGINE_CANDIDATE_REQUIRED: "1"
@@ -41,15 +49,18 @@ jobs:
           KB_ENGINE_CANDIDATE_SOURCE_CHECKOUT: ${{ github.workspace }}/kb-engine-candidate
         run: |
           WHEEL="$GITHUB_WORKSPACE/kb-engine-candidate-artifacts/kb_engine-0.45.61-py3-none-any.whl"
+          SOURCE_WHEEL="$GITHUB_WORKSPACE/kb-source-access-candidate-artifacts/kb_source_access-0.45.61-py3-none-any.whl"
           export KB_ENGINE_CANDIDATE_WHEEL="$WHEEL"
+          export KB_SOURCE_ACCESS_CANDIDATE_WHEEL="$SOURCE_WHEEL"
           uv venv .candidate-venv --python 3.12
-          uv pip install --python .candidate-venv/bin/python "$WHEEL" pytest pyyaml
+          uv pip install --python .candidate-venv/bin/python \
+            "$WHEEL" "$SOURCE_WHEEL" pytest pyyaml
           env -u PYTHONPATH .candidate-venv/bin/python -I -m pytest \
             tests/test_external_plugin_contract.py -q -k installed_candidate
 
   contract:
     env:
-      KB_ENGINE_DESCRIPTOR_REF: e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526
+      KB_ENGINE_DESCRIPTOR_REF: f4c714528858ec35230bab09a21f016926bf62c2
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -73,6 +84,9 @@ jobs:
           path: kb-engine
           ssh-key: ${{ secrets.KB_ENGINE_DEPLOY_KEY }}
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
       - name: Verify generated descriptors
         env:
@@ -81,8 +95,25 @@ jobs:
           cp generated/kb-engine-descriptors.json /tmp/committed-kb-engine-descriptors.json
           scripts/refresh-descriptors.sh
           diff -u /tmp/committed-kb-engine-descriptors.json generated/kb-engine-descriptors.json
+      - name: Build and install exact owner artifacts
+        run: |
+          uv run --with build --with twine --with pyyaml python \
+            kb-engine/scripts/build_release_artifacts.py \
+            --repo kb-engine \
+            --ref "$KB_ENGINE_DESCRIPTOR_REF" \
+            --output kb-engine-artifacts
+          CORE_WHEEL="$GITHUB_WORKSPACE/kb-engine-artifacts/kb_engine-0.45.61-py3-none-any.whl"
+          uv run --with build --with pyyaml python \
+            kb-engine/scripts/build_source_access_artifacts.py \
+            --core-wheel "$CORE_WHEEL" \
+            --source-commit "$KB_ENGINE_DESCRIPTOR_REF" \
+            --output kb-source-access-artifacts
+          SOURCE_WHEEL="$GITHUB_WORKSPACE/kb-source-access-artifacts/kb_source_access-0.45.61-py3-none-any.whl"
+          uv venv .owner-venv --python 3.12
+          uv pip install --python .owner-venv/bin/python \
+            "$CORE_WHEEL" "$SOURCE_WHEEL" pytest pyyaml
       - name: Test against Hermes ${{ matrix.hermes_ref }}
         env:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
           HERMES_UPSTREAM_REF: ${{ matrix.hermes_ref }}
-        run: uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
+        run: env -u PYTHONPATH .owner-venv/bin/python -I -m pytest tests/test_external_plugin_contract.py -q

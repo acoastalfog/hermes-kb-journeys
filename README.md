@@ -12,6 +12,8 @@ Hermes KB journey.
 
 - `kb-engine` owns durable KB semantics, preview leases, confirmed envelopes,
   receipts, provenance, restore/undo, and stale handling.
+- `kb-source-access` owns live provider search/gather dispatch, opaque refs,
+  connector isolation, and private-spool custody.
 - Hermes owns Telegram/runtime rendering over backend packets.
 - NOC owns production placement, install refs, route validation, canaries, and
   rollback.
@@ -49,13 +51,28 @@ and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
 The committed export is pinned to kb-engine 0.45.61 at revision
-`e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526`, which owns the exact
+`f4c714528858ec35230bab09a21f016926bf62c2`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
 read-only `KB_ENGINE_DEPLOY_KEY` Actions secret and disables persisted Git
 credentials. A missing secret or unreachable revision fails the workflow;
 local test results do not count as a green GitHub workflow.
+
+The Phase F consumer seam pins two once-built artifacts from that same source
+revision:
+
+- `kb_engine-0.45.61-py3-none-any.whl` —
+  `9489c454c5ecdddc418d90cd4f0703f95a5b25f6b1fdfac095dc72167b9dbbea`
+- `kb_source_access-0.45.61-py3-none-any.whl` —
+  `3c0c4ee1fa94ca76fbdb45f2b44cc2e0d016efcb840f5adce22df51fb52dfcb3`
+
+The machine-readable pins live in `.github/candidate-artifacts/`. Candidate CI
+builds both distributions from the exact Git commit, installs both wheels into
+an isolated interpreter, and rejects sibling-checkout imports. Runtime Source
+Access search also requires the NOC-placed configuration directory through
+`HERMES_KB_SOURCE_CONFIG_ROOT`; missing installed owners or placement fails
+closed with remediation and does not restore local provider dispatch.
 
 ## User contract
 
@@ -265,6 +282,35 @@ publication session while a later Hermes session completes recovery cleanup.
 Neither binding exposes a raw session ID, and a model argument can neither
 invent nor override the execution binding.
 
+Version 0.11.0 makes those installed packages authoritative for the integration
+transport. A v2 Source Access transport descriptor is passed unchanged to
+`kb.sync.resume`; kb-engine validates its recipe/session binding and packet,
+then kb-source-access performs connector-owned cleanup only after accepted or
+terminal non-retryable handoff. The released v1 descriptor and bare-path branch
+remain isolated compatibility paths for the rollback window.
+
+Semantic review requests now return the `kb.sync.status` packet intact. Hermes
+may reduce only the selected-ref prefix to satisfy its response budget; it no
+longer removes engine fields or normalizes duplicate source fields. The old
+offset pager remains a named v1 compatibility path for individually oversized
+packets until engine/consumer soak permits retirement.
+
+Daily Integration now follows the engine's durable closeout state machine.
+Hermes routes the protected calendar executor, asks the installed calendar
+contract to prepare/validate/aggregate the result, records that aggregate with
+`kb.sync.resume` as `kb.integration.effect_results`, routes governed Git
+publication, records its exact readback as
+`kb.integration.publication_result`, and renders only the resulting
+`kb.integration.final_receipt` plus final summary. Runtime-session attestation
+and connector recovery acknowledgement remain Hermes delivery concerns. Exact
+terminal replay performs no calendar effect or Git publication again.
+
+The `context_search` operation now calls the installed Source Access facade for
+Calendar, mail, Slack, meeting artifacts, and the declared TripIt capability.
+Hermes only aggregates opaque refs and bounded connector summaries. A source
+that does not advertise search (currently TripIt) returns its typed degraded
+status instead of falling back to `kb-sync-gather` or a provider CLI.
+
 Before these plans are authored, an unbound TripIt anchor group is merged into
 the unique existing bound Event when the provider source ID matches exactly and
 the anchor date window is contained. That case must never mint a synthetic Event
@@ -277,5 +323,11 @@ Set `HERMES_AGENT_REPO` to either a Hermes Agent v2026.6.19 checkout or a
 current-upstream checkout:
 
 ```bash
-uv run --with pytest --with pyyaml pytest tests/test_external_plugin_contract.py -q
+python -m venv .owner-venv
+.owner-venv/bin/pip install \
+  /path/to/kb_engine-0.45.61-py3-none-any.whl \
+  /path/to/kb_source_access-0.45.61-py3-none-any.whl \
+  pytest pyyaml
+env -u PYTHONPATH .owner-venv/bin/python -I -m pytest \
+  tests/test_external_plugin_contract.py -q
 ```

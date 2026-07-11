@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:341f674f7c16e743a8390895bc4a9f988ae7b725a4aa66aa23d1abbe02b6b966",
+      "input_schema_digest": "sha256:fbdd1b64c4469a4630911dd64fa3a494a2ddc790fcc3ed87843870d0eb497428",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -26,8 +26,8 @@
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:b5af6dd76c9648d547c796c88f899d44e8c8f17d6c59cc40f9be90e05940d16b",
-  "engine_source_revision": "e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526",
+  "digest": "sha256:fc52df0ad12e2f743045f4dbfa3e647218abc007aff2db13067c154b519db4ad",
+  "engine_source_revision": "f4c714528858ec35230bab09a21f016926bf62c2",
   "engine_version": "0.45.61",
   "journeys": [
     {
@@ -83,7 +83,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:2555113fc5040a6651c1591d98e1033d020b0c16280e49b702ec6578a388729e",
+  "source_export_digest": "sha256:0d700b36bf50814217145cb44e06b5ae60e82c175a7824c30c453938598d7cad",
   "tools": [
     {
       "annotations": {
@@ -254,6 +254,32 @@
                     "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
                   },
+                  "authority": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "operation_catalog_version": {
+                        "const": 3
+                      },
+                      "profile_version": {
+                        "const": 5
+                      },
+                      "schema_digest": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "workspace_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "workspace_id",
+                      "schema_digest",
+                      "profile_version",
+                      "operation_catalog_version"
+                    ],
+                    "type": "object"
+                  },
                   "changed_paths": {
                     "items": {
                       "type": "string"
@@ -268,6 +294,11 @@
                           "pattern": "^[0-9a-f]{64}$",
                           "type": "string"
                         },
+                        "after_mode": {
+                          "maximum": 4095,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
                         "after_text": {
                           "type": "string"
                         },
@@ -277,8 +308,20 @@
                         "before_exists": {
                           "type": "boolean"
                         },
+                        "before_mode": {
+                          "maximum": 4095,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
                         "diff": {
                           "type": "string"
+                        },
+                        "operation": {
+                          "enum": [
+                            "create",
+                            "replace",
+                            "delete"
+                          ]
                         },
                         "path": {
                           "type": "string"
@@ -621,6 +664,285 @@
                             "arguments": {
                               "additionalProperties": false,
                               "properties": {
+                                "aliases": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 128,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "attributes": {
+                                  "type": "object"
+                                },
+                                "entity_path": {
+                                  "maxLength": 1024,
+                                  "minLength": 3,
+                                  "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "maxLength": 256,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "provenance_refs": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 4096,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "status": {
+                                  "maxLength": 128,
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "entity_path",
+                                "name"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "entity.create"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "description": {
+                                  "maxLength": 1024,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "entity_path": {
+                                  "maxLength": 1024,
+                                  "minLength": 3,
+                                  "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "maxLength": 4096,
+                                  "minLength": 4,
+                                  "pattern": "^[^\\r\\n]+://[^\\r\\n]+$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "entity_path",
+                                "url"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "entity.link"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "contact_date": {
+                                  "description": "Optional YYYY-MM-DD date to use as the entity contact date.",
+                                  "type": "string"
+                                },
+                                "entity_path": {
+                                  "description": "Canonical entity path whose log should receive the entry.",
+                                  "type": "string"
+                                },
+                                "source": {
+                                  "description": "Optional source surface such as telegram, codex, or hermes.",
+                                  "type": "string"
+                                },
+                                "source_ref": {
+                                  "description": "Optional source reference id or URL.",
+                                  "type": "string"
+                                },
+                                "text": {
+                                  "description": "Complete Markdown log entry to prepend to the entity log.md.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "entity_path",
+                                "text"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "entity.log.append"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "confidence": {
+                                  "maximum": 1,
+                                  "minimum": 0,
+                                  "type": "number"
+                                },
+                                "evidence_refs": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 4096,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "kind": {
+                                  "maxLength": 128,
+                                  "minLength": 1,
+                                  "pattern": "^[a-z][a-z0-9_]*$",
+                                  "type": "string"
+                                },
+                                "lifecycle_state": {
+                                  "maxLength": 128,
+                                  "minLength": 1,
+                                  "pattern": "^[a-z][a-z0-9_]*$",
+                                  "type": "string"
+                                },
+                                "provenance_refs": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 4096,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "source_ref": {
+                                  "maxLength": 1024,
+                                  "minLength": 3,
+                                  "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                                  "type": "string"
+                                },
+                                "target_ref": {
+                                  "maxLength": 1024,
+                                  "minLength": 3,
+                                  "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "source_ref",
+                                "target_ref",
+                                "kind"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "entity.relationship.upsert"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "aliases": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 128,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "attributes": {
+                                  "type": "object"
+                                },
+                                "entity_path": {
+                                  "maxLength": 1024,
+                                  "minLength": 3,
+                                  "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "maxLength": 256,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "provenance_refs": {
+                                  "items": {
+                                    "maxLength": 2048,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 4096,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                "status": {
+                                  "maxLength": 128,
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "entity_path"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "entity.update"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
                                 "captured_at": {
                                   "format": "date-time",
                                   "type": "string"
@@ -652,6 +974,142 @@
                             },
                             "operation_id": {
                               "const": "meeting.synthesis.reconcile"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "identity": {
+                                  "additionalProperties": false,
+                                  "minProperties": 1,
+                                  "properties": {
+                                    "actor_aliases": {
+                                      "anyOf": [
+                                        {
+                                          "items": {
+                                            "maxLength": 128,
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "maxItems": 128,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "email": {
+                                      "anyOf": [
+                                        {
+                                          "maxLength": 320,
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "name": {
+                                      "anyOf": [
+                                        {
+                                          "maxLength": 320,
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "role": {
+                                      "anyOf": [
+                                        {
+                                          "maxLength": 320,
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "timezone": {
+                                      "anyOf": [
+                                        {
+                                          "maxLength": 320,
+                                          "minLength": 1,
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "identity"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "profile.update"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "change_kind": {
+                                  "enum": [
+                                    "change",
+                                    "rollback"
+                                  ],
+                                  "type": "string"
+                                },
+                                "schema_text": {
+                                  "maxLength": 262144,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "source": {
+                                  "maxLength": 1024,
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "schema_text",
+                                "change_kind",
+                                "source"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "schema.replace"
                             }
                           },
                           "required": [
@@ -2245,6 +2703,104 @@
                             "arguments"
                           ],
                           "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "legacy_profile_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "target_schema_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "target_workspace_id": {
+                                  "format": "uuid",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "target_workspace_id",
+                                "target_schema_digest",
+                                "legacy_profile_digest"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "profile_schema.adopt"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "expected_graph_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "loss_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "loss_digest",
+                                "expected_graph_digest"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "relationships.migrate_v2"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "pack_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                },
+                                "request_digest": {
+                                  "pattern": "^[0-9a-f]{64}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "request_digest",
+                                "pack_digest"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "type.pack.install"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
                         }
                       ]
                     },
@@ -2254,7 +2810,10 @@
                     "type": "string"
                   },
                   "schema_version": {
-                    "const": 1
+                    "enum": [
+                      1,
+                      2
+                    ]
                   },
                   "status": {
                     "const": "preview_ready"
@@ -2347,7 +2906,10 @@
                 "type": "string"
               },
               "schema_version": {
-                "const": 1
+                "enum": [
+                  1,
+                  2
+                ]
               },
               "scope": {
                 "items": {
@@ -2383,7 +2945,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:341f674f7c16e743a8390895bc4a9f988ae7b725a4aa66aa23d1abbe02b6b966",
+      "input_schema_digest": "sha256:fbdd1b64c4469a4630911dd64fa3a494a2ddc790fcc3ed87843870d0eb497428",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -2933,6 +3495,285 @@
                     "arguments": {
                       "additionalProperties": false,
                       "properties": {
+                        "aliases": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 128,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "attributes": {
+                          "type": "object"
+                        },
+                        "entity_path": {
+                          "maxLength": 1024,
+                          "minLength": 3,
+                          "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                          "type": "string"
+                        },
+                        "name": {
+                          "maxLength": 256,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "provenance_refs": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4096,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "status": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "entity_path",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "entity.create"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "description": {
+                          "maxLength": 1024,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "entity_path": {
+                          "maxLength": 1024,
+                          "minLength": 3,
+                          "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                          "type": "string"
+                        },
+                        "url": {
+                          "maxLength": 4096,
+                          "minLength": 4,
+                          "pattern": "^[^\\r\\n]+://[^\\r\\n]+$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "entity_path",
+                        "url"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "entity.link"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "contact_date": {
+                          "description": "Optional YYYY-MM-DD date to use as the entity contact date.",
+                          "type": "string"
+                        },
+                        "entity_path": {
+                          "description": "Canonical entity path whose log should receive the entry.",
+                          "type": "string"
+                        },
+                        "source": {
+                          "description": "Optional source surface such as telegram, codex, or hermes.",
+                          "type": "string"
+                        },
+                        "source_ref": {
+                          "description": "Optional source reference id or URL.",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "Complete Markdown log entry to prepend to the entity log.md.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "entity_path",
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "entity.log.append"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "confidence": {
+                          "maximum": 1,
+                          "minimum": 0,
+                          "type": "number"
+                        },
+                        "evidence_refs": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4096,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "kind": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9_]*$",
+                          "type": "string"
+                        },
+                        "lifecycle_state": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "pattern": "^[a-z][a-z0-9_]*$",
+                          "type": "string"
+                        },
+                        "provenance_refs": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4096,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "source_ref": {
+                          "maxLength": 1024,
+                          "minLength": 3,
+                          "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                          "type": "string"
+                        },
+                        "target_ref": {
+                          "maxLength": 1024,
+                          "minLength": 3,
+                          "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source_ref",
+                        "target_ref",
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "entity.relationship.upsert"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "aliases": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 128,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "attributes": {
+                          "type": "object"
+                        },
+                        "entity_path": {
+                          "maxLength": 1024,
+                          "minLength": 3,
+                          "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                          "type": "string"
+                        },
+                        "name": {
+                          "maxLength": 256,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "provenance_refs": {
+                          "items": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4096,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "status": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "entity_path"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "entity.update"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
                         "captured_at": {
                           "format": "date-time",
                           "type": "string"
@@ -2964,6 +3805,142 @@
                     },
                     "operation_id": {
                       "const": "meeting.synthesis.reconcile"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "identity": {
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "actor_aliases": {
+                              "anyOf": [
+                                {
+                                  "items": {
+                                    "maxLength": 128,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "maxItems": 128,
+                                  "type": "array",
+                                  "uniqueItems": true
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "email": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 320,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "name": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 320,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "role": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 320,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "timezone": {
+                              "anyOf": [
+                                {
+                                  "maxLength": 320,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "identity"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "profile.update"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "change_kind": {
+                          "enum": [
+                            "change",
+                            "rollback"
+                          ],
+                          "type": "string"
+                        },
+                        "schema_text": {
+                          "maxLength": 262144,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "source": {
+                          "maxLength": 1024,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_text",
+                        "change_kind",
+                        "source"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "schema.replace"
                     }
                   },
                   "required": [
@@ -4596,7 +5573,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:3f8dfb0135f9857ae89a27ec9e9baea669c5f4f0c7205737d3948ef37534a051",
+      "input_schema_digest": "sha256:4578c78a95b20ab3e2d5c8be06f79221c82891c92af8a8062dc4ebb70da96777",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -4607,6 +5584,32 @@
               "artifact_digest": {
                 "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
+              },
+              "authority": {
+                "additionalProperties": false,
+                "properties": {
+                  "operation_catalog_version": {
+                    "const": 3
+                  },
+                  "profile_version": {
+                    "const": 5
+                  },
+                  "schema_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "workspace_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace_id",
+                  "schema_digest",
+                  "profile_version",
+                  "operation_catalog_version"
+                ],
+                "type": "object"
               },
               "changed_paths": {
                 "items": {
@@ -4622,6 +5625,11 @@
                       "pattern": "^[0-9a-f]{64}$",
                       "type": "string"
                     },
+                    "after_mode": {
+                      "maximum": 4095,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
                     "after_text": {
                       "type": "string"
                     },
@@ -4631,8 +5639,20 @@
                     "before_exists": {
                       "type": "boolean"
                     },
+                    "before_mode": {
+                      "maximum": 4095,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
                     "diff": {
                       "type": "string"
+                    },
+                    "operation": {
+                      "enum": [
+                        "create",
+                        "replace",
+                        "delete"
+                      ]
                     },
                     "path": {
                       "type": "string"
@@ -4975,6 +5995,285 @@
                         "arguments": {
                           "additionalProperties": false,
                           "properties": {
+                            "aliases": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 128,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "attributes": {
+                              "type": "object"
+                            },
+                            "entity_path": {
+                              "maxLength": 1024,
+                              "minLength": 3,
+                              "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                              "type": "string"
+                            },
+                            "name": {
+                              "maxLength": 256,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "provenance_refs": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 4096,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "status": {
+                              "maxLength": 128,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "entity_path",
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "entity.create"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "description": {
+                              "maxLength": 1024,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "entity_path": {
+                              "maxLength": 1024,
+                              "minLength": 3,
+                              "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                              "type": "string"
+                            },
+                            "url": {
+                              "maxLength": 4096,
+                              "minLength": 4,
+                              "pattern": "^[^\\r\\n]+://[^\\r\\n]+$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "entity_path",
+                            "url"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "entity.link"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "contact_date": {
+                              "description": "Optional YYYY-MM-DD date to use as the entity contact date.",
+                              "type": "string"
+                            },
+                            "entity_path": {
+                              "description": "Canonical entity path whose log should receive the entry.",
+                              "type": "string"
+                            },
+                            "source": {
+                              "description": "Optional source surface such as telegram, codex, or hermes.",
+                              "type": "string"
+                            },
+                            "source_ref": {
+                              "description": "Optional source reference id or URL.",
+                              "type": "string"
+                            },
+                            "text": {
+                              "description": "Complete Markdown log entry to prepend to the entity log.md.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "entity_path",
+                            "text"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "entity.log.append"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "confidence": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "evidence_refs": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 4096,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "kind": {
+                              "maxLength": 128,
+                              "minLength": 1,
+                              "pattern": "^[a-z][a-z0-9_]*$",
+                              "type": "string"
+                            },
+                            "lifecycle_state": {
+                              "maxLength": 128,
+                              "minLength": 1,
+                              "pattern": "^[a-z][a-z0-9_]*$",
+                              "type": "string"
+                            },
+                            "provenance_refs": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 4096,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "source_ref": {
+                              "maxLength": 1024,
+                              "minLength": 3,
+                              "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                              "type": "string"
+                            },
+                            "target_ref": {
+                              "maxLength": 1024,
+                              "minLength": 3,
+                              "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "source_ref",
+                            "target_ref",
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "entity.relationship.upsert"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "aliases": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 128,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "attributes": {
+                              "type": "object"
+                            },
+                            "entity_path": {
+                              "maxLength": 1024,
+                              "minLength": 3,
+                              "pattern": "^[a-z][a-z0-9_-]*/[a-z0-9][a-z0-9/-]*$",
+                              "type": "string"
+                            },
+                            "name": {
+                              "maxLength": 256,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "provenance_refs": {
+                              "items": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 4096,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "status": {
+                              "maxLength": 128,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "entity_path"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "entity.update"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
                             "captured_at": {
                               "format": "date-time",
                               "type": "string"
@@ -5006,6 +6305,142 @@
                         },
                         "operation_id": {
                           "const": "meeting.synthesis.reconcile"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "identity": {
+                              "additionalProperties": false,
+                              "minProperties": 1,
+                              "properties": {
+                                "actor_aliases": {
+                                  "anyOf": [
+                                    {
+                                      "items": {
+                                        "maxLength": 128,
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "maxItems": 128,
+                                      "type": "array",
+                                      "uniqueItems": true
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "email": {
+                                  "anyOf": [
+                                    {
+                                      "maxLength": 320,
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "name": {
+                                  "anyOf": [
+                                    {
+                                      "maxLength": 320,
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "role": {
+                                  "anyOf": [
+                                    {
+                                      "maxLength": 320,
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "timezone": {
+                                  "anyOf": [
+                                    {
+                                      "maxLength": 320,
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                }
+                              },
+                              "required": [],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "identity"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "profile.update"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "change_kind": {
+                              "enum": [
+                                "change",
+                                "rollback"
+                              ],
+                              "type": "string"
+                            },
+                            "schema_text": {
+                              "maxLength": 262144,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "source": {
+                              "maxLength": 1024,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "schema_text",
+                            "change_kind",
+                            "source"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "schema.replace"
                         }
                       },
                       "required": [
@@ -6599,6 +8034,104 @@
                         "arguments"
                       ],
                       "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "legacy_profile_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "target_schema_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "target_workspace_id": {
+                              "format": "uuid",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "target_workspace_id",
+                            "target_schema_digest",
+                            "legacy_profile_digest"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "profile_schema.adopt"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "expected_graph_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "loss_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "loss_digest",
+                            "expected_graph_digest"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "relationships.migrate_v2"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "pack_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "request_digest": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "request_digest",
+                            "pack_digest"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "type.pack.install"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
                     }
                   ]
                 },
@@ -6608,7 +8141,10 @@
                 "type": "string"
               },
               "schema_version": {
-                "const": 1
+                "enum": [
+                  1,
+                  2
+                ]
               },
               "status": {
                 "const": "preview_ready"
@@ -6701,7 +8237,10 @@
             "type": "string"
           },
           "schema_version": {
-            "const": 1
+            "enum": [
+              1,
+              2
+            ]
           },
           "scope": {
             "items": {
@@ -6731,7 +8270,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:0422ede814228b5127cfd93dd6c170e25bb16c7d4c870e4804a92bcb47c6142d",
+      "output_schema_digest": "sha256:cce46343cff5bd8a681552cb07ad0c5924eb80f50397f5a9254f8686d15e1564",
       "title": "Preview Exact KB Changes"
     },
     {
@@ -7048,12 +8587,12 @@
         },
         "readOnlyHint": true
       },
-      "description": "Return a harness-neutral durable object packet with identity, object-family facets, kind contract, editable surfaces, object-local guidance, allowed operations, current state, and provenance hints.",
+      "description": "Return a harness-neutral durable object packet with identity, object-family facets, kind contract, editable surfaces, object-local guidance, allowed operations, current state, canonical engine-owned object contract, and provenance hints.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "include_instruction_layers": {
-            "description": "Opt in to serve the RAW, UNMERGED INSTRUCTIONS.md layer files for the object (entity + immediate type level) under object_guidance.instruction_layers. Default off; no-op for file-backed objects. The engine never merges or reasons across layers.",
+            "description": "Opt in to the compatibility RAW instruction layers under object_guidance.instruction_layers. The canonical deterministic merge is always available under object_contract.",
             "type": "boolean"
           },
           "object_path": {
@@ -7070,7 +8609,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:5c6f262bf8afcaa9ad4df9754e23f4a8c4c8c3515a3a52ebf95d1299469b9631",
+      "input_schema_digest": "sha256:974f68d4f0ec915e7c568ddc46ef3481aec986e7c20876b661ee1b8f2c570795",
       "name": "object.context",
       "output_schema": {
         "additionalProperties": true,

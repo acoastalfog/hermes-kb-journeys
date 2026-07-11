@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "distribution": "kb-source-access",
+  "source_repository": "acoastalfog/kb-engine",
+  "source_commit": "f4c714528858ec35230bab09a21f016926bf62c2",
+  "version": "0.45.61",
+  "wheel_filename": "kb_source_access-0.45.61-py3-none-any.whl",
+  "wheel_sha256": "3c0c4ee1fa94ca76fbdb45f2b44cc2e0d016efcb840f5adce22df51fb52dfcb3",
+  "core_distribution": "kb-engine",
+  "core_wheel_sha256": "9489c454c5ecdddc418d90cd4f0703f95a5b25f6b1fdfac095dc72167b9dbbea",
+  "catalog_contract_version": "source_access.v2",
+  "source_count": 9
+}

@@ -1,5 +1,5 @@
 name: kb_journeys
-version: 0.10.8
+version: 0.11.0
 description: "Compact Hermes KB journeys backed by generated kb-engine contracts."
 author: "Hermes Agent"
 provides_hooks:
@@ -63,3 +63,5 @@ migrations:
     hard_break: "Daily Integration carries one strict batch-wide terminal calendar observation through publication and reports pre-execution versus final owned counts without repeating Graph effects on acknowledged replay"
   - version: 0.10.8
     hard_break: "Daily Integration binds publication provenance to the Hermes runtime dispatch session and emits only its digest attestation; the model no longer supplies session_id"
+  - version: 0.11.0
+    hard_break: "Hermes delegates v2 packet validation, semantic packet shape, terminal policy, calendar aggregation, connector search, effect recording, publication recording, and final closeout truth to the exact installed kb-engine and kb-source-access owners; v1 paths remain compatibility-only"
