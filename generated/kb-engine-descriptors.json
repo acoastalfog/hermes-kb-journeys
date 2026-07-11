@@ -1,7 +1,7 @@
 {
   "actions": [
     {
-      "input_schema_digest": "sha256:fbdd1b64c4469a4630911dd64fa3a494a2ddc790fcc3ed87843870d0eb497428",
+      "input_schema_digest": "sha256:8d49d3163667738fa761c63762a1c025d55eb2e4514162d118cbdaeec16e4340",
       "name": "change.apply",
       "output_schema_digest": "sha256:5c38a46e6c80df2b2368aca7efdba9ffc56e94ebcd28d39b14f6431d73c0a0dc"
     },
@@ -26,8 +26,8 @@
       "output_schema_digest": "sha256:f6da8c63414373041a1dee76f657cfb9a903f5da7efea83e91c3b91f18370b1e"
     }
   ],
-  "digest": "sha256:52eab2425566ce86229bec723f8bdcfe80d7deab32a676f1fb2c805f62b4068f",
-  "engine_source_revision": "d9e8a4db080a47996ac96aaa577e6c0c5e501931",
+  "digest": "sha256:40e95ad964dbf7e93cf8cd143f8794c92732640987ae240d72fd676ea00a25eb",
+  "engine_source_revision": "cf0629fd78b3c82d4d3d561e7687ac54d8d6fffa",
   "engine_version": "0.45.61",
   "journeys": [
     {
@@ -83,7 +83,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:0d700b36bf50814217145cb44e06b5ae60e82c175a7824c30c453938598d7cad",
+  "source_export_digest": "sha256:c7fde5c6430ef4828f23c0335edd3db7bdc313051346bae477be03220c1eb654",
   "tools": [
     {
       "annotations": {
@@ -258,7 +258,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "operation_catalog_version": {
-                        "const": 3
+                        "const": 4
                       },
                       "profile_version": {
                         "const": 5
@@ -650,6 +650,58 @@
                             },
                             "operation_id": {
                               "const": "calendar.publication_ledger.reconcile"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "arguments"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "arguments": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "operation": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "source_kind": {
+                                      "maxLength": 256,
+                                      "type": "string"
+                                    },
+                                    "source_link": {
+                                      "maxLength": 4096,
+                                      "type": "string"
+                                    },
+                                    "source_timestamp": {
+                                      "maxLength": 128,
+                                      "type": "string"
+                                    },
+                                    "text": {
+                                      "maxLength": 16384,
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "type": {
+                                      "const": "scratchpad_append"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "text"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "operation"
+                              ],
+                              "type": "object"
+                            },
+                            "operation_id": {
+                              "const": "capture.execute"
                             }
                           },
                           "required": [
@@ -2945,7 +2997,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:fbdd1b64c4469a4630911dd64fa3a494a2ddc790fcc3ed87843870d0eb497428",
+      "input_schema_digest": "sha256:8d49d3163667738fa761c63762a1c025d55eb2e4514162d118cbdaeec16e4340",
       "name": "change.apply",
       "output_schema": {
         "additionalProperties": true,
@@ -3481,6 +3533,58 @@
                     },
                     "operation_id": {
                       "const": "calendar.publication_ledger.reconcile"
+                    }
+                  },
+                  "required": [
+                    "operation_id",
+                    "arguments"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arguments": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "operation": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "source_kind": {
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "source_link": {
+                              "maxLength": 4096,
+                              "type": "string"
+                            },
+                            "source_timestamp": {
+                              "maxLength": 128,
+                              "type": "string"
+                            },
+                            "text": {
+                              "maxLength": 16384,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "type": {
+                              "const": "scratchpad_append"
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "text"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "operation"
+                      ],
+                      "type": "object"
+                    },
+                    "operation_id": {
+                      "const": "capture.execute"
                     }
                   },
                   "required": [
@@ -5573,7 +5677,7 @@
         ],
         "type": "object"
       },
-      "input_schema_digest": "sha256:4578c78a95b20ab3e2d5c8be06f79221c82891c92af8a8062dc4ebb70da96777",
+      "input_schema_digest": "sha256:2571e72dab356fd35e887c19e79d3cf1f87c0e596fe3f52568d3cf806f3d421d",
       "name": "change.preview",
       "output_schema": {
         "additionalProperties": true,
@@ -5589,7 +5693,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "operation_catalog_version": {
-                    "const": 3
+                    "const": 4
                   },
                   "profile_version": {
                     "const": 5
@@ -5981,6 +6085,58 @@
                         },
                         "operation_id": {
                           "const": "calendar.publication_ledger.reconcile"
+                        }
+                      },
+                      "required": [
+                        "operation_id",
+                        "arguments"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "arguments": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "operation": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "source_kind": {
+                                  "maxLength": 256,
+                                  "type": "string"
+                                },
+                                "source_link": {
+                                  "maxLength": 4096,
+                                  "type": "string"
+                                },
+                                "source_timestamp": {
+                                  "maxLength": 128,
+                                  "type": "string"
+                                },
+                                "text": {
+                                  "maxLength": 16384,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "const": "scratchpad_append"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "text"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "operation"
+                          ],
+                          "type": "object"
+                        },
+                        "operation_id": {
+                          "const": "capture.execute"
                         }
                       },
                       "required": [
@@ -8270,7 +8426,7 @@
         ],
         "type": "object"
       },
-      "output_schema_digest": "sha256:cce46343cff5bd8a681552cb07ad0c5924eb80f50397f5a9254f8686d15e1564",
+      "output_schema_digest": "sha256:06bea328a3b1524ccd8f489c157a3b24a2ab1a2b3e1fa395cbc6ec6dc6601cb8",
       "title": "Preview Exact KB Changes"
     },
     {
