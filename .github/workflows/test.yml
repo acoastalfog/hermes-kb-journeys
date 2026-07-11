@@ -11,7 +11,7 @@ permissions:
 jobs:
   engine-candidate-contract:
     env:
-      KB_ENGINE_CANDIDATE_REF: 6fb8bf61a11cdf65eb87e4d0de24e76adcaa99b4
+      KB_ENGINE_CANDIDATE_REF: 28caa373f17e2be5a75016862b5119dbf6faca3c
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,7 @@ jobs:
 
   contract:
     env:
-      KB_ENGINE_DESCRIPTOR_REF: 6fb8bf61a11cdf65eb87e4d0de24e76adcaa99b4
+      KB_ENGINE_DESCRIPTOR_REF: 28caa373f17e2be5a75016862b5119dbf6faca3c
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
