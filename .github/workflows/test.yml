@@ -88,6 +88,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
+      - name: Install descriptor export dependencies
+        run: python -m pip install jsonschema pyyaml
       - name: Verify generated descriptors
         env:
           KB_ENGINE_SOURCE: ${{ github.workspace }}/kb-engine
