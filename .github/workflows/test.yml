@@ -9,6 +9,44 @@ permissions:
   contents: read
 
 jobs:
+  engine-candidate-contract:
+    env:
+      KB_ENGINE_CANDIDATE_REF: f8e43fa7409a2a06a8318e99020a400b08c1f5a4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact kb-engine candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: acoastalfog/kb-engine
+          ref: ${{ env.KB_ENGINE_CANDIDATE_REF }}
+          path: kb-engine-candidate
+          ssh-key: ${{ secrets.KB_ENGINE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: Build source-bound candidate artifact
+        run: |
+          uv run --with build --with twine python \
+            kb-engine-candidate/scripts/build_release_artifacts.py \
+            --repo kb-engine-candidate \
+            --ref "$KB_ENGINE_CANDIDATE_REF" \
+            --output kb-engine-candidate-artifacts
+      - name: Validate installed candidate goldens
+        env:
+          KB_ENGINE_CANDIDATE_REQUIRED: "1"
+          KB_ENGINE_CANDIDATE_SOURCE_COMMIT: ${{ env.KB_ENGINE_CANDIDATE_REF }}
+          KB_ENGINE_CANDIDATE_SOURCE_CHECKOUT: ${{ github.workspace }}/kb-engine-candidate
+        run: |
+          WHEEL="$GITHUB_WORKSPACE/kb-engine-candidate-artifacts/kb_engine-0.45.61-py3-none-any.whl"
+          export KB_ENGINE_CANDIDATE_WHEEL="$WHEEL"
+          uv venv .candidate-venv --python 3.12
+          uv pip install --python .candidate-venv/bin/python "$WHEEL" pytest pyyaml
+          env -u PYTHONPATH .candidate-venv/bin/python -I -m pytest \
+            tests/test_external_plugin_contract.py -q -k installed_candidate
+
   contract:
     env:
       KB_ENGINE_DESCRIPTOR_REF: e44bfbb17ffe21d6f0f4d7cc51306236f8ce6526

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tomllib
 import json
+import importlib.metadata
 import importlib.util
 from copy import deepcopy
 from pathlib import Path
@@ -19,6 +20,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HERMES_REPO = Path("/Users/acosta/Knowledge/hermes-agent")
+CANDIDATE_PIN = ROOT / ".github" / "candidate-artifacts" / "kb-engine.json"
+
+
+def _candidate_pin() -> dict:
+    return json.loads(CANDIDATE_PIN.read_text(encoding="utf-8"))
 
 
 def _hermes_repo() -> Path:
@@ -4888,6 +4894,126 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     assert checkout["persist-credentials"] is False
     assert "https://github.com/acoastalfog/kb-engine.git" not in workflow_text
     assert "git -C kb-engine fetch" not in workflow_text
+
+    candidate_job = workflow["jobs"]["engine-candidate-contract"]
+    assert (
+        candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
+        == "f8e43fa7409a2a06a8318e99020a400b08c1f5a4"
+    )
+    candidate_checkouts = [
+        step
+        for step in candidate_job["steps"]
+        if step.get("uses") == "actions/checkout@v4"
+        and step.get("with", {}).get("repository") == "acoastalfog/kb-engine"
+    ]
+    assert len(candidate_checkouts) == 1
+    candidate_checkout = candidate_checkouts[0]["with"]
+    assert candidate_checkout["ref"] == "${{ env.KB_ENGINE_CANDIDATE_REF }}"
+    assert candidate_checkout["path"] == "kb-engine-candidate"
+    assert candidate_checkout["ssh-key"] == "${{ secrets.KB_ENGINE_DEPLOY_KEY }}"
+    assert candidate_checkout["persist-credentials"] is False
+    candidate_commands = "\n".join(
+        str(step.get("run") or "") for step in candidate_job["steps"]
+    )
+    assert "build_release_artifacts.py" in candidate_commands
+    assert "-I -m pytest" in candidate_commands
+
+
+@pytest.mark.skipif(
+    os.environ.get("KB_ENGINE_CANDIDATE_REQUIRED") != "1",
+    reason="exact candidate wheel is validated by the candidate artifact job",
+)
+def test_installed_candidate_wheel_is_exact_and_sibling_free():
+    pin = _candidate_pin()
+    assert "PYTHONPATH" not in os.environ
+    assert os.environ.get("KB_ENGINE_CANDIDATE_SOURCE_COMMIT") == pin["source_commit"]
+
+    wheel = Path(os.environ["KB_ENGINE_CANDIDATE_WHEEL"]).resolve()
+    assert wheel.name == pin["wheel_filename"]
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == pin["wheel_sha256"]
+
+    import kb_engine  # noqa: PLC0415
+    from kb_engine.api import contract_fixtures  # noqa: PLC0415
+
+    distribution = importlib.metadata.distribution(pin["distribution"])
+    installed_root = Path(distribution.locate_file("")).resolve()
+    engine_file = Path(kb_engine.__file__).resolve()
+    assert distribution.version == pin["version"]
+    assert engine_file.is_relative_to(installed_root)
+    assert not engine_file.is_relative_to(
+        Path(os.environ["KB_ENGINE_CANDIDATE_SOURCE_CHECKOUT"]).resolve()
+    )
+
+    manifest = contract_fixtures.manifest()
+    assert manifest["kind"] == pin["fixture_manifest_kind"]
+    assert manifest["fixture_count"] == pin["fixture_count"]
+    assert len(manifest["fixtures"]) == pin["fixture_count"]
+    assert all(row["fixture_digest"].startswith("sha256:") for row in manifest["fixtures"])
+
+
+@pytest.mark.skipif(
+    os.environ.get("KB_ENGINE_CANDIDATE_REQUIRED") != "1",
+    reason="exact candidate wheel is validated by the candidate artifact job",
+)
+def test_installed_candidate_goldens_match_hermes_compatibility_reducers(
+    tmp_path, monkeypatch
+):
+    from kb_engine.api import contract_fixtures  # noqa: PLC0415
+
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    terminal = contract_fixtures.load("terminal-eligibility")
+    decisions = {}
+    for case in terminal["input"]["cases"]:
+        packet = deepcopy(case["receipt"])
+        packet["terminal_state"] = case["terminal_state"]
+        if packet.get("status") == "completed_with_degradation":
+            packet.update(
+                {
+                    "source_currency": {"sources": [{"state": "current"}]},
+                    "semantic_accounting": {"complete": True, "remaining_count": 0},
+                    "lifecycle": {"status": "fixed_point"},
+                }
+            )
+        decisions[case["id"]] = plugin._daily_integration_closeout_eligible(packet)
+    assert decisions == terminal["expected"]["decisions"]
+
+    closeout = contract_fixtures.load("closeout-replay")
+    run_id = closeout["input"]["run_id"]
+    envelopes = [
+        {"plan_digest": f"sha256:{index:064x}"}
+        for index, _entity in enumerate(closeout["input"]["entities"], start=1)
+    ]
+    children = [
+        {
+            "counts": counts,
+            "receipt_digest": f"sha256:{index + 10:064x}",
+            "source_reads": {"tripit_complete": True, "calendar_complete": True},
+        }
+        for index, counts in enumerate(closeout["input"]["child_counts"], start=1)
+    ]
+    first = plugin._aggregate_calendar_closeouts(
+        children,
+        envelopes=envelopes,
+        run_id=run_id,
+        calendar_observation=closeout["input"]["calendar_observation"],
+    )
+    replay = plugin._aggregate_calendar_closeouts(
+        children,
+        envelopes=envelopes,
+        run_id=run_id,
+        calendar_observation=closeout["input"]["calendar_observation"],
+    )
+    actual = {
+        "status": first["status"],
+        "counts": first["counts"],
+        "child_receipt_count": len(first["child_receipts"]),
+        "calendar_observation_preserved": (
+            first["calendar_observation"]
+            == closeout["input"]["calendar_observation"]
+        ),
+        "exact_replay": first == replay,
+    }
+    assert actual == closeout["expected"]
 
 
 # --- Milestone 3: Hermes-first free-text user contract ---

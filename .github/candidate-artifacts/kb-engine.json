@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "distribution": "kb-engine",
+  "source_repository": "acoastalfog/kb-engine",
+  "source_commit": "f8e43fa7409a2a06a8318e99020a400b08c1f5a4",
+  "version": "0.45.61",
+  "wheel_filename": "kb_engine-0.45.61-py3-none-any.whl",
+  "wheel_sha256": "e5e2db3c556197543dfe1bb68dfee8143a97c9863fb7c89ee51a9fe74bf276f9",
+  "fixture_manifest_kind": "kb.contract_golden_manifest",
+  "fixture_count": 6
+}
