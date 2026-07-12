@@ -93,11 +93,11 @@ COMPLETION_CLOCK_SKEW_SECONDS = 30
 INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
 BOUNDED_INTERACTION_TOOL = "kb_bounded_interaction"
 ENGINE_DISTRIBUTION = "kb-engine"
-ENGINE_VERSION = "0.46.4"
+ENGINE_VERSION = "0.47.0"
 SOURCE_ACCESS_DISTRIBUTION = "kb-source-access"
-SOURCE_ACCESS_VERSION = "0.46.4"
+SOURCE_ACCESS_VERSION = "0.47.0"
 OWNER_INSTALL_REMEDIATION = (
-    "install the exact kb-engine==0.46.4 and kb-source-access==0.46.4 "
+    "install the exact kb-engine==0.47.0 and kb-source-access==0.47.0 "
     "artifacts pinned by hermes-kb-journeys"
 )
 CALENDAR_INTEGRATION_EFFECT_ID = "calendar.publication.reconcile_many"

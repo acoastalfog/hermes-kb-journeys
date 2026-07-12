@@ -4495,8 +4495,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.46.4"
-    assert source["engine_source_revision"] == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
+    assert source["engine_version"] == "0.47.0"
+    assert source["engine_source_revision"] == "27bece2e079b0492837760aa06e36579bfeffd32"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 12
@@ -5269,7 +5269,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
+        == "27bece2e079b0492837760aa06e36579bfeffd32"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -5291,7 +5291,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     candidate_job = workflow["jobs"]["engine-candidate-contract"]
     assert (
         candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
-        == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
+        == "27bece2e079b0492837760aa06e36579bfeffd32"
     )
     candidate_checkouts = [
         step
