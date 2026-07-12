@@ -2535,11 +2535,6 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
         },
         "lifecycle": {"status": "fixed_point"},
     }
-    preview = {
-        "ok": True,
-        "status": "ready",
-        "preview_digest": "sha256:" + "d" * 64,
-    }
     publication = {
         "ok": True,
         "status": "published",
@@ -2548,7 +2543,7 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     }
     ctx = FakePacketTransportContext()
     ctx.dispatch_result = {"result": sync}
-    responses = iter((sync, preview, publication))
+    responses = iter((sync, publication))
 
     def dispatch(tool_name, args):
         ctx.calls.append((tool_name, args))
@@ -2600,11 +2595,10 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
     assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 14
     assert [name for name, _args in ctx.calls] == [
         "mcp_kb_engine_prod_kb_sync_status",
-        "mcp_kb_engine_prod_publication_daily_integration_preview",
-        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "mcp_kb_engine_prod_kb_sync_resume",
     ]
     apply_args = ctx.calls[-1][1]
-    aggregate = apply_args["calendar_receipt"]
+    aggregate = apply_args["response"]["calendar_receipt"]
     assert aggregate["counts"] == closeout["counts"]
     prepared_envelope = dict(envelope)
     prepared_envelope["plan_digest"] = plugin._managed_plan_digest(prepared_envelope)
@@ -2618,9 +2612,9 @@ def test_daily_integration_closeout_composes_calendar_publication_and_brief(
         }
     ]
     assert aggregate["receipt_digest"] == plugin._managed_closeout_digest(aggregate)
-    assert apply_args["session_id"] == "hermes-cron-daily"
+    assert apply_args["response"]["session_id"] == "hermes-cron-daily"
 
-    responses = iter((sync, preview, publication))
+    responses = iter((sync, publication))
     fresh_mismatch = json.loads(
         ctx.registered_tools["kb_integration_transport"]["handler"](
             {
@@ -2799,11 +2793,6 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
         or _noc_batch_ack(plugin, envelopes),
     )
 
-    preview = {
-        "ok": True,
-        "status": "ready",
-        "preview_digest": "sha256:" + "d" * 64,
-    }
     publication_receipt = {
         "ok": True,
         "status": "published",
@@ -2817,10 +2806,6 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
         ctx.calls.append((tool_name, args))
         if tool_name.endswith("kb_sync_status"):
             payload = terminal_packet or initial
-        elif tool_name.endswith("publication_daily_integration_preview"):
-            payload = preview
-        elif tool_name.endswith("publication_daily_integration_apply"):
-            payload = publication_receipt
         elif tool_name.endswith("kb_sync_resume"):
             response = args["response"]
             if response.get("kind") == "kb.integration.effect_results":
@@ -2863,9 +2848,23 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
                         "response_kind": "kb.integration.publication_result",
                     },
                 }
-            else:
+            elif response.get("kind") == "kb.sync.daily_integration_finalize":
+                assert response["calendar_receipt"]["kind"] == (
+                    "managed_calendar_closeout"
+                )
+                publication = {
+                    "schema_version": 1,
+                    "kind": "kb.integration.publication_result",
+                    "run_id": run_id,
+                    "recipe_digest": recipe["digest"],
+                    "status": "published",
+                    "receipt": publication_receipt,
+                    "receipt_digest": plugin._descriptor_digest(
+                        publication_receipt
+                    ),
+                }
                 assert integration_run.validate_publication_result(
-                    response,
+                    publication,
                     run=run_model,
                     recipe=recipe,
                 )["ok"] is True
@@ -2873,7 +2872,7 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
                     run_model,
                     recipe=recipe,
                     completed_stage="publish",
-                    result=response,
+                    result=publication,
                 )
                 final_receipt = integration_run.final_receipt(
                     run_model,
@@ -2889,7 +2888,7 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
                     "degradations": [],
                     "semantic_final_receipt": final_receipt,
                     "external_effects": effect_packet,
-                    "publication": response,
+                    "publication": publication,
                     "source_currency": {"sources": []},
                     "semantic_accounting": {
                         "complete": True,
@@ -2923,8 +2922,6 @@ def test_daily_integration_persists_engine_effect_publication_and_final_receipt(
     assert [name for name, _args in ctx.calls] == [
         "mcp_kb_engine_prod_kb_sync_status",
         "mcp_kb_engine_prod_kb_sync_resume",
-        "mcp_kb_engine_prod_publication_daily_integration_preview",
-        "mcp_kb_engine_prod_publication_daily_integration_apply",
         "mcp_kb_engine_prod_kb_sync_resume",
     ]
 
@@ -3049,14 +3046,13 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
         lambda values: events.append("calendar_ack") or _noc_batch_ack(plugin, values),
     )
     sync = _eligible_daily_sync(run_id)
-    preview = {"ok": True, "status": "ready", "preview_digest": "sha256:" + "d" * 64}
     publication = {
         "ok": True,
         "status": "published",
         "session_id": "hermes-cron-multi",
         "readback": {"ok": True, "clean": True, "ahead": 0},
     }
-    responses = iter((sync, preview, publication))
+    responses = iter((sync, publication))
     ctx = FakePacketTransportContext()
 
     def dispatch(tool_name, args):
@@ -3102,11 +3098,10 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
     assert events == [
         "mcp_kb_engine_prod_kb_sync_status",
         "calendar_batch",
-        "mcp_kb_engine_prod_publication_daily_integration_preview",
-        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "mcp_kb_engine_prod_kb_sync_resume",
         "calendar_ack",
     ]
-    aggregate = ctx.calls[-1][1]["calendar_receipt"]
+    aggregate = ctx.calls[-1][1]["response"]["calendar_receipt"]
     assert aggregate["batch_digest"] == plugin._calendar_batch_digest(envelopes)
     assert aggregate["child_receipts"] == [
         {
@@ -3123,7 +3118,7 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
         **publication,
         "idempotent_replay": True,
     }
-    responses = iter((sync, preview, replay_publication))
+    responses = iter((sync, replay_publication))
     replay = json.loads(
         ctx.registered_tools["kb_integration_transport"]["handler"](
             {
@@ -3152,11 +3147,13 @@ def test_daily_integration_multi_envelope_uses_one_protected_batch_and_one_publi
     assert events == [
         "mcp_kb_engine_prod_kb_sync_status",
         "calendar_batch",
-        "mcp_kb_engine_prod_publication_daily_integration_preview",
-        "mcp_kb_engine_prod_publication_daily_integration_apply",
+        "mcp_kb_engine_prod_kb_sync_resume",
         "calendar_ack",
     ]
-    assert ctx.calls[-1][1]["session_id"] == "hermes-cron-multi-recovery"
+    assert (
+        ctx.calls[-1][1]["response"]["session_id"]
+        == "hermes-cron-multi-recovery"
+    )
     assert "hermes-cron-multi" not in json.dumps(replay)
     assert "hermes-cron-multi-recovery" not in json.dumps(replay)
 
@@ -4499,10 +4496,10 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
     assert source["engine_version"] == "0.46.4"
-    assert source["engine_source_revision"] == "d2e543c25439ad031e20f6afb60329803d90c5c6"
+    assert source["engine_source_revision"] == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
-    assert len(source["tools"]) == 13
+    assert len(source["tools"]) == 12
     serialized = json.dumps(source, sort_keys=True)
     assert "kb_sync.preview" not in serialized
     assert "kb_sync.confirmed" not in serialized
@@ -4513,15 +4510,13 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert {
         "publication.preview_commit",
         "publication.commit_confirmed",
-        "publication.daily_integration_preview",
-        "publication.daily_integration_apply",
     } <= {tool["name"] for tool in source["tools"]}
     assert next(
         row for row in source["journeys"] if row["journey_id"] == "kb_sync"
     )["confirmation_required"] is False
     assert plugin._DESCRIPTOR_BUNDLE == source
     assert plugin._DESCRIPTOR_ERROR == ""
-    assert len(plugin._descriptor_allowlist()) == 13
+    assert len(plugin._descriptor_allowlist()) == 12
 
 
 def test_descriptor_validation_rejects_arbitrary_untyped_leaf(tmp_path, monkeypatch):
@@ -4682,7 +4677,7 @@ def test_descriptor_validation_rejects_smuggled_or_impossible_schema(schema, tmp
 def test_descriptor_validation_rejects_unconstrained_executable_envelope(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     packet = _conforming_descriptor_packet(plugin)
-    workflow = next(tool for tool in packet["tools"] if tool["name"] == "change.apply")
+    workflow = next(tool for tool in packet["tools"] if tool["name"] == "action.confirm")
     workflow["input_schema"]["properties"]["preview"] = {
         "type": "object",
         "additionalProperties": True,
@@ -4857,8 +4852,8 @@ def test_empty_preview_never_enables_confirmation(tmp_path, monkeypatch):
 def test_generated_primary_action_contracts_are_concrete(tmp_path, monkeypatch):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
     for capability in (
-        "change.preview",
-        "change.apply",
+        "action.preview",
+        "action.confirm",
         "kb.sync.prepare",
         "kb.sync.status",
         "kb.sync.resume",
@@ -5274,7 +5269,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "d2e543c25439ad031e20f6afb60329803d90c5c6"
+        == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -5296,7 +5291,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     candidate_job = workflow["jobs"]["engine-candidate-contract"]
     assert (
         candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
-        == "d2e543c25439ad031e20f6afb60329803d90c5c6"
+        == "31e9556dc2fcd1fa0e18b49465cb4ff4b2497b42"
     )
     candidate_checkouts = [
         step
@@ -6362,3 +6357,210 @@ def test_m3_probe_telemetry_rejects_malformed_contract_without_leaking_values(
     finally:
         os.close(read_fd)
         os.close(write_fd)
+
+
+def _bounded_handler(plugin, monkeypatch, tmp_path, results):
+    _install_conforming_descriptor_fixture(plugin, monkeypatch)
+    ctx = _ProbeHookContext(results)
+    plugin._register_bounded_interaction(ctx)
+    return ctx, ctx.registered_tools["kb_bounded_interaction"]["handler"]
+
+
+def test_r3_bounded_interaction_registers_compact_transcript_free_contract(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    ctx, _handler = _bounded_handler(plugin, monkeypatch, tmp_path, {})
+    registered = ctx.registered_tools["kb_bounded_interaction"]
+    parameters = registered["schema"]["parameters"]
+
+    assert set(parameters["properties"]) == {
+        "operation",
+        "request_text",
+        "context_refs",
+        "packet_id",
+        "request_digest",
+        "action_id",
+        "schema_digest",
+        "arguments",
+        "repair_attempt",
+        "preview_id",
+        "preview_digest",
+        "authorization_ref",
+    }
+    assert parameters["additionalProperties"] is False
+    assert parameters["properties"]["request_text"]["maxLength"] == 4000
+    assert parameters["properties"]["context_refs"]["maxItems"] == 3
+    property_names = {name.lower() for name in parameters["properties"]}
+    assert "transcript" not in property_names
+    assert "history" not in property_names
+    assert "model_switch" not in property_names
+    assert len(plugin._descriptor_allowlist()) + len(ctx.registered_tools) <= 14
+
+
+def test_r3_descriptor_validator_accepts_nullable_json_schema_types(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    schema = {"type": ["object", "null"]}
+
+    plugin._validate_schema(schema)
+    assert plugin._runtime_schema_error(None, schema) is None
+    assert plugin._runtime_schema_error({"reason": "bounded"}, schema) is None
+    assert plugin._runtime_schema_error("not-an-object", schema) is not None
+
+
+def test_r3_bounded_interaction_compile_returns_one_engine_packet(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    packet = {
+        "kind": "kb_interaction_packet",
+        "packet_id": "ip-123",
+        "request": {"text": "Update Acme", "digest": "a" * 64},
+        "semantic_question": "Apply the selected update?",
+        "candidates": [{"action_id": "object.update"}],
+        "next_action": {"action_id": "object.update"},
+        "escalation": None,
+    }
+    ctx, handler = _bounded_handler(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {
+            "mcp_kb_engine_prod_request_compile": [
+                {
+                    "status": "ok",
+                    "packet_schema_digest": "b" * 64,
+                    "packet": packet,
+                    "escalation_packet": None,
+                }
+            ]
+        },
+    )
+
+    result = json.loads(
+        handler(
+            {
+                "operation": "compile",
+                "request_text": "Update Acme",
+                "context_refs": ["companies/acme"],
+            }
+        )
+    )
+
+    assert result == {
+        "schema_version": 1,
+        "kind": "kb_bounded_interaction_result",
+        "operation": "compile",
+        "status": "decision_required",
+        "turn": "continue_bounded_turn",
+        "packet_schema_digest": "b" * 64,
+        "packet": packet,
+        "escalation_packet": None,
+    }
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_request_compile",
+            {
+                "request_text": "Update Acme",
+                "context_refs": ["companies/acme"],
+            },
+        )
+    ]
+    assert "transcript" not in json.dumps(result).lower()
+
+
+def test_r3_bounded_interaction_allows_one_repair_then_starts_new_turn(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    repair = {
+        "status": "repair_required",
+        "action_id": "object.update",
+        "field_errors": [{"path": "$.text", "message": "required"}],
+        "repair_attempts_remaining": 1,
+    }
+    ctx, handler = _bounded_handler(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {"mcp_kb_engine_prod_action_preview": [repair, repair]},
+    )
+    base = {
+        "operation": "preview",
+        "packet_id": "ip-123",
+        "request_digest": "a" * 64,
+        "action_id": "object.update",
+        "schema_digest": "b" * 64,
+        "arguments": {"object_path": "companies/acme"},
+    }
+
+    first = json.loads(handler({**base, "repair_attempt": 0}))
+    exhausted = json.loads(handler({**base, "repair_attempt": 1}))
+
+    assert first["status"] == "repair_required"
+    assert first["turn"] == "continue_bounded_turn"
+    assert first["preview"]["repair_attempts_remaining"] == 1
+    assert exhausted["status"] == "escalation_required"
+    assert exhausted["turn"] == "new_bounded_turn"
+    assert exhausted["preview"]["repair_attempts_remaining"] == 0
+    assert exhausted["preview"]["escalation"] == {
+        "reason_code": "schema_repair_exhausted",
+        "blocking": True,
+    }
+    assert len(ctx.calls) == 2
+    assert all("repair_attempt" not in call_args for _name, call_args in ctx.calls)
+
+
+def test_r3_bounded_interaction_confirm_uses_handle_and_reports_engine_truth(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin_module(monkeypatch, tmp_path)
+    engine_truth = {
+        "status": "applied",
+        "ok": True,
+        "idempotent_replay": False,
+        "request": {"status": "accepted"},
+        "outcome": {"status": "completed"},
+        "receipt": {"receipt_id": "rcpt-1"},
+        "publication": {"status": "not_requested"},
+        "authorization": {"mode": "standing_safe_write"},
+    }
+    ctx, handler = _bounded_handler(
+        plugin,
+        monkeypatch,
+        tmp_path,
+        {"mcp_kb_engine_prod_action_confirm": [engine_truth]},
+    )
+
+    result = json.loads(
+        handler(
+            {
+                "operation": "confirm",
+                "preview_id": "pv-123",
+                "preview_digest": "c" * 64,
+            }
+        )
+    )
+
+    assert result["status"] == "applied"
+    assert result["turn"] == "terminal"
+    assert result["terminal"] == {
+        key: engine_truth[key]
+        for key in (
+            "ok",
+            "idempotent_replay",
+            "request",
+            "outcome",
+            "receipt",
+            "publication",
+            "authorization",
+        )
+    }
+    assert ctx.calls == [
+        (
+            "mcp_kb_engine_prod_action_confirm",
+            {"preview_id": "pv-123", "preview_digest": "c" * 64},
+        )
+    ]

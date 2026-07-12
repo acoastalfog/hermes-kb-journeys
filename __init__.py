@@ -91,12 +91,13 @@ SYNC_RUN_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 COMPLETION_READBACK_TTL_SECONDS = 5 * 60
 COMPLETION_CLOCK_SKEW_SECONDS = 30
 INTEGRATION_TRANSPORT_TOOL = "kb_integration_transport"
+BOUNDED_INTERACTION_TOOL = "kb_bounded_interaction"
 ENGINE_DISTRIBUTION = "kb-engine"
-ENGINE_VERSION = "0.45.61"
+ENGINE_VERSION = "0.46.4"
 SOURCE_ACCESS_DISTRIBUTION = "kb-source-access"
-SOURCE_ACCESS_VERSION = "0.45.61"
+SOURCE_ACCESS_VERSION = "0.46.4"
 OWNER_INSTALL_REMEDIATION = (
-    "install the exact kb-engine==0.45.61 and kb-source-access==0.45.61 "
+    "install the exact kb-engine==0.46.4 and kb-source-access==0.46.4 "
     "artifacts pinned by hermes-kb-journeys"
 )
 CALENDAR_INTEGRATION_EFFECT_ID = "calendar.publication.reconcile_many"
@@ -309,10 +310,23 @@ def _parse_aware_timestamp(value: Any) -> _dt.datetime:
     return parsed.astimezone(_dt.UTC)
 
 
+_JSON_SCHEMA_TYPES = {
+    "array", "boolean", "integer", "null", "number", "object", "string"
+}
+
+
+def _schema_types(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        return set(value)
+    return set()
+
+
 def _schema_declared_types(schema: Any) -> set[str]:
     if not isinstance(schema, dict):
         return set()
-    found = {schema["type"]} if isinstance(schema.get("type"), str) else set()
+    found = _schema_types(schema.get("type"))
     for branch in schema.get("allOf") or []:
         found.update(_schema_declared_types(branch))
     return found
@@ -322,7 +336,7 @@ def _schema_denies_type(schema: Any, schema_type: str) -> bool:
     """Return whether a denial schema covers every value of ``schema_type``."""
     if not isinstance(schema, dict):
         return False
-    if schema.get("type") == schema_type:
+    if schema_type in _schema_types(schema.get("type")):
         return True
     branches = schema.get("anyOf")
     if isinstance(branches, list) and any(
@@ -340,7 +354,9 @@ def _schema_denies_type(schema: Any, schema_type: str) -> bool:
     )
 
 
-def _value_matches_schema_type(value: Any, schema_type: str) -> bool:
+def _value_matches_schema_type(value: Any, schema_type: Any) -> bool:
+    if isinstance(schema_type, list):
+        return any(_value_matches_schema_type(value, item) for item in schema_type)
     if schema_type == "null":
         return value is None
     if schema_type == "boolean":
@@ -496,19 +512,13 @@ def _schema_shape_is_concrete(schema: Any, *, require_required: bool) -> bool:
             )
         )
     properties = schema.get("properties")
-    if schema.get("type") == "object":
+    schema_types = _schema_types(schema.get("type"))
+    if schema_types == {"object"}:
         required = schema.get("required")
         if not isinstance(properties, dict) or not properties:
             return False
         return not require_required or (isinstance(required, list) and bool(required))
-    return schema.get("type") in {
-        "array",
-        "boolean",
-        "integer",
-        "null",
-        "number",
-        "string",
-    }
+    return bool(schema_types) and schema_types <= _JSON_SCHEMA_TYPES
 
 
 def _required_branch_is_concrete(parent: Any, branch: Any) -> bool:
@@ -584,11 +594,16 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
                 raise ValueError(f"{path}.oneOf contains duplicate branches")
         has_shape = True
     schema_type = schema.get("type")
+    schema_types = _schema_types(schema_type)
     if schema_type is not None:
-        if schema_type not in {"array", "boolean", "integer", "null", "number", "object", "string"}:
+        if (
+            not schema_types
+            or not schema_types <= _JSON_SCHEMA_TYPES
+            or (isinstance(schema_type, list) and len(schema_type) != len(schema_types))
+        ):
             raise ValueError(f"{path} has an unsupported type")
         has_shape = True
-    if schema_type == "object":
+    if "object" in schema_types:
         properties = schema.get("properties", {})
         if not isinstance(properties, dict):
             raise ValueError(f"{path}.properties must be an object")
@@ -611,7 +626,7 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
         if len(required) != len(set(required)):
             raise ValueError(f"{path}.required must be unique")
         has_shape = True
-    if schema_type == "array":
+    if "array" in schema_types:
         if "items" not in schema:
             raise ValueError(f"{path}.items is required for arrays")
         _validate_schema(schema["items"], path=f"{path}.items")
@@ -632,7 +647,10 @@ def _validate_schema(schema: Any, *, path: str = "$") -> None:
             raise ValueError(f"{path}.not must be a non-empty schema")
         _validate_schema(denied, path=f"{path}.not")
         has_shape = True
-        if schema_type and _schema_denies_type(denied, schema_type):
+        if schema_types and all(
+            _schema_denies_type(denied, declared_type)
+            for declared_type in schema_types
+        ):
             raise ValueError(f"{path} excludes its own type")
     if "allOf" in schema:
         declared_types = _schema_declared_types(schema)
@@ -737,7 +755,8 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
                 error = _runtime_schema_error(item, item_schema, path=f"{path}[{index}]")
                 if error:
                     return error
-    if schema_type == "string" and isinstance(value, str):
+    runtime_types = _schema_types(schema_type)
+    if "string" in runtime_types and isinstance(value, str):
         if isinstance(schema.get("minLength"), int) and len(value) < schema["minLength"]:
             return f"{path}: is shorter than minLength"
         if isinstance(schema.get("maxLength"), int) and len(value) > schema["maxLength"]:
@@ -745,7 +764,10 @@ def _runtime_schema_error(value: Any, schema: Any, *, path: str = "$") -> str | 
         pattern = schema.get("pattern")
         if isinstance(pattern, str) and re.search(pattern, value) is None:
             return f"{path}: does not match pattern"
-    if schema_type in {"integer", "number"} and _value_matches_schema_type(value, schema_type):
+    numeric_types = runtime_types.intersection({"integer", "number"})
+    if numeric_types and any(
+        _value_matches_schema_type(value, numeric_type) for numeric_type in numeric_types
+    ):
         if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
             return f"{path}: is below minimum"
         if isinstance(schema.get("maximum"), (int, float)) and value > schema["maximum"]:
@@ -10418,57 +10440,29 @@ def _daily_integration_closeout_serial(
                 or "kb.sync did not record the external effect",
             }
 
-    _tool, preview, errors = _dispatch_first(
+    _tool, terminal, errors = _dispatch_first(
         ctx,
         target,
         [
             (
-                "publication.daily_integration_preview",
-                {"run_id": run_id, "calendar_receipt": closeout},
-            )
-        ],
-    )
-    if not isinstance(preview, dict) or preview.get("ok") is not True:
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "publication_preview",
-            "calendar": {
-                "status": closeout.get("status"),
-                "counts": closeout.get("counts"),
-                "entity_count": len(envelopes),
-            },
-            "error": _clip("; ".join(errors), 240) or "Git publication is held",
-        }
-    preview_digest = str(preview.get("preview_digest") or "")
-    if not DESCRIPTOR_DIGEST_RE.fullmatch(preview_digest):
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "publication_preview",
-            "error": "publication preview did not return an exact digest",
-        }
-    _tool, publication, errors = _dispatch_first(
-        ctx,
-        target,
-        [
-            (
-                "publication.daily_integration_apply",
+                "kb.sync.resume",
                 {
                     "run_id": run_id,
-                    "calendar_receipt": closeout,
-                    "preview_digest": preview_digest,
-                    "actor": "hermes-relay",
-                    "source": "kb_journeys.daily_integration",
-                    "session_id": str(args.get("session_id") or ""),
+                    "response": {
+                        "schema_version": 1,
+                        "kind": "kb.sync.daily_integration_finalize",
+                        "calendar_receipt": closeout,
+                        "actor": "hermes-relay",
+                        "source": "kb_journeys.daily_integration",
+                        "session_id": str(args.get("session_id") or ""),
+                    },
                 },
             )
         ],
     )
+    publication = _engine_publication_receipt_from_packet(terminal)
     if (
-        not isinstance(publication, dict)
+        not isinstance(terminal, dict)
         or publication.get("ok") is not True
         or publication.get("status") not in {"published", "noop"}
     ):
@@ -10476,50 +10470,10 @@ def _daily_integration_closeout_serial(
             "accepted": False,
             "complete": False,
             "run_id": run_id,
-            "stage": "publication_apply",
-            "error": _clip("; ".join(errors), 240)
-            or "Git publication did not pass readback",
-        }
-    publication_session_id = str(publication.get("session_id") or "").strip()
-    publication_replay = publication.get("idempotent_replay") is True
-    if not publication_session_id or (
-        not publication_replay
-        and publication_session_id != str(args.get("session_id") or "")
-    ):
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "publication_apply",
-            "error": "publication session binding is invalid",
-        }
-    try:
-        publication_packet = _integration_publication_result_packet(
-            sync,
-            run_id=run_id,
-            publication=publication,
-        )
-    except ValueError as exc:
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "engine_publication_packet",
-            "error": _clip(str(exc), 240),
-        }
-    _tool, terminal, errors = _dispatch_first(
-        ctx,
-        target,
-        [("kb.sync.resume", {"run_id": run_id, "response": publication_packet})],
-    )
-    if not isinstance(terminal, dict):
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
             "stage": "engine_publication_record",
             "error": _clip("; ".join(errors), 240)
-            or "kb.sync did not record publication",
+            or _clip((terminal or {}).get("reason"), 240)
+            or "kb.sync did not finalize publication",
         }
     acknowledgement_error = _acknowledge_calendar_delivery(
         envelopes,
@@ -10643,47 +10597,25 @@ def _legacy_daily_integration_closeout_serial(
         run_id=run_id,
         calendar_observation=calendar_observation,
     )
-    _tool, preview, errors = _dispatch_first(
-        ctx,
-        target,
-        [("publication.daily_integration_preview", {"run_id": run_id, "calendar_receipt": closeout})],
-    )
-    if not isinstance(preview, dict) or preview.get("ok") is not True:
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "publication_preview",
-            "calendar": {
-                "status": closeout.get("status"),
-                "counts": closeout.get("counts"),
-                "entity_count": len(envelopes),
-            },
-            "error": _clip("; ".join(errors), 240) or "Git publication is held",
-        }
-    preview_digest = str(preview.get("preview_digest") or "")
-    if not DESCRIPTOR_DIGEST_RE.fullmatch(preview_digest):
-        return {
-            "accepted": False,
-            "complete": False,
-            "run_id": run_id,
-            "stage": "publication_preview",
-            "error": "publication preview did not return an exact digest",
-        }
     _tool, publication, errors = _dispatch_first(
         ctx,
         target,
-        [(
-            "publication.daily_integration_apply",
-            {
-                "run_id": run_id,
-                "calendar_receipt": closeout,
-                "preview_digest": preview_digest,
-                "actor": "hermes-relay",
-                "source": "kb_journeys.daily_integration",
-                "session_id": str(args.get("session_id") or ""),
-            },
-        )],
+        [
+            (
+                "kb.sync.resume",
+                {
+                    "run_id": run_id,
+                    "response": {
+                        "schema_version": 1,
+                        "kind": "kb.sync.daily_integration_finalize",
+                        "calendar_receipt": closeout,
+                        "actor": "hermes-relay",
+                        "source": "kb_journeys.daily_integration",
+                        "session_id": str(args.get("session_id") or ""),
+                    },
+                },
+            )
+        ],
     )
     if not isinstance(publication, dict) or publication.get("ok") is not True \
        or publication.get("status") not in {"published", "noop"}:
@@ -10793,7 +10725,7 @@ def _legacy_daily_integration_closeout_serial(
 
 
 def _register_integration_transport(ctx: Any) -> None:
-    if len(_descriptor_allowlist()) > 13:
+    if len(_descriptor_allowlist()) > 12:
         logger.error("kb_journeys: integration transport would exceed the 14-tool cap")
         return
     try:
@@ -11260,6 +11192,275 @@ def _register_integration_transport(ctx: Any) -> None:
             "Bounded read-only context, source-packet, semantic-review, and Daily Integration closeout transport."
         ),
         emoji="📦",
+    )
+
+
+def _register_bounded_interaction(ctx: Any) -> None:
+    """Expose one compact model-facing rail over engine-owned interaction tools."""
+
+    required = {"request.compile", "action.preview", "action.confirm"}
+    if len(_descriptor_allowlist()) > 12:
+        logger.error("kb_journeys: bounded interaction would exceed the 14-tool cap")
+        return
+    if not required <= _descriptor_allowlist():
+        logger.error("kb_journeys: bounded interaction descriptors are unavailable")
+        return
+
+    schema = {
+        "name": BOUNDED_INTERACTION_TOOL,
+        "description": (
+            "Advance exactly one engine-compiled KB interaction. Compile presents one "
+            "bounded semantic decision, preview permits at most one schema repair, and "
+            "confirm consumes only the retained preview handle and digest. Start a new "
+            "bounded turn whenever the result requires escalation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["compile", "preview", "confirm"],
+                },
+                "request_text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000,
+                    "description": "Ordinary request text for this turn only; never a transcript.",
+                },
+                "context_refs": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "maxItems": 3,
+                    "uniqueItems": True,
+                },
+                "packet_id": {"type": "string", "minLength": 1},
+                "request_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "action_id": {"type": "string", "minLength": 1},
+                "schema_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "arguments": {"type": "object", "additionalProperties": True},
+                "repair_attempt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Zero for the initial preview and one for its only repair.",
+                },
+                "preview_id": {"type": "string", "minLength": 1},
+                "preview_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "authorization_ref": {"type": "string", "minLength": 1},
+            },
+            "required": ["operation"],
+            "oneOf": [
+                {
+                    "properties": {"operation": {"const": "compile"}},
+                    "required": ["request_text"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["packet_id"]},
+                            {"required": ["preview_id"]},
+                            {"required": ["arguments"]},
+                            {"required": ["repair_attempt"]},
+                        ]
+                    },
+                },
+                {
+                    "properties": {"operation": {"const": "preview"}},
+                    "required": [
+                        "packet_id",
+                        "request_digest",
+                        "action_id",
+                        "schema_digest",
+                        "arguments",
+                        "repair_attempt",
+                    ],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["request_text"]},
+                            {"required": ["context_refs"]},
+                            {"required": ["preview_id"]},
+                            {"required": ["preview_digest"]},
+                            {"required": ["authorization_ref"]},
+                        ]
+                    },
+                },
+                {
+                    "properties": {"operation": {"const": "confirm"}},
+                    "required": ["preview_id", "preview_digest"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["request_text"]},
+                            {"required": ["context_refs"]},
+                            {"required": ["packet_id"]},
+                            {"required": ["request_digest"]},
+                            {"required": ["action_id"]},
+                            {"required": ["schema_digest"]},
+                            {"required": ["arguments"]},
+                            {"required": ["repair_attempt"]},
+                        ]
+                    },
+                },
+            ],
+            "additionalProperties": False,
+        },
+    }
+
+    def _failure(operation: str, errors: list[str]) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "kb_bounded_interaction_result",
+            "operation": operation,
+            "status": "temporarily_unavailable",
+            "turn": "new_bounded_turn",
+            "error": _clip("; ".join(errors), 240) or "knowledge service unavailable",
+        }
+
+    def _handler(args: dict[str, Any], **_runtime: Any) -> str:
+        operation = str(args.get("operation") or "").strip()
+        target = _mcp_target()
+        if operation == "compile":
+            engine_args: dict[str, Any] = {"request_text": args.get("request_text")}
+            if "context_refs" in args:
+                engine_args["context_refs"] = args["context_refs"]
+            _tool, payload, errors = _dispatch_first(
+                ctx, target, [("request.compile", engine_args)]
+            )
+            if not isinstance(payload, dict):
+                result = _failure(operation, errors)
+            else:
+                packet = payload.get("packet")
+                escalation = payload.get("escalation_packet")
+                requires_escalation = escalation is not None
+                result = {
+                    "schema_version": 1,
+                    "kind": "kb_bounded_interaction_result",
+                    "operation": operation,
+                    "status": (
+                        "escalation_required" if requires_escalation else "decision_required"
+                    ),
+                    "turn": (
+                        "new_bounded_turn" if requires_escalation else "continue_bounded_turn"
+                    ),
+                    "packet_schema_digest": payload.get("packet_schema_digest"),
+                    "packet": packet,
+                    "escalation_packet": escalation,
+                }
+        elif operation == "preview":
+            engine_args = {
+                key: args[key]
+                for key in (
+                    "packet_id",
+                    "request_digest",
+                    "action_id",
+                    "schema_digest",
+                    "arguments",
+                )
+            }
+            _tool, payload, errors = _dispatch_first(
+                ctx, target, [("action.preview", engine_args)]
+            )
+            if not isinstance(payload, dict):
+                result = _failure(operation, errors)
+            else:
+                status = str(payload.get("status") or "")
+                repair_attempt = int(args.get("repair_attempt", 0))
+                if status == "repair_required" and repair_attempt >= 1:
+                    status = "escalation_required"
+                    payload = {
+                        "status": status,
+                        "action_id": payload.get("action_id"),
+                        "repair_attempts_remaining": 0,
+                        "escalation": {
+                            "reason_code": "schema_repair_exhausted",
+                            "blocking": True,
+                        },
+                    }
+                result = {
+                    "schema_version": 1,
+                    "kind": "kb_bounded_interaction_result",
+                    "operation": operation,
+                    "status": status,
+                    "turn": (
+                        "new_bounded_turn"
+                        if status == "escalation_required"
+                        else "continue_bounded_turn"
+                    ),
+                    "preview": {
+                        key: payload[key]
+                        for key in (
+                            "action_id",
+                            "preview_id",
+                            "preview_digest",
+                            "summary",
+                            "affected_refs",
+                            "risk",
+                            "authorization_mode",
+                            "omissions",
+                            "owner_route",
+                            "field_errors",
+                            "repair_attempts_remaining",
+                            "escalation",
+                        )
+                        if key in payload
+                    },
+                }
+        elif operation == "confirm":
+            engine_args = {
+                "preview_id": args.get("preview_id"),
+                "preview_digest": args.get("preview_digest"),
+            }
+            if "authorization_ref" in args:
+                engine_args["authorization_ref"] = args["authorization_ref"]
+            _tool, payload, errors = _dispatch_first(
+                ctx, target, [("action.confirm", engine_args)]
+            )
+            if not isinstance(payload, dict):
+                result = _failure(operation, errors)
+            else:
+                result = {
+                    "schema_version": 1,
+                    "kind": "kb_bounded_interaction_result",
+                    "operation": operation,
+                    "status": str(payload.get("status") or "unknown"),
+                    "turn": "terminal",
+                    "terminal": {
+                        key: payload[key]
+                        for key in (
+                            "ok",
+                            "idempotent_replay",
+                            "request",
+                            "outcome",
+                            "receipt",
+                            "publication",
+                            "authorization",
+                        )
+                        if key in payload
+                    },
+                }
+        else:
+            result = {
+                "schema_version": 1,
+                "kind": "kb_bounded_interaction_result",
+                "operation": operation,
+                "status": "invalid_operation",
+                "turn": "new_bounded_turn",
+            }
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+    ctx.register_tool(
+        name=BOUNDED_INTERACTION_TOOL,
+        toolset="kb_journeys",
+        schema=schema,
+        handler=_handler,
+        description="One bounded compile, preview, or confirm step owned by kb-engine.",
+        emoji="🧭",
     )
 
 
@@ -12843,6 +13044,7 @@ def register(ctx: Any) -> None:
         except Exception:
             logger.debug("kb_journeys: failed to register /%s", command, exc_info=True)
     _register_integration_transport(ctx)
+    _register_bounded_interaction(ctx)
     _activate_probe_telemetry(ctx)
     ctx.register_hook("transform_tool_result", _compact_attention_tool_result)
     ctx.register_hook("pre_gateway_dispatch", build_pre_gateway_dispatch_hook(ctx))
