@@ -1158,297 +1158,23 @@ def test_sync_packet_transport_does_not_unlink_when_open_inode_content_changes(
     assert packet_path.read_text(encoding="utf-8") == "replacement content"
 
 
-def test_context_search_reuses_the_single_transport_without_a_sync_run(
+def test_conversational_meeting_capture_uses_generated_engine_actions_only(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakePacketTransportContext()
-    calls = []
 
-    class Facade:
-        def dispatch(self, source_id, operation, params):
-            calls.append((source_id, operation, params))
-            if source_id == "m365.calendar" and operation == "fetch":
-                return {"status": "ok", "result": {"item": {"external_id": "event-1"}}}
-            if source_id == "m365.email":
-                return {"status": "unavailable", "error_code": "mail_unavailable"}
-            rows = {
-                "m365.calendar": [
-                    {
-                        "ref": "sar1.calendar",
-                        "summary": {
-                            "subject": "Acme review",
-                            "start": "2026-07-08T10:00:00Z",
-                        },
-                    }
-                ],
-                "travel.tripit": [
-                    {
-                        "ref": "sar1.tripit",
-                        "summary": {
-                            "title": "Acme trip",
-                            "start": "2026-07-07T00:00:00Z",
-                        },
-                    }
-                ],
-                "slack.message": [
-                    {
-                        "ref": "sar1.slack",
-                        "summary": {
-                            "text": "Acme context",
-                            "timestamp": "2026-07-09T00:00:00Z",
-                        },
-                    }
-                ],
-                "m365.meeting_artifact": [],
-            }[source_id]
-            return {
-                "status": "ok",
-                "result": {"items": rows},
-                "continuation": {"complete": True, "cursor": None},
-            }
-
-    monkeypatch.setattr(plugin, "_source_access_facade", lambda: Facade())
-    plugin._register_integration_transport(ctx)
-
-    registered = ctx.registered_tools["kb_integration_transport"]
-    result = json.loads(
-        registered["handler"](
-            {
-                "operation": "context_search",
-                "terms": ["Acme", "Thursday"],
-                "sources": ["meeting_artifacts", "slack", "mail", "tripit", "calendar"],
-                "start": "2026-07-06T00:00:00Z",
-                "end": "2026-07-10T00:00:00Z",
-                "limit_per_source": 5,
-            }
-        )
+    assert plugin._command_from_text(
+        "Start a thread for my meeting with SyntheticGestalt this morning"
+    ) is None
+    assert not hasattr(plugin, "_meeting_handoff_args")
+    assert not hasattr(plugin, "_render_meeting_handoff_command")
+    assert plugin._kb_root_command("meeting SyntheticGestalt -- notes") == (
+        "kbhelp",
+        "meeting SyntheticGestalt -- notes",
     )
-
-    assert result["accepted"] is True
-    assert result["kind"] == "hermes_context_search"
-    assert result["source_access_owner"] == "kb-source-access"
-    assert result["item_count"] == 3
-    assert result["external_effect_started"] is False
-    assert result["durable_kb_write_started"] is False
-    assert result["requested_sources"] == [
-        "meeting_artifacts",
-        "slack",
-        "mail",
-        "tripit",
-        "calendar",
-    ]
-    assert [(row[0], row[1]) for row in calls] == [
-        ("m365.calendar", "search"),
-        ("travel.tripit", "search"),
-        ("m365.email", "search"),
-        ("slack.message", "search"),
-        ("m365.calendar", "fetch"),
-        ("m365.meeting_artifact", "search"),
-    ]
-    assert calls[-1][2]["query"] == "event-1"
-    operation = registered["schema"]["parameters"]["properties"]["operation"]
-    assert "context_search" in operation["enum"]
-    assert registered["schema"]["parameters"]["required"] == ["operation"]
-    assert ctx.calls == []
-
-
-def test_context_tripit_row_excludes_confirmation_material(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-
-    row = plugin._context_tripit_row(
-        {
-            "external_id": "item-1",
-            "type": "flight",
-            "title": "Flight to Seoul",
-            "trip_name": "ICML",
-            "start": "2026-07-05T00:00:00Z",
-            "end": "2026-07-06T00:00:00Z",
-            "location": {"code": "ICN"},
-            "confirmation": "must-not-leave-source-packet",
-            "details": "private connector detail",
-        }
+    assert {"request.compile", "action.preview", "action.confirm"} <= set(
+        plugin._descriptor_allowlist()
     )
-
-    assert row["source"] == "tripit"
-    assert row["location"] == "ICN"
-    assert "confirmation" not in row
-    assert "details" not in row
-
-
-def test_context_search_rejects_an_unsafe_window_before_any_source_read(
-    tmp_path, monkeypatch
-):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    ctx = FakePacketTransportContext()
-    monkeypatch.setattr(
-        plugin,
-        "_source_access_facade",
-        lambda: pytest.fail("source read must not start"),
-    )
-    plugin._register_integration_transport(ctx)
-
-    result = json.loads(
-        ctx.registered_tools["kb_integration_transport"]["handler"](
-            {
-                "operation": "context_search",
-                "terms": ["Acme"],
-                "sources": ["calendar"],
-                "start": "2026-01-01T00:00:00Z",
-                "end": "2026-07-10T00:00:00Z",
-            }
-        )
-    )
-
-    assert result["accepted"] is False
-    assert "45 days" in result["error"]
-    assert ctx.calls == []
-
-
-def test_context_command_rejects_general_shell_execution(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-
-    with pytest.raises(ValueError, match="not allowlisted"):
-        plugin._run_context_command(["sh", "-c", "echo unsafe"])
-
-
-def test_context_command_supplies_a_stable_harness_identity(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    monkeypatch.delenv("KB_HARNESS_ID", raising=False)
-    monkeypatch.setattr(plugin.shutil, "which", lambda _name: "/usr/bin/calendar-cli")
-    seen = {}
-
-    def run(argv, **kwargs):
-        seen.update(kwargs["env"])
-        return type("Result", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
-
-    monkeypatch.setattr(plugin.subprocess, "run", run)
-    plugin._run_context_command(["calendar-cli", "find"])
-
-    assert seen["KB_HARNESS_ID"] == "hermes-context"
-
-
-def test_context_slack_search_uses_one_bounded_window(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    calls = []
-
-    def run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return 75, "", "synthetic source failure"
-
-    monkeypatch.setattr(plugin, "_run_context_command", run)
-    status, rows = plugin._search_slack_context(
-        start=plugin._context_timestamp("2026-07-06T00:00:00Z", field="start"),
-        end=plugin._context_timestamp("2026-07-13T00:00:00Z", field="end"),
-        tokens=["acme"],
-        limit=5,
-    )
-
-    argv = calls[0][0]
-    assert argv[argv.index("--window-days") + 1] == "7"
-    assert status["status"] == "degraded"
-    assert rows == []
-
-
-def test_context_calendar_search_filters_date_cli_results_to_exact_utc_window(
-    tmp_path, monkeypatch
-):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    calls = []
-
-    def run(argv, **_kwargs):
-        calls.append(argv)
-        return (
-            0,
-            json.dumps(
-                {
-                    "success": True,
-                    "data": [
-                        {
-                            "id": "weak-body-match",
-                            "subject": "Weekly sync",
-                            "bodyPreview": "SK presentation is one agenda topic",
-                            "start": {
-                                "dateTime": "2026-07-08T15:30:00",
-                                "timeZone": "UTC",
-                            },
-                            "end": {
-                                "dateTime": "2026-07-08T16:00:00",
-                                "timeZone": "UTC",
-                            },
-                        },
-                        {
-                            "id": "inside",
-                            "subject": "SK presentation",
-                            "start": {
-                                "dateTime": "2026-07-08T16:00:00",
-                                "timeZone": "UTC",
-                            },
-                            "end": {
-                                "dateTime": "2026-07-08T17:00:00",
-                                "timeZone": "UTC",
-                            },
-                        },
-                        {
-                            "id": "outside",
-                            "subject": "Outside exact bound",
-                            "start": {
-                                "dateTime": "2026-07-09T16:00:00",
-                                "timeZone": "UTC",
-                            },
-                            "end": {
-                                "dateTime": "2026-07-09T17:00:00",
-                                "timeZone": "UTC",
-                            },
-                        },
-                    ],
-                }
-            ),
-            "",
-        )
-
-    monkeypatch.setattr(plugin, "_run_context_command", run)
-    status, rows = plugin._search_calendar_context(
-        start=plugin._context_timestamp("2026-07-08T15:00:00Z", field="start"),
-        end=plugin._context_timestamp("2026-07-09T15:00:00Z", field="end"),
-        tokens=["sk"],
-        limit=5,
-    )
-
-    argv = calls[0]
-    assert argv[argv.index("--after") + 1] == "2026-07-08"
-    assert argv[argv.index("--before") + 1] == "2026-07-10"
-    assert status["fetched_count"] == 3
-    assert status["observed_count"] == 2
-    assert [row["ref"] for row in rows] == ["inside", "weak-body-match"]
-
-
-def test_context_meeting_search_skips_future_events(tmp_path, monkeypatch):
-    plugin = _load_plugin_module(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        plugin,
-        "_run_context_command",
-        lambda *_args, **_kwargs: pytest.fail(
-            "future event must not trigger transcript lookup"
-        ),
-    )
-
-    status, rows = plugin._search_meeting_artifacts_context(
-        [
-            {
-                "ref": "future-event",
-                "title": "Future meeting",
-                "end": {"dateTime": "2099-01-01T01:00:00", "timeZone": "UTC"},
-            }
-        ],
-        limit=5,
-    )
-
-    assert status["status"] == "degraded"
-    assert status["error"] == "no resolved calendar event was available"
-    assert rows == []
-
 
 def test_semantic_batch_transport_returns_the_exact_engine_packet_without_local_compaction(
     tmp_path, monkeypatch
@@ -4495,8 +4221,8 @@ def test_generated_descriptor_bundle_is_strict_and_legacy_free(tmp_path, monkeyp
     assert source["schema_version"] == 1
     assert source["profile"] == "journey_first_strict"
     assert source["selection"] == "primary_chat"
-    assert source["engine_version"] == "0.47.0"
-    assert source["engine_source_revision"] == "40e909b032e0df3c8872da3bb4a5f6d030bcddb6"
+    assert source["engine_version"] == "0.47.2"
+    assert source["engine_source_revision"] == "14802a48f274a87e841b88426c0d18c7861235f2"
     assert source["digest"].startswith("sha256:")
     assert source["engine_version"]
     assert len(source["tools"]) == 12
@@ -4723,7 +4449,6 @@ def test_unconstrained_export_blocks_descriptor_dispatch(tmp_path, monkeypatch):
         ("kbruns", ""),
         ("kbreview", ""),
         ("kbpublish", ""),
-        ("kbmeeting", ""),
     ],
 )
 def test_invalid_descriptor_bundle_blocks_every_root_dispatch(command, args, tmp_path, monkeypatch):
@@ -5165,9 +4890,9 @@ def test_readme_and_manifest_define_real_rollback_contract():
     assert "reinstalling that `previous_ref`" in readme
     assert "Removing or renaming" in readme
     assert "bundled fallback" not in readme.lower()
-    assert manifest["version"] == "0.11.0"
+    assert manifest["version"] == "0.11.1"
     assert project["project"]["version"] == manifest["version"]
-    assert manifest["migrations"][-1]["version"] == "0.11.0"
+    assert manifest["migrations"][-1]["version"] == "0.11.1"
     assert "packet_transport" in readme
     assert "deprecated compatibility branch" in readme
     assert manifest["install_receipt"]["owner"] == "noc"
@@ -5269,7 +4994,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     workflow = yaml.safe_load(workflow_text)
     assert (
         workflow["jobs"]["contract"]["env"]["KB_ENGINE_DESCRIPTOR_REF"]
-        == "40e909b032e0df3c8872da3bb4a5f6d030bcddb6"
+        == "14802a48f274a87e841b88426c0d18c7861235f2"
     )
     steps = workflow["jobs"]["contract"]["steps"]
     engine_checkouts = [
@@ -5291,7 +5016,7 @@ def test_ci_checks_out_exact_private_engine_ref_with_read_only_deploy_key():
     candidate_job = workflow["jobs"]["engine-candidate-contract"]
     assert (
         candidate_job["env"]["KB_ENGINE_CANDIDATE_REF"]
-        == "40e909b032e0df3c8872da3bb4a5f6d030bcddb6"
+        == "14802a48f274a87e841b88426c0d18c7861235f2"
     )
     candidate_checkouts = [
         step
