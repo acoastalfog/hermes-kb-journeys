@@ -21,9 +21,9 @@
       "output_schema_digest": "sha256:537e42ece8af93536fb8af1fdefbe007a08c68e7553eac7f1f6ef9f0cd509823"
     }
   ],
-  "digest": "sha256:b8cdb5da5fa9ddba0b57286e7bbb9aeb4db2dbf9507158f74bc8af2f13995880",
-  "engine_source_revision": "40e909b032e0df3c8872da3bb4a5f6d030bcddb6",
-  "engine_version": "0.47.0",
+  "digest": "sha256:3c3c46b121e6635d52aa4c25bde89879a9fe46e798bb7d03c4f5de2e8ece5188",
+  "engine_source_revision": "a8b150960685f09f4cb7c7498f8a45f79baa8eb4",
+  "engine_version": "0.47.1",
   "journeys": [
     {
       "confirmation_required": false,
@@ -78,7 +78,7 @@
   "profile": "journey_first_strict",
   "schema_version": 1,
   "selection": "primary_chat",
-  "source_export_digest": "sha256:d1c17dd9bf890db2d35217f04056563056ffe8bdea43ce2e2732ac927f17174f",
+  "source_export_digest": "sha256:e3d316ea67f0982445023373544a71028348b37ed2988d388e373fba654332bd",
   "tools": [
     {
       "annotations": {

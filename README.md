@@ -50,8 +50,8 @@ The loader admits at most 13 generated tools, requires concrete input and output
 and rejects deprecated sync routes. Missing or invalid descriptors fail closed;
 the plugin does not recreate the MCP catalog or supply compatibility aliases.
 
-The committed export is pinned to kb-engine 0.47.0 at revision
-`40e909b032e0df3c8872da3bb4a5f6d030bcddb6`, which owns the exact
+The committed export is pinned to kb-engine 0.47.1 at revision
+`a8b150960685f09f4cb7c7498f8a45f79baa8eb4`, which owns the exact
 `primary_chat` selection and concrete output schemas. No Hermes compatibility
 schema, tool re-selection, or hand-written alias is permitted. The CI
 descriptor job checks out that exact private revision with the repository's
@@ -62,10 +62,10 @@ local test results do not count as a green GitHub workflow.
 The Phase F consumer seam pins two once-built artifacts from that same source
 revision:
 
-- `kb_engine-0.47.0-py3-none-any.whl` —
-  `1026bdff9803cfb45514b87934489bf7589629ea8172f07cb7a74376bdffcd87`
-- `kb_source_access-0.47.0-py3-none-any.whl` —
-  `ffb16ee4de3650029a37eecacc112d97f9b47383df53f4a2712977061b0a3f9c`
+- `kb_engine-0.47.1-py3-none-any.whl` —
+  `fa34feb59723e2315b1ef2093d31bef23c977d696e5681eace9494d7a4d13348`
+- `kb_source_access-0.47.1-py3-none-any.whl` —
+  `5e4fbe2322021995a4acf201e3b131368f110b3b3a85714d7f3c0f37b4a18fd7`
 
 The machine-readable pins live in `.github/candidate-artifacts/`. Candidate CI
 builds both distributions from the exact Git commit, installs both wheels into
@@ -305,11 +305,11 @@ publication, records its exact readback as
 and connector recovery acknowledgement remain Hermes delivery concerns. Exact
 terminal replay performs no calendar effect or Git publication again.
 
-The `context_search` operation now calls the installed Source Access facade for
-Calendar, mail, Slack, meeting artifacts, and the declared TripIt capability.
-Hermes only aggregates opaque refs and bounded connector summaries. A source
-that does not advertise search (currently TripIt) returns its typed degraded
-status instead of falling back to `kb-sync-gather` or a provider CLI.
+Version 0.11.1 retires the plugin-owned `context_search` operation and the
+private `/kb meeting` handoff. Ordinary conversational meeting requests stay
+in the model loop and use the generated `request.compile`, `action.preview`,
+and `action.confirm` contracts. The integration transport remains limited to
+Daily Integration packet, semantic-batch, calendar-closeout, and receipt work.
 
 Before these plans are authored, an unbound TripIt anchor group is merged into
 the unique existing bound Event when the provider source ID matches exactly and
@@ -325,8 +325,8 @@ current-upstream checkout:
 ```bash
 python -m venv .owner-venv
 .owner-venv/bin/pip install \
-  /path/to/kb_engine-0.47.0-py3-none-any.whl \
-  /path/to/kb_source_access-0.47.0-py3-none-any.whl \
+  /path/to/kb_engine-0.47.1-py3-none-any.whl \
+  /path/to/kb_source_access-0.47.1-py3-none-any.whl \
   pytest pyyaml
 env -u PYTHONPATH .owner-venv/bin/python -I -m pytest \
   tests/test_external_plugin_contract.py -q
