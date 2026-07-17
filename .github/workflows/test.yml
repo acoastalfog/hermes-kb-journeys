@@ -1,4 +1,4 @@
-name: test
+name: terminal-retirement
 
 on:
   pull_request:
@@ -9,113 +9,18 @@ permissions:
   contents: read
 
 jobs:
-  engine-candidate-contract:
-    env:
-      KB_ENGINE_CANDIDATE_REF: 14802a48f274a87e841b88426c0d18c7861235f2
+  tombstone:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout exact kb-engine candidate source
-        uses: actions/checkout@v4
-        with:
-          repository: acoastalfog/kb-engine
-          ref: ${{ env.KB_ENGINE_CANDIDATE_REF }}
-          path: kb-engine-candidate
-          ssh-key: ${{ secrets.KB_ENGINE_DEPLOY_KEY }}
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - name: Build source-bound candidate artifact
+      - name: Prove repository is not installable
+        shell: bash
         run: |
-          uv run --with build --with twine --with pyyaml python \
-            kb-engine-candidate/scripts/build_release_artifacts.py \
-            --repo kb-engine-candidate \
-            --ref "$KB_ENGINE_CANDIDATE_REF" \
-            --output kb-engine-candidate-artifacts
-      - name: Build exact Source Access candidate artifact
-        run: |
-          CORE_WHEEL="$GITHUB_WORKSPACE/kb-engine-candidate-artifacts/kb_engine-0.47.2-py3-none-any.whl"
-          uv run --with build --with pyyaml python \
-            kb-engine-candidate/scripts/build_source_access_artifacts.py \
-            --core-wheel "$CORE_WHEEL" \
-            --source-commit "$KB_ENGINE_CANDIDATE_REF" \
-            --output kb-source-access-candidate-artifacts
-      - name: Validate installed candidate goldens
-        env:
-          KB_ENGINE_CANDIDATE_REQUIRED: "1"
-          KB_ENGINE_CANDIDATE_SOURCE_COMMIT: ${{ env.KB_ENGINE_CANDIDATE_REF }}
-          KB_ENGINE_CANDIDATE_SOURCE_CHECKOUT: ${{ github.workspace }}/kb-engine-candidate
-        run: |
-          WHEEL="$GITHUB_WORKSPACE/kb-engine-candidate-artifacts/kb_engine-0.47.2-py3-none-any.whl"
-          SOURCE_WHEEL="$GITHUB_WORKSPACE/kb-source-access-candidate-artifacts/kb_source_access-0.47.2-py3-none-any.whl"
-          export KB_ENGINE_CANDIDATE_WHEEL="$WHEEL"
-          export KB_SOURCE_ACCESS_CANDIDATE_WHEEL="$SOURCE_WHEEL"
-          uv venv .candidate-venv --python 3.12
-          uv pip install --python .candidate-venv/bin/python \
-            "$WHEEL" "$SOURCE_WHEEL" pytest pyyaml
-          env -u PYTHONPATH .candidate-venv/bin/python -I -m pytest \
-            tests/test_external_plugin_contract.py -q -k installed_candidate
-
-  contract:
-    env:
-      KB_ENGINE_DESCRIPTOR_REF: 14802a48f274a87e841b88426c0d18c7861235f2
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        hermes_ref:
-          - v2026.6.19
-          - v2026.7.7.2
-          - main
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: NousResearch/hermes-agent
-          ref: ${{ matrix.hermes_ref }}
-          path: hermes-agent
-      - name: Checkout exact pinned kb-engine descriptor source
-        uses: actions/checkout@v4
-        with:
-          repository: acoastalfog/kb-engine
-          ref: ${{ env.KB_ENGINE_DESCRIPTOR_REF }}
-          path: kb-engine
-          ssh-key: ${{ secrets.KB_ENGINE_DEPLOY_KEY }}
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - name: Install descriptor export dependencies
-        run: python -m pip install jsonschema pyyaml
-      - name: Verify generated descriptors
-        env:
-          KB_ENGINE_SOURCE: ${{ github.workspace }}/kb-engine
-        run: |
-          cp generated/kb-engine-descriptors.json /tmp/committed-kb-engine-descriptors.json
-          scripts/refresh-descriptors.sh
-          diff -u /tmp/committed-kb-engine-descriptors.json generated/kb-engine-descriptors.json
-      - name: Build and install exact owner artifacts
-        run: |
-          uv run --with build --with twine --with pyyaml python \
-            kb-engine/scripts/build_release_artifacts.py \
-            --repo kb-engine \
-            --ref "$KB_ENGINE_DESCRIPTOR_REF" \
-            --output kb-engine-artifacts
-          CORE_WHEEL="$GITHUB_WORKSPACE/kb-engine-artifacts/kb_engine-0.47.2-py3-none-any.whl"
-          uv run --with build --with pyyaml python \
-            kb-engine/scripts/build_source_access_artifacts.py \
-            --core-wheel "$CORE_WHEEL" \
-            --source-commit "$KB_ENGINE_DESCRIPTOR_REF" \
-            --output kb-source-access-artifacts
-          SOURCE_WHEEL="$GITHUB_WORKSPACE/kb-source-access-artifacts/kb_source_access-0.47.2-py3-none-any.whl"
-          uv venv .owner-venv --python 3.12
-          uv pip install --python .owner-venv/bin/python \
-            "$CORE_WHEEL" "$SOURCE_WHEEL" pytest pyyaml
-      - name: Test against Hermes ${{ matrix.hermes_ref }}
-        env:
-          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
-          HERMES_UPSTREAM_REF: ${{ matrix.hermes_ref }}
-        run: env -u PYTHONPATH .owner-venv/bin/python -I -m pytest tests/test_external_plugin_contract.py -q
+          set -euo pipefail
+          test -f README.md
+          grep -q 'terminally deprecated' README.md
+          for path in plugin.yaml pyproject.toml __init__.py generated scripts tests; do
+            test ! -e "$path"
+          done
+          expected=$'.github/workflows/test.yml\n.gitignore\nREADME.md'
+          test "$(git ls-files | sort)" = "$expected"
